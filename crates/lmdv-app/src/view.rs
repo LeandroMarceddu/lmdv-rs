@@ -948,6 +948,7 @@ fn source_editor(cx: &Cx<WindowState>, tab: &Tab, state: &WindowState, kit: &Kit
     let source_font = state.editor_metrics().field(kit.ty.mono);
     let caret = kit.c.text_accent;
     let caret_selection = kit.alpha(caret, 0.28);
+    let spell_underline = c.danger.fg;
     let block_mode = editor.block_mode_active();
     let field = if block_mode {
         el()
@@ -957,7 +958,7 @@ fn source_editor(cx: &Cx<WindowState>, tab: &Tab, state: &WindowState, kit: &Kit
             .label(lmdv_i18n::t!("editor.markdownSource"))
             .caret(caret, caret_selection)
             .w_full()
-            .spans(lmdv_edit::syntax::syntax_spans(&editor.edit, &theme, None))
+            .spans(state.editor_spans(tab, &editor.edit, &theme, None, c.danger.fg))
             .on_edit(|state: &mut WindowState| state.active_editor_edit())
             .on_input_change(|state: &mut WindowState, _| state.editor_changed())
             .on_input_key(|state: &mut WindowState, event, tx| state.editor_key(event, tx))
@@ -1069,7 +1070,7 @@ fn source_editor(cx: &Cx<WindowState>, tab: &Tab, state: &WindowState, kit: &Kit
                 crate::block_ui::BLOCK_ROW_ESTIMATE,
                 |_: &WindowState, index| crate::block_ui::block_field_key(index).into(),
                 move |state: &WindowState, index| {
-                    block_field_row(state, index, source_font, theme, caret, caret_selection)
+                    block_field_row(state, index, source_font, theme, caret, caret_selection, spell_underline)
                 },
             )
             // E-07: the first visible row anchors the source line mapping; the
@@ -1109,6 +1110,7 @@ fn block_field_row(
     theme: SyntaxTheme,
     caret: Color,
     selection: Color,
+    underline: Color,
 ) -> El {
     let Some(block) = state
         .active_tab()
@@ -1118,7 +1120,7 @@ fn block_field_row(
     else {
         return el().h(0.0);
     };
-    let spans = lmdv_edit::syntax::syntax_spans(&block.edit, &theme, None);
+    let spans = state.editor_block_spans(&block.edit, &theme, block.range.clone(), underline);
     text_input(&block.edit, font)
         .label(lmdv_i18n::t!("editor.markdownBlock", "n" => index + 1))
         .caret(caret, selection)

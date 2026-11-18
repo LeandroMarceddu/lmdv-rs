@@ -351,6 +351,32 @@ fn display_math_in_a_paragraph_gets_its_own_line() {
     assert!(text.text.as_deref().unwrap_or("").contains('\n'), "the display formula has its own line");
 }
 
+/// OI-037: the accessibility tree reads the formula's TeX, never the U+FFFC object marker,
+/// in the text runs a screen reader hears and in the names it builds from them.
+#[test]
+fn inline_math_speaks_its_tex_in_the_accessibility_tree() {
+    let scene = Scene::new(MATH).math();
+    let mut runtime = scene.runtime();
+    runtime.frame(0.0);
+    let tree = runtime.accessibility_tree();
+    let mut spoken = Vec::new();
+    for (_, node) in &tree.nodes {
+        if let Some(value) = node.value() {
+            assert!(!value.contains('\u{fffc}'), "{:?} value holds the object marker: {value:?}", node.role());
+            spoken.push(value.to_owned());
+        }
+        if let Some(label) = node.label() {
+            assert!(!label.contains('\u{fffc}'), "{:?} label holds the object marker: {label:?}", node.role());
+        }
+    }
+    assert!(
+        spoken.iter().any(|value| value.contains("Math: E = mc^2")),
+        "the formula is spoken by its TeX: {spoken:?}"
+    );
+    let json = runtime.accessibility_json().to_string();
+    assert!(!json.contains('\u{fffc}'), "no name in the tree holds the object marker: {json}");
+}
+
 #[test]
 fn front_matter_is_a_collapsed_card_by_default() {
     let scene = Scene::new("---\ntitle: A page\ntags: [one, two]\n---\n\n# Body\n");

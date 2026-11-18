@@ -143,6 +143,9 @@ jobs:
     needs: [linux, windows]
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -150,9 +153,20 @@ jobs:
           pattern: "*-release"
           merge-multiple: true
 
+      # A release keeps its curated notes in docs/releases/<tag>.md; without one
+      # (an old tag, a quick patch) GitHub's generated notes stand in.
+      - name: Choose release notes
+        id: notes
+        run: |
+          if [ -f "docs/releases/${GITHUB_REF_NAME}.md" ]; then
+            echo "body=docs/releases/${GITHUB_REF_NAME}.md" >> "$GITHUB_OUTPUT"
+          fi
+          echo "generated=$([ -f "docs/releases/${GITHUB_REF_NAME}.md" ] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           name: lmdv ${{ github.ref_name }}
           files: dist/*
-          generate_release_notes: true
+          body_path: ${{ steps.notes.outputs.body }}
+          generate_release_notes: ${{ steps.notes.outputs.generated }}

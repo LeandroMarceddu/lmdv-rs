@@ -278,6 +278,8 @@ fn a_window_command_is_held_back_while_the_dialog_shows() {
 fn the_dialog_draws_its_sections_controls_and_modal_scrim() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
+    // A dictionary exists, so the editor section shows its spellcheck switch.
+    state.shared().seed_spell(Some(spell_fixture("en_US")), None);
     open(&mut state);
     let mut runtime = runtime(state);
     runtime.frame(0.0);
@@ -324,26 +326,111 @@ fn the_dialog_draws_its_sections_controls_and_modal_scrim() {
 }
 
 #[test]
-fn the_disabled_spellcheck_says_why_and_the_reset_starts_disabled() {
+fn the_spellcheck_row_is_hidden_without_a_dictionary_and_the_reset_starts_disabled() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
+    // Discovery ran and found no dictionary for this machine.
+    state.shared().seed_spell(None, None);
     open(&mut state);
     let mut runtime = runtime(state);
     runtime.frame(0.0);
 
     let tree = runtime.accessibility_json();
-    let spellcheck = a11y(&tree, SETTINGS_SPELLCHECK).expect("the spellcheck switch");
-    assert!(states(spellcheck).contains(&"disabled"), "spellcheck has no engine yet: {:?}", states(spellcheck));
-    let row = a11y(&tree, "settings-row-spellcheck").expect("the spellcheck row");
-    assert_eq!(
-        row.get("description").and_then(|value| value.as_str()),
-        Some("Spellcheck is not available in this build yet.")
-    );
+    assert!(a11y(&tree, SETTINGS_SPELLCHECK).is_none(), "no dictionary, no switch");
+    assert!(a11y(&tree, "settings-row-spellcheck").is_none(), "no dictionary, no row");
 
     let reset = a11y(&tree, SETTINGS_RESET).expect("the reset button");
     assert!(states(reset).contains(&"disabled"), "defaults need no reset: {:?}", states(reset));
     let close = a11y(&tree, SETTINGS_CLOSE_FOOTER).expect("the close button");
     assert!(!states(close).contains(&"disabled"));
+}
+
+/// The fixture dictionary as discovery would report it.
+fn spell_fixture(language: &str) -> lmdv_edit::spell::Availability {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spell/system");
+    lmdv_edit::spell::Availability {
+        files: lmdv_edit::spell::DictionaryFiles {
+            language: language.to_owned(),
+            aff: root.join(format!("{language}.aff")),
+            dic: root.join(format!("{language}.dic")),
+        },
+        fallback: false,
+    }
+}
+
+#[test]
+fn the_spellcheck_switch_is_enabled_with_a_dictionary_and_persists() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.shared().seed_spell(Some(spell_fixture("en_US")), None);
+    open(&mut state);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+
+    let tree = runtime.accessibility_json();
+    let switch = a11y(&tree, SETTINGS_SPELLCHECK).expect("the spellcheck switch");
+    assert_eq!(switch.get("role").and_then(|value| value.as_str()), Some("switch"));
+    assert!(!states(switch).contains(&"disabled"), "a dictionary is present: {:?}", states(switch));
+    let row = a11y(&tree, "settings-row-spellcheck").expect("the spellcheck row");
+    assert_eq!(
+        row.get("description").and_then(|value| value.as_str()),
+        Some("Underlines misspelled words with the en_US dictionary.")
+    );
+    assert!(runtime.state.shared().prefs().editor.spellcheck, "on by default (E-32)");
+
+    assert!(runtime.state.settings_activate(SETTINGS_SPELLCHECK));
+    assert!(!runtime.state.shared().prefs().editor.spellcheck, "the switch turns it off");
+    flush(&runtime.state);
+    assert!(!stored(&runtime.state).editor.spellcheck, "editor.spellcheck is the stored key (P-11)");
+
+    assert!(runtime.state.settings_activate(SETTINGS_SPELLCHECK));
+    assert!(runtime.state.shared().prefs().editor.spellcheck, "and back on");
+    flush(&runtime.state);
+    assert!(stored(&runtime.state).editor.spellcheck);
+
+    // Reset returns the editor preference to its default (on).
+    runtime.update(|state, _| {
+        state.set_spellcheck(false);
+        state.reset_settings();
+    });
+    assert!(runtime.state.shared().prefs().editor.spellcheck);
+}
+
+#[test]
+fn a_fallback_dictionary_says_it_stands_in_for_the_interface_language() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let mut availability = spell_fixture("en_US");
+    availability.fallback = true;
+    state.shared().seed_spell(Some(availability), None);
+    open(&mut state);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+
+    let tree = runtime.accessibility_json();
+    let row = a11y(&tree, "settings-row-spellcheck").expect("the spellcheck row");
+    assert_eq!(
+        row.get("description").and_then(|value| value.as_str()),
+        Some("Using the en_US dictionary because no dictionary matches the interface language.")
+    );
+}
+
+#[test]
+fn a_language_change_keeps_the_dictionary_until_the_next_start() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.shared().seed_spell(Some(spell_fixture("it_IT")), None);
+    open(&mut state);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+
+    assert_eq!(runtime.state.spell_availability().map(|found| found.language().to_owned()).as_deref(), Some("it_IT"));
+    runtime.update(|state, _| state.set_language(Some("de".to_owned())));
+    assert_eq!(
+        runtime.state.spell_availability().map(|found| found.language().to_owned()).as_deref(),
+        Some("it_IT"),
+        "E-32: the checker follows the launch's locale, not a live language change"
+    );
 }
 
 #[test]

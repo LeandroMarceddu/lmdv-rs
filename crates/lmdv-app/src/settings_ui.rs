@@ -278,8 +278,7 @@ fn appearance_rows(state: &WindowState, kit: &Kit) -> El {
         ))
 }
 
-/// The Editor section: large-file mode, format bar and the unavailable
-/// spellcheck.
+/// The Editor section: large-file mode, format bar and the spellcheck toggle.
 fn editor_rows(state: &WindowState, kit: &Kit) -> El {
     let prefs = state.shared().prefs();
     let mode_labels: Vec<String> = LARGE_FILE_MODES.iter().copied().map(large_file_label).map(str::to_owned).collect();
@@ -302,7 +301,7 @@ fn editor_rows(state: &WindowState, kit: &Kit) -> El {
         .build(kit)
         .key(SETTINGS_FORMAT_BAR);
 
-    col()
+    let mut rows = col()
         .w_full()
         .child(setting_row(
             "settings-row-large-file",
@@ -317,19 +316,34 @@ fn editor_rows(state: &WindowState, kit: &Kit) -> El {
             Some(lmdv_i18n::t!("set.formatBarDetail")),
             format_bar,
             kit,
-        ))
-        .child(setting_row(
+        ));
+    // E-SPELL: without a dictionary for the launch's locale the row does not
+    // exist at all — no disabled switch, no explanation string.
+    if let Some(availability) = state.spell_availability() {
+        let language = availability.language();
+        let detail = if availability.fallback {
+            lmdv_i18n::t!("set.spellcheckFallback", "dictionary" => language)
+        } else {
+            lmdv_i18n::t!("set.spellcheckDetail", "dictionary" => language)
+        };
+        let spellcheck = Switch::new(prefs.editor.spellcheck)
+            .label(lmdv_i18n::t!("cmd.spell"))
+            .hide_label()
+            .on_toggle(|state: &mut WindowState| {
+                let on = state.shared().prefs().editor.spellcheck;
+                state.set_spellcheck(!on);
+            })
+            .build(kit)
+            .key(SETTINGS_SPELLCHECK);
+        rows = rows.child(setting_row(
             "settings-row-spellcheck",
             lmdv_i18n::t!("cmd.spell"),
-            Some(lmdv_i18n::t!("set.spellcheckDetail")),
-            Switch::new(prefs.editor.spellcheck)
-                .label(lmdv_i18n::t!("cmd.spell"))
-                .hide_label()
-                .disabled(true)
-                .build(kit)
-                .key(SETTINGS_SPELLCHECK),
+            Some(&detail),
+            spellcheck,
             kit,
-        ))
+        ));
+    }
+    rows
 }
 
 /// The General section: language, session restore and the H1 page break.

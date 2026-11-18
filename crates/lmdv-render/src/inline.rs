@@ -148,11 +148,13 @@ impl<'a> Renderer<'a> {
                 self.opts.math.inline(&math.tex, self.theme.body.size)
             };
             let image = image.map(|image| {
-                if math.display {
+                let drawn = if math.display {
                     fit(image, max_width, max_width.max(48.0))
                 } else {
                     fit(image, max_width, self.theme.inline_image_max_height)
-                }
+                };
+                // OI-037: a reader hears the TeX, never the object marker (patch 0003).
+                drawn.label(lmdv_i18n::render(&self.theme.labels.math, &[("tex", &math.tex)]))
             });
             let mut rep = Rep {
                 start: math.range.start,
@@ -241,7 +243,7 @@ impl<'a> Renderer<'a> {
                         }
                         rep.text.push(lmdv_md::OBJECT_CHAR);
                         rep.placeholder = Some(0);
-                        rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h));
+                        rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h).label(alt));
                         rep.uncopied.push(0..3);
                     } else {
                         let fallback = if alt.is_empty() { &self.theme.labels.image } else { alt };
@@ -263,7 +265,7 @@ impl<'a> Renderer<'a> {
                             let draw_w = (draw_h * ratio).min((self.opts.width - 8.0).max(16.0));
                             rep.text.push(lmdv_md::OBJECT_CHAR);
                             rep.placeholder = Some(0);
-                            rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h));
+                            rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h).label(alt));
                             rep.uncopied.push(0..3);
                         } else {
                             rep.text.push_str(&self.theme.labels.image);

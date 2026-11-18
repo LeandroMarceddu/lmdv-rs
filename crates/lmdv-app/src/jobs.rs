@@ -12,12 +12,14 @@
 //! typing-adjacent work; the mailbox contract does not change.
 
 use std::collections::{HashMap, VecDeque};
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lmdv_core::{DocumentId, Draft, Eol, FileMeta, JobId, WindowId};
+use lmdv_core::{DocumentId, Draft, Eol, FileMeta, JobId, TabId, WindowId};
+use lmdv_edit::spell::{Availability, DictionaryFiles, Spell};
 use lmdv_io::AppDirs;
 use lmdv_io::store::{StoreHandle, load_draft};
 use lmdv_io::{ReadError, SaveOutcome, WriteError, read_document, save_document};
@@ -125,6 +127,65 @@ impl WorkerMailbox {
     /// Whether no completion is queued.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+/// A spellcheck completion (ADR-008, E-SPELL).
+///
+/// The dictionary is discovered and loaded on workers, and so is every check:
+/// a frame never reads a Hunspell file or walks a paragraph.
+#[derive(Debug)]
+pub(crate) enum SpellMsg {
+    /// The folders were scanned. `None` means no usable dictionary exists, so
+    /// the settings row stays hidden.
+    Discovered { generation: u64, found: Option<Availability> },
+    /// A dictionary pair was parsed, or could not be.
+    Loaded { generation: u64, result: Result<Arc<Spell>, String> },
+    /// One text's misspelled ranges, in whole-source byte coordinates.
+    Checked { job: JobId, tab: TabId, revision: u64, window: Range<usize>, whole: bool, ranges: Vec<Range<usize>> },
+}
+
+/// The spellchecker's own worker mailbox.
+///
+/// It is separate from [`WorkerMailbox`] so adding spelling never has to teach
+/// the window's job dispatcher a new [`JobMsg`]: the editor drains it in
+/// `poll_spell`.
+#[derive(Default)]
+pub(crate) struct SpellMailbox {
+    jobs: Mutex<VecDeque<SpellMsg>>,
+    waker: Mutex<Option<Waker>>,
+}
+
+impl SpellMailbox {
+    /// An empty mailbox.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Installs the UI waker, or replaces a stale one after a host change.
+    pub(crate) fn attach(&self, waker: Waker) {
+        if let Ok(mut slot) = self.waker.lock() {
+            *slot = Some(waker);
+        }
+    }
+
+    /// Queues a completion and wakes the UI.
+    pub(crate) fn post(&self, msg: SpellMsg) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.push_back(msg);
+        }
+        let waker = self.waker.lock().ok().and_then(|slot| slot.clone());
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
+
+    /// Takes every queued completion in order.
+    pub(crate) fn drain(&self) -> Vec<SpellMsg> {
+        match self.jobs.lock() {
+            Ok(mut jobs) => jobs.drain(..).collect(),
+            Err(_) => Vec::new(),
+        }
     }
 }
 
@@ -433,11 +494,86 @@ impl JobHub {
         }
         job
     }
+
+    /// Scans the Hunspell folders and posts [`SpellMsg::Discovered`].
+    ///
+    /// Reading a folder is file I/O, so it never runs on the UI thread
+    /// (ADR-008). The scan only looks for `.aff`/`.dic` pairs; parsing happens
+    /// in [`Self::load_spelling`] when the editor actually needs the checker.
+    pub(crate) fn discover_spelling(
+        &self,
+        mailbox: Arc<SpellMailbox>,
+        generation: u64,
+        roots: Vec<PathBuf>,
+        tags: Vec<String>,
+    ) -> JobId {
+        let job = self.allocate();
+        let worker_mailbox = mailbox.clone();
+        let spawned = rune::task::spawn("lmdv-spell-dict", move || {
+            let found = lmdv_edit::spell::discover(&roots, &tags);
+            worker_mailbox.post(SpellMsg::Discovered { generation, found });
+        });
+        if spawned.is_err() {
+            mailbox.post(SpellMsg::Discovered { generation, found: None });
+        }
+        job
+    }
+
+    /// Parses one dictionary pair and posts [`SpellMsg::Loaded`].
+    ///
+    /// spellbook's own documentation asks for this to stay off the main
+    /// thread: a large dictionary takes tens to hundreds of milliseconds.
+    pub(crate) fn load_spelling(&self, mailbox: Arc<SpellMailbox>, generation: u64, files: DictionaryFiles) -> JobId {
+        let job = self.allocate();
+        let worker_mailbox = mailbox.clone();
+        let spawned = rune::task::spawn("lmdv-spell-load", move || {
+            let result = Spell::open(&files).map(Arc::new).map_err(|error| error.to_string());
+            worker_mailbox.post(SpellMsg::Loaded { generation, result });
+        });
+        if spawned.is_err() {
+            mailbox
+                .post(SpellMsg::Loaded { generation, result: Err("the spellcheck worker could not start".to_owned()) });
+        }
+        job
+    }
+
+    /// Checks one text slice against a loaded dictionary and posts
+    /// [`SpellMsg::Checked`].
+    ///
+    /// `window` is the slice's whole-source range; the returned ranges are
+    /// shifted into it. `whole` says the slice is the entire buffer, so the
+    /// single field may paint every range.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn check_spelling(
+        &self,
+        mailbox: Arc<SpellMailbox>,
+        tab: TabId,
+        revision: u64,
+        spell: Arc<Spell>,
+        window: Range<usize>,
+        text: String,
+        whole: bool,
+    ) -> JobId {
+        let job = self.allocate();
+        let worker_mailbox = mailbox.clone();
+        let base = window.start;
+        let returned = window.clone();
+        let spawned = rune::task::spawn("lmdv-spell-check", move || {
+            let ranges =
+                spell.check(&text).into_iter().map(|range| base + range.start..base + range.end).collect::<Vec<_>>();
+            worker_mailbox.post(SpellMsg::Checked { job, tab, revision, window: returned, whole, ranges });
+        });
+        if spawned.is_err() {
+            mailbox.post(SpellMsg::Checked { job, tab, revision, window, whole, ranges: Vec::new() });
+        }
+        job
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::path::Path;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -578,6 +714,64 @@ mod tests {
         let drained = mailbox.drain();
         assert_eq!(drained.len(), 2);
         assert!(mailbox.is_empty());
+    }
+
+    /// Waits for one spellcheck completion.
+    fn wait_spell(mailbox: &SpellMailbox) -> SpellMsg {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut drained = mailbox.drain();
+            if let Some(message) = drained.pop() {
+                assert!(drained.is_empty(), "one job, one completion");
+                return message;
+            }
+            assert!(Instant::now() < deadline, "the spellcheck job never reported");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_spell_job_discovers_loads_and_checks_off_the_ui_thread() {
+        let mailbox = Arc::new(SpellMailbox::new());
+        let hub = JobHub::new();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spell/system");
+        hub.discover_spelling(mailbox.clone(), 4, vec![root], vec!["it".to_owned()]);
+        let SpellMsg::Discovered { generation, found } = wait_spell(&mailbox) else {
+            panic!("the discovery completion");
+        };
+        assert_eq!(generation, 4);
+        let found = found.expect("the Italian fixture");
+        assert_eq!(found.language(), "it_IT");
+
+        hub.load_spelling(mailbox.clone(), 5, found.files);
+        let SpellMsg::Loaded { generation, result } = wait_spell(&mailbox) else {
+            panic!("the load completion");
+        };
+        assert_eq!(generation, 5);
+        let spell = result.expect("the fixture dictionary parses");
+
+        // A slice at a non-zero window start returns whole-source ranges.
+        let tab: TabId = 2;
+        hub.check_spelling(mailbox.clone(), tab, 9, spell, 10..20, "ciao wrld".to_owned(), false);
+        let SpellMsg::Checked { tab: checked, revision, window, whole, ranges, .. } = wait_spell(&mailbox) else {
+            panic!("the check completion");
+        };
+        assert_eq!((checked, revision, window, whole), (tab, 9, 10..20, false));
+        assert_eq!(ranges, vec![15..19], "`wrld` is shifted into the source");
+    }
+
+    #[test]
+    fn a_failed_spell_load_reports_itself() {
+        let mailbox = Arc::new(SpellMailbox::new());
+        let hub = JobHub::new();
+        let files = DictionaryFiles {
+            language: "xx_XX".to_owned(),
+            aff: PathBuf::from("/nonexistent/lmdv/xx_XX.aff"),
+            dic: PathBuf::from("/nonexistent/lmdv/xx_XX.dic"),
+        };
+        hub.load_spelling(mailbox.clone(), 1, files);
+        let SpellMsg::Loaded { result, .. } = wait_spell(&mailbox) else { panic!("the load completion") };
+        assert!(result.is_err(), "a missing pair is an error, not a panic");
     }
 
     #[test]

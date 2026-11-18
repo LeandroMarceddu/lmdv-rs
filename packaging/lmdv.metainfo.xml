@@ -49,6 +49,12 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.5.5" date="2026-11-18" type="development">
+      <description>
+        <p>File safety (one document per file, safe Save As, draft recovery),
+          Linux spellcheck and accessible math.</p>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-11-18" type="development">
       <description>
         <p>Pre-1.0 build: native reading, editing, export, search, tabs and

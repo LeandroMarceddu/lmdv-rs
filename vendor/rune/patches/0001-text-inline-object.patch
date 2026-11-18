@@ -163,7 +163,7 @@
  }
  
  impl Span {
-@@ -70,6 +74,94 @@
+@@ -70,6 +74,107 @@
          self.underline = Some(color);
          self
      }
@@ -218,6 +218,9 @@
 +    pub ascent: f32,
 +    /// The room below the baseline in points.
 +    pub descent: f32,
++    /// What a screen reader says where the image draws (see [`Self::label`]): a formula's TeX,
++    /// a picture's alt text. `None` leaves it out of the accessibility text.
++    pub label: Option<Box<str>>,
 +}
 +
 +impl InlineImage {
@@ -225,7 +228,17 @@
 +    /// above the baseline.
 +    pub fn new(pixels: crate::Pixels, width: f32, height: f32) -> InlineImage {
 +        let (width, height) = (length(width), length(height));
-+        InlineImage { pixels, width, height, ascent: height, descent: 0.0 }
++        InlineImage { pixels, width, height, ascent: height, descent: 0.0, label: None }
++    }
++
++    /// The words a screen reader says where the image draws: a formula's TeX, a picture's alt
++    /// text, in place of the [`U+FFFC`](OBJECT_REPLACEMENT) marker the drawn text holds. Empty
++    /// text sets none, and the accessibility text leaves the marker out. The image draws the
++    /// same either way.
++    pub fn label(mut self, text: impl Into<String>) -> InlineImage {
++        let text = text.into();
++        self.label = (!text.trim().is_empty()).then(|| text.into_boxed_str());
++        self
 +    }
 +
 +    /// The room it reserves above the baseline in points, where its top sits.
@@ -258,7 +271,7 @@
  }
  
  /// An atomic pill drawn as a chip: byte range `start..end` of the content, and its leading icon.
-@@ -127,6 +219,10 @@
+@@ -127,6 +232,10 @@
  /// left once, with the low bit set on the box after the label.
  pub(super) const PILL_BOX: u64 = 1 << 62;
  
@@ -269,7 +282,7 @@
  /// Flattens overlapping [`Span`]s into non-overlapping elementary intervals so that Parley's
  /// single `Brush(Ink)` index per glyph run carries the combined colour, background, underline,
  /// weight, italic, and monospace attributes of all overlapping spans.
-@@ -181,6 +277,14 @@
+@@ -181,6 +290,14 @@
              if s.underline.is_some() {
                  m.underline = s.underline;
              }
@@ -284,7 +297,7 @@
              m.italic |= s.italic;
          }
          if let Some(m) = merged {
-@@ -194,6 +298,8 @@
+@@ -194,6 +311,8 @@
                  && last.bg_pad == m.bg_pad
                  && last.underline == m.underline
                  && last.italic == m.italic

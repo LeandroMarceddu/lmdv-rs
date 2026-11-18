@@ -20,6 +20,7 @@ impl<S: 'static> Runtime<S> {
         let handlers = n.handlers.get();
         let input = n.input.as_deref();
         let text = n.text.as_deref().filter(|_| input.is_none());
+        let spoken = text.map(|_| self.a11y_spoken_text(i));
         // A group that takes its own keys and no press (a game's surface: arrows, Space) is
         // no button even when it steers by drag: Return or Space doesn't press it. As the web
         // mirror has it, a labelled one stays a group.
@@ -37,7 +38,7 @@ impl<S: 'static> Runtime<S> {
             default_button: n.focus.default,
             labelled: n.label.as_deref().is_some_and(|l| !l.trim().is_empty()),
             keyed: n.key.is_some(),
-            has_text: text.is_some_and(|t| !t.source_text().trim().is_empty() || t.redacted),
+            has_text: spoken.as_deref().is_some_and(|t| !t.trim().is_empty()) || text.is_some_and(|t| t.redacted),
             image: n.vis.pixels.is_some() || n.vis.surface.is_some(),
         };
         // A control the keyboard reaches is always in the tree, whatever its role says.
@@ -75,6 +76,7 @@ impl<S: 'static> Runtime<S> {
         if let Some(t) = n.text.as_deref() {
             if !secure {
                 t.content.hash(&mut h);
+                image_labels_hash(t).hash(&mut h);
             }
             (
                 t.redacted,
@@ -149,7 +151,10 @@ impl<S: 'static> Runtime<S> {
             } else if let Some(l) = n.label.as_deref() {
                 hash_str(l)
             } else {
-                n.text.as_deref().filter(|_| n.input.is_none()).map_or(0, |t| hash_str(&t.content))
+                n.text
+                    .as_deref()
+                    .filter(|_| n.input.is_none())
+                    .map_or(0, |t| mix(hash_str(&t.content), image_labels_hash(t)))
             };
             sub[j] = mix(sub[j], own);
             if let Some(p) = n.parent {
@@ -188,11 +193,14 @@ impl<S: 'static> Runtime<S> {
         if let Some(label) = label {
             node.set_label(label);
         }
-        // A secret's text never reaches the tree; its label must describe it instead.
+        // A secret's text never reaches the tree; its label must describe it instead. What
+        // speaks is the text a reader hears, so an inline image's label stands in for its
+        // object marker ([`InlineImage::label`](crate::text::InlineImage::label)).
+        let spoken = self.a11y_spoken_text(i);
         match (text, role) {
             (Some(_), _) if secure => {}
-            (Some(t), Role::Label) => node.set_value(t.source_text()),
-            (Some(t), _) if label.is_none() => node.set_label(t.source_text()),
+            (Some(_), Role::Label) => node.set_value(spoken.as_ref()),
+            (Some(_), _) if label.is_none() => node.set_label(spoken.as_ref()),
             _ => {}
         }
         if label.is_none() && text.is_none() && roles::named_from_content(role) {
@@ -204,12 +212,14 @@ impl<S: 'static> Runtime<S> {
         let described = related(more.and_then(|m| m.described_by.as_deref()));
         // A tooltip describes the element unless it only repeats its name, or shows only while
         // the text is cut short and it isn't.
-        let name = label.or(text.filter(|_| !secure).map(|t| t.source_text()));
         let help = n
             .help
             .as_deref()
             .filter(|_| !n.help_cut || n.text_cut(self.env.scale))
-            .filter(|h| name.is_none_or(|name| !h.trim().starts_with(name.trim())))
+            .filter(|h| {
+                let name = label.or_else(|| text.filter(|_| !secure).map(|_| spoken.as_ref()));
+                name.is_none_or(|name| !h.trim().starts_with(name.trim()))
+            })
             .map(crate::el::help_words);
         match more.and_then(|m| m.description.as_deref()).or(described.as_deref()).or(help.as_deref()) {
             Some(d) if !d.is_empty() => node.set_description(d),
@@ -419,10 +429,7 @@ impl<S: 'static> Runtime<S> {
             {
                 continue;
             }
-            if !field
-                && (n.text.as_deref().is_some_and(|t| !t.source_text().trim().is_empty())
-                    || !self.a11y_content_name(i).is_empty())
-            {
+            if !field && (!self.a11y_spoken_text(i).trim().is_empty() || !self.a11y_content_name(i).is_empty()) {
                 continue;
             }
             let site: String = n.path.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).collect();
@@ -459,12 +466,13 @@ impl<S: 'static> Runtime<S> {
         if n.is_secure() {
             return String::new();
         }
-        n.label
-            .as_deref()
-            .filter(|l| !l.trim().is_empty())
-            .map(str::to_owned)
-            .or_else(|| n.text.as_deref().filter(|_| n.input.is_none()).map(|t| t.source_text().trim().to_owned()))
-            .unwrap_or_else(|| self.a11y_content_name(j))
+        if let Some(l) = n.label.as_deref().filter(|l| !l.trim().is_empty()) {
+            return l.to_owned();
+        }
+        if n.text.as_deref().is_some_and(|_| n.input.is_none()) {
+            return self.a11y_spoken_text(j).trim().to_owned();
+        }
+        self.a11y_content_name(j)
     }
 
     /// Whether node `i` is an item of a focus group: a list, tabs, a radio group.
@@ -499,8 +507,8 @@ impl<S: 'static> Runtime<S> {
             } else if let Some(l) = n.label.as_deref().filter(|l| !l.trim().is_empty()) {
                 push_words(&mut out, l);
                 skip = Some(j);
-            } else if let Some(t) = n.text.as_deref().filter(|_| n.input.is_none()) {
-                push_words(&mut out, t.source_text());
+            } else if n.text.as_deref().is_some_and(|_| n.input.is_none()) {
+                push_words(&mut out, self.a11y_spoken_text(j).trim());
             }
             if out.len() >= NAME_MAX {
                 break;
@@ -525,4 +533,16 @@ fn push_words(out: &mut String, text: &str) {
         end -= 1;
     }
     out.push_str(&text[..end]);
+}
+
+/// A hash of the words a text's inline images speak ([`InlineImage::label`](crate::text::InlineImage::label)),
+/// so changing one rebuilds the node that reads it.
+fn image_labels_hash(text: &crate::el::TextSpec) -> u64 {
+    let mut h = rustc_hash::FxHasher::default();
+    for span in &text.spans {
+        if let Some(image) = span.image.as_deref() {
+            (span.start, span.end, image.label.as_deref()).hash(&mut h);
+        }
+    }
+    h.finish()
 }

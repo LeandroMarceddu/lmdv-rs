@@ -93,6 +93,12 @@ impl EditorSession {
         }
     }
 
+    /// The local revision the syntax cache and the app's spellcheck results are
+    /// keyed by; every text edit bumps it.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// Replaces the whole buffer for a load, reload or restore. Discards undo
     /// history and the block layout, and strips a BOM.
     pub fn set_text(&mut self, text: &str) {

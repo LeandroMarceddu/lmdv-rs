@@ -17,14 +17,16 @@ use std::time::{Duration, Instant};
 
 use lmdv_core::{DocStatus, Document, DocumentId, DocumentKey, Draft, EditLease, FileMeta, TabId, hash_text};
 use lmdv_edit::EditorSession;
+use lmdv_edit::spell::{Availability, compose_underlines};
 use lmdv_io::store::StorePatch;
 use lmdv_io::{ReadError, WriteError};
-use rune::{FileDialogOptions, Key, KeyEvent, TextEdit, Tx};
+use rune::{FileDialogOptions, Key, KeyEvent, Span, TextEdit, Tx};
+use rune_kit::syntax::SyntaxTheme;
 
 use crate::commands::MARKDOWN_EXTENSIONS;
-use crate::jobs::{JobMsg, WorkerMailbox};
+use crate::jobs::{JobMsg, SpellMailbox, SpellMsg, WorkerMailbox};
 use crate::reader::ScrollSnapshot;
-use crate::shared::UiMsg;
+use crate::shared::{SpellDiscovery, UiMsg};
 use crate::window::{Mode, Tab, WindowState, title_for_path};
 use crate::windows::{CloseDoc, close_title};
 
@@ -36,6 +38,11 @@ use scroll_sync::{ENTRY_SUPPRESS, EditorTop, PreviewGeometry, PreviewSync};
 pub const PREVIEW_DEBOUNCE: f64 = 0.12;
 /// How long after the last keystroke the crash draft is written (E-16).
 pub const DRAFT_DEBOUNCE: f64 = 1.0;
+/// How long after the last keystroke the source is spellchecked (E-SPELL).
+pub const SPELL_DEBOUNCE: f64 = 0.30;
+/// Before the source view reports its visible rows, this many blocks are
+/// checked in block mode (the first screenful, capped).
+const SPELL_BLOCK_FALLBACK: usize = 40;
 /// How long the saved check stays visible (E-08).
 pub const SAVED_FLASH_SECONDS: f64 = 1.4;
 /// Watcher events within this window after our own save are ignored.
@@ -165,6 +172,59 @@ pub struct SaveAsState {
     mailbox: Option<Arc<WorkerMailbox>>,
 }
 
+/// The last spelling result for one tab, in whole-source byte coordinates.
+#[derive(Clone, Debug)]
+pub struct SpellCheck {
+    /// The editor revision the ranges belong to; an edit invalidates them.
+    pub revision: u64,
+    /// The source range that was checked.
+    pub window: Range<usize>,
+    /// The whole buffer was checked (the single field), so every range applies.
+    pub whole: bool,
+    /// The misspelled words, in text order.
+    pub ranges: Vec<Range<usize>>,
+}
+
+/// Per-window spellcheck state: the worker mailbox, the debounce timer and the
+/// last answer per tab. The dictionary itself lives in [`crate::shared`] once.
+#[derive(Default)]
+pub struct SpellState {
+    mailbox: Option<Arc<SpellMailbox>>,
+    checks: HashMap<TabId, SpellCheck>,
+    /// The debounce due time.
+    due: Option<f64>,
+    /// The check on the worker, so its answer can be matched.
+    in_flight: Option<lmdv_core::JobId>,
+    in_flight_tab: Option<TabId>,
+    /// The (tab, revision) the debounce was last armed for.
+    seen: Option<(TabId, u64)>,
+}
+
+impl SpellState {
+    fn check_for(&self, tab: TabId) -> Option<&SpellCheck> {
+        self.checks.get(&tab)
+    }
+
+    /// Forgets the ranges and the timer, for a new or left editor session.
+    pub(crate) fn reset(&mut self) {
+        self.checks.clear();
+        self.due = None;
+        self.seen = None;
+    }
+
+    /// Whether a check is running for `tab`.
+    #[cfg(test)]
+    pub(crate) fn is_checking(&self, tab: TabId) -> bool {
+        self.in_flight.is_some() && self.in_flight_tab == Some(tab)
+    }
+
+    /// The ranges the last check left for `tab`, for tests.
+    #[cfg(test)]
+    pub(crate) fn ranges(&self, tab: TabId) -> Option<&[Range<usize>]> {
+        self.check_for(tab).map(|check| check.ranges.as_slice())
+    }
+}
+
 /// Editor-side window state. `scratch` keeps the `on_edit` accessor total when
 /// no tab is in edit mode.
 pub struct EditorState {
@@ -232,6 +292,8 @@ pub struct EditorState {
     pub reveal_until: f64,
     /// Scroll reports are ignored until this instant after entering edit mode.
     pub sync_suppressed_until: Option<Instant>,
+    /// The Linux spellchecker's debounce, worker and last ranges (ADR-008).
+    pub spell: SpellState,
 }
 
 impl Default for EditorState {
@@ -266,6 +328,7 @@ impl Default for EditorState {
             reveal_pending: false,
             reveal_until: 0.0,
             sync_suppressed_until: None,
+            spell: SpellState::default(),
         }
     }
 }
@@ -377,6 +440,8 @@ impl WindowState {
         let previous_find =
             self.active_tab().map(|tab| (tab.view.find_bar.query.text.clone(), tab.view.find_bar.replace.text.clone()));
         let mut session = EditorSession::new(&text, eol);
+        // A new session has its own revisions; stale ranges must not paint.
+        self.editor.spell.reset();
         if let Some((query, replace)) = previous_find {
             session.find.query = query;
             session.find.replace = replace;
@@ -479,6 +544,7 @@ impl WindowState {
         }
         self.editor.goto_line = None;
         self.editor.prompt = None;
+        self.editor.spell.reset();
         self.reset_scroll_sync();
         self.sync_editor_panes();
         self.sync_editor_titles();
@@ -1330,9 +1396,236 @@ impl WindowState {
         }
     }
 
+    /// The dictionary chosen for this launch, for the settings row (E-SPELL).
+    pub fn spell_availability(&self) -> Option<Availability> {
+        self.shared.spell_availability()
+    }
+
+    /// The single field's syntax spans with spelling underlines composed in.
+    ///
+    /// The syntax spans keep their cache; spelling is painted on top, never
+    /// cached with them, so a 300 ms answer never invalidates a highlight.
+    pub(crate) fn editor_spans(
+        &self,
+        tab: &Tab,
+        edit: &TextEdit,
+        theme: &SyntaxTheme,
+        visible: Option<Range<usize>>,
+        underline: rune::Color,
+    ) -> Vec<Span> {
+        let spans = lmdv_edit::syntax::syntax_spans(edit, theme, visible);
+        let revision = tab.view.editor.as_ref().map(EditorSession::revision).unwrap_or(0);
+        let ranges = self.spell_ranges(tab.id, revision);
+        if ranges.is_empty() {
+            return spans;
+        }
+        compose_underlines(spans, ranges, underline)
+    }
+
+    /// One block field's syntax spans with spelling underlines composed in.
+    ///
+    /// `block` is the block's whole-source range; only a check that covered it
+    /// contributes, and the painted ranges are block-local.
+    pub(crate) fn editor_block_spans(
+        &self,
+        edit: &TextEdit,
+        theme: &SyntaxTheme,
+        block: Range<usize>,
+        underline: rune::Color,
+    ) -> Vec<Span> {
+        let spans = lmdv_edit::syntax::syntax_spans(edit, theme, None);
+        let Some((tab, revision)) =
+            self.active_tab().and_then(|tab| tab.view.editor.as_ref().map(|editor| (tab.id, editor.revision())))
+        else {
+            return spans;
+        };
+        let ranges = self.spell_block_ranges(tab, revision, block);
+        if ranges.is_empty() {
+            return spans;
+        }
+        compose_underlines(spans, &ranges, underline)
+    }
+
+    fn spell_ranges(&self, tab: TabId, revision: u64) -> &[Range<usize>] {
+        if !self.shared.prefs().editor.spellcheck {
+            return &[];
+        }
+        self.editor
+            .spell
+            .check_for(tab)
+            .filter(|check| check.whole && check.revision == revision)
+            .map_or(&[], |check| check.ranges.as_slice())
+    }
+
+    fn spell_block_ranges(&self, tab: TabId, revision: u64, block: Range<usize>) -> Vec<Range<usize>> {
+        if !self.shared.prefs().editor.spellcheck {
+            return Vec::new();
+        }
+        let Some(check) = self.editor.spell.check_for(tab) else { return Vec::new() };
+        if check.revision != revision || check.window.start > block.start || check.window.end < block.end {
+            return Vec::new();
+        }
+        check
+            .ranges
+            .iter()
+            .filter(|range| range.start >= block.start && range.end <= block.end)
+            .map(|range| range.start - block.start..range.end - block.start)
+            .collect()
+    }
+
+    /// The spellchecker's own worker mailbox, woken like the window's.
+    fn spell_mailbox(&mut self) -> Arc<SpellMailbox> {
+        let waker = self.window_waker();
+        if let Some(mailbox) = &self.editor.spell.mailbox {
+            mailbox.attach(waker);
+            return Arc::clone(mailbox);
+        }
+        let mailbox = Arc::new(SpellMailbox::new());
+        mailbox.attach(waker);
+        self.editor.spell.mailbox = Some(Arc::clone(&mailbox));
+        mailbox
+    }
+
+    /// Whether spelling can show: the active tab is editing, or the settings
+    /// dialog (which owns the toggle) is open.
+    ///
+    /// Discovery starts on the first poll, but its answer only counts as a
+    /// frame change while one of these is true; in a reader-only window the
+    /// process-wide scan finishes without asking the shell for another frame.
+    fn spell_ui_visible(&self) -> bool {
+        self.settings_is_open() || self.active_tab().is_some_and(|tab| tab.view.mode == Mode::Editor)
+    }
+
+    /// Discovery, loading and every check run on workers (ADR-008); the frame
+    /// only arranges the 300 ms debounce and copies the answer's ranges.
+    fn poll_spell(&mut self, now: f64, tx: &mut Tx) -> bool {
+        let changed = self.drain_spell();
+        // One scan per process: the dictionary follows the UI locale chosen at
+        // start and a language change only applies to spelling on the next
+        // start (E-32).
+        if self.shared.spell_discovery() == SpellDiscovery::Unknown
+            && let Some(generation) = self.shared.begin_spell_discovery()
+        {
+            let mailbox = self.spell_mailbox();
+            let roots = lmdv_edit::spell::dictionary_roots(Some(&self.shared.dirs().data));
+            let tags = lmdv_edit::spell::requested_tags(self.shared.prefs().locale.as_deref());
+            self.shared.jobs().discover_spelling(mailbox, generation, roots, tags);
+        }
+        let enabled = self.shared.prefs().editor.spellcheck;
+        if enabled
+            && self.shared.spell_dictionary().is_none()
+            && let Some(files) = self.shared.spell_availability().map(|found| found.files)
+            && let Some(generation) = self.shared.begin_spell_load()
+        {
+            let mailbox = self.spell_mailbox();
+            self.shared.jobs().load_spelling(mailbox, generation, files);
+        }
+        let Some((tab, revision, window, text, whole)) = self.spell_target() else {
+            self.editor.spell.due = None;
+            return changed;
+        };
+        let Some(dictionary) = self.shared.spell_dictionary() else {
+            self.editor.spell.due = None;
+            return changed;
+        };
+        if !enabled || window.is_empty() {
+            self.editor.spell.due = None;
+            return changed;
+        }
+        let satisfied =
+            self.editor.spell.check_for(tab).is_some_and(|check| check.revision == revision && check.window == window);
+        if satisfied {
+            self.editor.spell.due = None;
+            return changed;
+        }
+        let edited = self.editor.spell.seen != Some((tab, revision));
+        if edited {
+            // A trailing debounce: the last keystroke pushes the check out.
+            self.editor.spell.seen = Some((tab, revision));
+            self.editor.spell.due = Some(now + SPELL_DEBOUNCE);
+            tx.wake_at(now + SPELL_DEBOUNCE);
+        } else if self.editor.spell.due.is_none() {
+            // Scrolling in block mode changed the visible rows; check them
+            // without waiting for the next keystroke.
+            self.editor.spell.due = Some(now);
+        }
+        if !self.editor.spell.due.is_some_and(|due| now >= due) || self.editor.spell.in_flight.is_some() {
+            return changed;
+        }
+        let mailbox = self.spell_mailbox();
+        let job = self.shared.jobs().check_spelling(mailbox, tab, revision, dictionary, window, text, whole);
+        self.editor.spell.in_flight = Some(job);
+        self.editor.spell.in_flight_tab = Some(tab);
+        self.editor.spell.due = None;
+        changed
+    }
+
+    /// Applies the workers' answers. A stale generation, revision or tab is
+    /// dropped; only the current editor's ranges reach the view.
+    fn drain_spell(&mut self) -> bool {
+        let Some(mailbox) = self.editor.spell.mailbox.clone() else { return false };
+        let mut changed = false;
+        for message in mailbox.drain() {
+            match message {
+                SpellMsg::Discovered { generation, found } => {
+                    let applied = self.shared.finish_spell_discovery(generation, found);
+                    changed |= applied && self.spell_ui_visible();
+                }
+                SpellMsg::Loaded { generation, result } => {
+                    let applied = self.shared.finish_spell_load(generation, result.ok());
+                    changed |= applied && self.spell_ui_visible();
+                }
+                SpellMsg::Checked { job, tab, revision, window, whole, ranges } => {
+                    if self.editor.spell.in_flight == Some(job) {
+                        self.editor.spell.in_flight = None;
+                        self.editor.spell.in_flight_tab = None;
+                    }
+                    let current = self
+                        .active_tab()
+                        .and_then(|tab| tab.view.editor.as_ref().map(|editor| (tab.id, editor.revision())));
+                    if current == Some((tab, revision)) {
+                        self.editor.spell.checks.insert(tab, SpellCheck { revision, window, whole, ranges });
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    /// The active editor's tab, revision, checked window and text.
+    ///
+    /// The single field checks the whole buffer. Block mode checks only the
+    /// rows the source is showing (its first screenful until the view reports
+    /// them), so a 1 MiB document is never walked for one keystroke.
+    fn spell_target(&self) -> Option<(TabId, u64, Range<usize>, String, bool)> {
+        let tab = self.active_tab()?;
+        if tab.view.mode != Mode::Editor {
+            return None;
+        }
+        let editor = tab.view.editor.as_ref()?;
+        let text = editor.text();
+        let block_mode = editor.block_mode_active();
+        let window = if block_mode {
+            let blocks = lmdv_edit::block_ranges(text);
+            let visible = self.editor.visible_blocks.clone().unwrap_or_else(|| {
+                let end = blocks.len().min(SPELL_BLOCK_FALLBACK);
+                0..end
+            });
+            let start = visible.start.min(blocks.len().saturating_sub(1));
+            let end = visible.end.max(start + 1).min(blocks.len());
+            blocks.get(start)?.start..blocks.get(end.saturating_sub(1))?.end
+        } else {
+            0..text.len()
+        };
+        let checked = text.get(window.clone())?.to_owned();
+        Some((tab.id, editor.revision(), window, checked, !block_mode))
+    }
+
     /// Fills the preview debounce and draft timers, and consumes watcher events.
     pub(crate) fn poll_editor(&mut self, now: f64, tx: &mut Tx) -> bool {
         let mut changed = self.poll_save_as_probes();
+        changed |= self.poll_spell(now, tx);
         if let Some(until) = self.editor.saved_flash_until {
             if now >= until {
                 self.editor.saved_flash_until = None;

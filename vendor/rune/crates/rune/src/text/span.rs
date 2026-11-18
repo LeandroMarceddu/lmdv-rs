@@ -125,6 +125,9 @@ pub struct InlineImage {
     pub ascent: f32,
     /// The room below the baseline in points.
     pub descent: f32,
+    /// What a screen reader says where the image draws (see [`Self::label`]): a formula's TeX,
+    /// a picture's alt text. `None` leaves it out of the accessibility text.
+    pub label: Option<Box<str>>,
 }
 
 impl InlineImage {
@@ -132,7 +135,17 @@ impl InlineImage {
     /// above the baseline.
     pub fn new(pixels: crate::Pixels, width: f32, height: f32) -> InlineImage {
         let (width, height) = (length(width), length(height));
-        InlineImage { pixels, width, height, ascent: height, descent: 0.0 }
+        InlineImage { pixels, width, height, ascent: height, descent: 0.0, label: None }
+    }
+
+    /// The words a screen reader says where the image draws: a formula's TeX, a picture's alt
+    /// text, in place of the [`U+FFFC`](OBJECT_REPLACEMENT) marker the drawn text holds. Empty
+    /// text sets none, and the accessibility text leaves the marker out. The image draws the
+    /// same either way.
+    pub fn label(mut self, text: impl Into<String>) -> InlineImage {
+        let text = text.into();
+        self.label = (!text.trim().is_empty()).then(|| text.into_boxed_str());
+        self
     }
 
     /// The room it reserves above the baseline in points, where its top sits.

@@ -144,7 +144,7 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | 5 | Cross-window tab drag | No cross-window pointer capture; Wayland has no window positions/screen points. | SP-04: X11 spike; Wayland fallback. |
 | 6 | Custom Linux titlebar | Rune keeps the native frame; borderless has no edge resize. | ADR-007: native frame for v1. |
 | 7 | SVG export | Rune has no public display list; `rune-mermaid`'s scene is private. | Vendor `rune-mermaid` + serializer, or PNG only. |
-| 8 | Linux spellcheck | Rune's checker is a stub on Linux. | Hunspell + app menu (SP-03). |
+| 8 | Linux spellcheck | Rune's checker is a stub on Linux. | `lmdv-edit::spell` (Spellbook) with system/user dictionaries and underline spans; the app suggestion menu is pending (OI-174). |
 | 9 | Multi-cursor | `TextEdit` has one anchor/focus; secondary carets need overlays. | SP-03: model/overlays; can land after v1. |
 | 10 | Rune pre-release | Pinned rev, no PRs, five `[patch.crates-io]` vendor dirs must be repeated in our workspace. | Patch discipline (ADR-002). |
 
@@ -168,7 +168,7 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | T-SHARED | A file may be edited independently in two windows (CodeMirror buffers + conflict detection) | One canonical buffer + one editor lease; other windows are live viewers; explicit takeover | **substitute** (ADR-004/023) |
 | T-28 | No tab restoration across a full restart (only window geometry) | Session restore is an intentional extension; editor text comes from drafts | **extension** |
 | E-MULTI | Multi-cursor (`Ctrl+D`, add cursor above/below) | Single selection in v1; `Ctrl+D` selects next occurrence; full model needs a Rune caret-rect patch | **gap until P7** |
-| E-SPELL | WebView2 spellcheck follows the UI language | Hunspell + underline spans + suggestions on Linux; hidden if no dictionary | **substitute** |
+| E-SPELL | WebView2 spellcheck follows the UI language | Spellbook (Hunspell) engine in `lmdv-edit`, system/user dictionaries, underline spans in both editor modes, toggle hidden without a dictionary; the right-click suggestion menu is still open (OI-174) | **implemented (Linux)** |
 | L-MEDIA | Video/audio playback in the document | Rune's `Player` fails on Linux; show a placeholder + “Open externally” | **substitute** |
 | X-SVG | Copy/save diagram SVG | PNG 2×/4× is the gate; SVG needs a vendored mermaid scene serializer | **gap / optional** |
 | S-RECENT | Windows Recent items + jump list | In-app recents; optional XDG recent-manager integration later | **substitute/gap** |

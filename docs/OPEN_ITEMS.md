@@ -49,7 +49,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-034 | P6-01 i18n | No CLDR plural pairs in the 409-key inventory, so `PLURALS` is empty | P6-I18N-A added five plural bases (`editor.lines/blocks`, `rel.minutes/hours/days`) in all six catalogs; `PLURALS` is non-empty. | P6 | fixed |
 | OI-035 | P6-01 i18n | Help HTML fragments are copied but not integrated into a full help dialog, and still contain Windows/Store-only passages | P6-I18N-A removed File Explorer/Store-only passages and rewrote the Windows section for Linux; P6-I18N-B embeds all six pages and renders them in the F1 full-help dialog. H-04 license/repo links remain OI-165. | P6 | fixed |
 | OI-036 | Patch 0001 | Copy is not auto-skipped for inline images; the app must call `El::uncopied` over the placeholder | Renderer marks math objects `uncopied` | P2 | fixed |
-| OI-037 | Patch 0001 | Accessibility exposes the U+FFFC placeholder as text | Give math an accessible label/skip the placeholder | P2/P6 | open |
+| OI-037 | Patch 0001 | Accessibility exposes the U+FFFC placeholder as text | Rune patch 0003: `InlineImage::label` (TeX for formulas, alt for pictures) and the a11y layer speak it instead of U+FFFC in node names, values and text runs, with character lengths and word starts consistent with the spoken value. Renderer attaches the localized label; regression test walks the real accessibility tree. The `--tree` `elements[].text` mirror is not a11y and keeps the marker (OI-177). | P6 | fixed |
 | OI-038 | Patch 0001 | Root re-exports (`rune::InlineImage`) are not added; use `rune::text::InlineImage` | Accepted; no need for a root re-export yet | — | accepted |
 | OI-039 | Patch 0001 | The macOS-only smoothing test `pipelines_never_share_masks` fails on Linux | Unrelated to lmdv; not part of the gate | — | accepted |
 | OI-040 | P2-01 parser | `stacker` added to grow deep recursion for 200-level nesting | Accepted; keeps malformed input safe | — | accepted |
@@ -194,7 +194,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-150 | P6-H app | BrowserBack/Forward keys are not exposed by pinned Rune (patch needed); Alt+←/→ is consumed by focused text fields | Rune patch or accept Alt+arrows outside fields + mouse buttons | P6 | accepted-gap |
 | OI-151 | P6-H app | 8 px rule uses the last frame’s heading tops; pasted places resolve only within the window; tab menu Back/Forward act on the active tab; session clones each tab’s 50-entry lists per frame | One-frame-stale edge, background-tab menu, and lazy publish optimization | P6 | open |
 
-| OI-152 | P6-PREF app | Settings strings lack catalog keys; reset also clears `print_break_h1` (the earlier reset kept it); spellcheck row is disabled; editor font does not follow reader size (E-37); live locale is skipped under `cfg(test)` | P6-I18N-A keyed every settings string; reset now keeps `print_break_h1`; E-37 verified intact (0.875× live). Spellcheck engine and the test-only locale skip remain. | P6 | open |
+| OI-152 | P6-PREF app | Settings strings lack catalog keys; reset also clears `print_break_h1` (the earlier reset kept it); spellcheck row is disabled; editor font does not follow reader size (E-37); live locale is skipped under `cfg(test)` | P6-I18N-A keyed every settings string, kept `print_break_h1` on reset and verified E-37 (0.875× live). The spellcheck engine landed as `lmdv-edit::spell` (Spellbook/Hunspell, app folder + XDG + system roots, locale tags with English fallback), with 300 ms worker checks, visible-block checking, underlines in both editor modes, and a Settings switch that exists only while a dictionary is available. Residuals: OI-174 (suggestion menu), OI-175 (wire key), OI-176 (test-only locale skip). | P6 | fixed |
 | OI-153 | P7-PKG packaging | AppStream warns the `md.lmdv` id is not rDNS; no LICENSE file despite MIT; the v0.5.0 release was unsigned and carries no checksums; installer still has an old fallback icon | Pick a 3-part rDNS identity, add LICENSE, fix the installer icon, sign the artifacts/checksums | P7 | open |
 
 | OI-154 | P6-PREF app | Palette polish: native/floating frame colour stays OS-themed; Sepia hljs hexes are approximated by the derived syntax theme; neutral elevation shadows; `--active-line`/`--landing` have no app role | Accepted substitutes; revisit with a Rune frame patch | P6 | accepted-gap |
@@ -218,6 +218,10 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-171 | P6-SAFE app | A deleted file reached through a broken symlink cannot match a draft keyed by the canonical path, because resolving the link needs I/O | Store drafts under the lexical path as well, or resolve the link in a job | P6 | open |
 | OI-172 | P6-SAFE app | The load merge prefers an already-ready document; after an in-place file replacement the older buffer survives until the watcher reloads it | Compare mtime/length and prefer the newer read on merge | P6 | open |
 | OI-173 | P6-SAFE app | Save As renames Back/Forward places and reading positions only in the saving window; other windows keep the old spelling until reopened | Broadcast the rename together with the merge/release message | P6 | open |
+| OI-174 | P6-I18N spell | Spellcheck has no suggestion UI: right-click in a source field is Rune's native field menu and `lmdv-app` has no editor context-menu hook; `Spell::suggest` is ready and capped at 8 | Build an app-drawn suggestion menu (also S-16) once the editor context menu exists | P6 | open |
+| OI-175 | P6-I18N spell | Spellcheck persists as `prefs.json` `editor.spellcheck`, not the spec's flat `editor-spell` string (P-11); turning it off survives a restart, which is the behavior the row specifies | Map to the legacy key only if interop with the original's config matters | P6 | open |
+| OI-176 | P6-PREF i18n | The live locale change is skipped under `cfg(test)`, so no test exercises switching the interface language in-process | Needs per-test translator isolation instead of one global locale | P6 | open |
+| OI-177 | P6-I18N a11y | `--tree`'s `elements[].text` mirror still contains U+FFFC; it is Rune's drawn-text mirror for tooling, not the accessibility tree (patch 0003 cleans the latter) | Leave as is unless a tool consumes the drawn-text mirror | P6 | accepted |
 
 ## 2. Resolved actions (examples)
 
@@ -246,9 +250,9 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above.
 
-- **Open (72):** OI-001, 004, 024, 025, 026, 037, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 066, 068, 074, 076, 078, 079, 080, 082, 088, 093, 094, 095, 096, 097, 100, 101, 102, 103, 104, 105, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 135, 138, 140, 141, 148, 151, 152, 153, 155, 161, 162, 163, 165, 166, 169, 170, 171, 172, 173
+- **Open (73):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 066, 068, 074, 076, 078, 079, 080, 082, 088, 093, 094, 095, 096, 097, 100, 101, 102, 103, 104, 105, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 135, 138, 140, 141, 148, 151, 153, 155, 161, 162, 163, 165, 166, 169, 170, 171, 172, 173, 174, 175, 176
 - **Scheduled (4):** OI-003, 023, 027, 050
-- **Accepted (23):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 070, 072, 107, 108, 131, 133, 134, 136, 139, 150, 154, 157
-- **Fixed (74):** kept for history.
+- **Accepted (24):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 070, 072, 107, 108, 131, 133, 134, 136, 139, 150, 154, 157, 177
+- **Fixed (76):** kept for history.
 
 P3, P4 (with substitutes) and P5 are closed; P6 polish and P7 audit remain. Accepted gaps are re-checked at the next gate.

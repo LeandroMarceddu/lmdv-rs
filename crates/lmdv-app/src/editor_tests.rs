@@ -8,11 +8,14 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lmdv_core::{DocStatus, Draft, Eol, ScrollAnchor};
+use lmdv_core::{DocStatus, Draft, Eol, LargeFileMode, ScrollAnchor};
+use lmdv_edit::spell::{Availability, DictionaryFiles, Spell};
 use lmdv_io::watch::FileEvent;
 use rune::{ElementInfo, Tx};
+use rune_kit::syntax::SyntaxTheme;
 use tempfile::{NamedTempFile, TempDir};
 
 use crate::editor::Prompt;
@@ -1890,4 +1893,224 @@ fn block_mode_fields_follow_the_reading_size() {
         "the block field re-measured at 19.25 pt on a 30.8 pt line: {}",
         focused_caret_height(&runtime)
     );
+}
+
+// ---- spellcheck (ADR-008, E-SPELL, E-32, P-11) ----------------------------
+
+/// The fixture dictionary pair under `tests/fixtures/spell`.
+fn spell_fixture() -> Availability {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spell/system");
+    Availability {
+        files: DictionaryFiles {
+            language: "en_US".to_owned(),
+            aff: root.join("en_US.aff"),
+            dic: root.join("en_US.dic"),
+        },
+        fallback: false,
+    }
+}
+
+/// Seeds the window's checker with the fixture, as a finished discovery and
+/// load would. The check itself still runs on a worker.
+fn seed_spell(state: &WindowState) -> Availability {
+    let availability = spell_fixture();
+    let dictionary = Arc::new(Spell::open(&availability.files).expect("the fixture dictionary parses"));
+    state.shared().seed_spell(Some(availability.clone()), Some(dictionary));
+    availability
+}
+
+/// Ranges for `(start, end)` word pairs, in text order.
+fn spell_ranges(pairs: &[(usize, usize)]) -> Vec<std::ops::Range<usize>> {
+    pairs.iter().map(|&(start, end)| start..end).collect()
+}
+
+/// Polls with an advancing clock until the tab has exactly `expected` ranges.
+fn wait_for_spell(state: &mut WindowState, tab: lmdv_core::TabId, expected: &[std::ops::Range<usize>]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut tx = Tx::default();
+    while state.editor.spell.ranges(tab) != Some(expected) {
+        assert!(Instant::now() < deadline, "the spelling check never reported: {:?}", state.editor.spell.ranges(tab));
+        state.poll(1.0, &mut tx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// The syntax spans of the active single field, with spelling underlines.
+fn painted_spans(state: &WindowState) -> Vec<rune::Span> {
+    let tab = state.active_tab().expect("the tab");
+    let editor = tab.view.editor.as_ref().expect("the editor");
+    state.editor_spans(tab, &editor.edit, &SyntaxTheme::neutral(true), None, rune::Color::WHITE)
+}
+
+#[test]
+fn spelling_waits_for_the_300ms_debounce_and_paints_the_editor() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("spell.md");
+    std::fs::write(&path, "hello wrld\n").unwrap();
+    let mut state = window(&temp);
+    seed_spell(&state);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    let tab = state.active_tab().map(|tab| tab.id).expect("the tab");
+
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    assert!(!state.editor.spell.is_checking(tab), "nothing runs inside the debounce");
+    assert!(state.editor.spell.ranges(tab).is_none());
+    state.poll(0.29, &mut tx);
+    assert!(!state.editor.spell.is_checking(tab), "290 ms is still inside it");
+    state.poll(0.31, &mut tx);
+    assert!(state.editor.spell.is_checking(tab), "300 ms starts one check");
+
+    wait_for_spell(&mut state, tab, &spell_ranges(&[(6, 10)]));
+    assert_eq!(state.editor.spell.ranges(tab), Some(spell_ranges(&[(6, 10)]).as_slice()), "only `wrld` is misspelled");
+    let painted = painted_spans(&state);
+    assert!(
+        painted.iter().any(|span| span.underline.is_some() && (span.start, span.end) == (6, 10)),
+        "the word carries an underline: {painted:?}"
+    );
+
+    // An edit bumps the revision: the old ranges are never painted over it.
+    type_text(&mut state, "New ");
+    let painted = painted_spans(&state);
+    assert!(
+        painted.iter().all(|span| span.underline.is_none()),
+        "the answer for the previous revision is dropped: {painted:?}"
+    );
+}
+
+#[test]
+fn block_mode_checks_and_paints_only_the_visible_rows() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("blocks.md");
+    std::fs::write(&path, "hello wrld\n\nhello wrld\n").unwrap();
+    let mut state = window(&temp);
+    seed_spell(&state);
+    state.set_large_file_mode(LargeFileMode::Block);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    let tab = state.active_tab().map(|tab| tab.id).expect("the tab");
+    assert!(state.active_tab().and_then(|tab| tab.view.editor.as_ref()).is_some_and(|e| e.block_mode_active()));
+
+    // The first block is the visible one.
+    state.editor.visible_blocks = Some(0..1);
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    state.poll(0.31, &mut tx);
+    wait_for_spell(&mut state, tab, &spell_ranges(&[(6, 10)]));
+    assert_eq!(
+        state.editor.spell.ranges(tab),
+        Some(spell_ranges(&[(6, 10)]).as_slice()),
+        "only the visible block was checked"
+    );
+
+    let underlined = |state: &WindowState, index: usize| {
+        let block = state
+            .active_tab()
+            .and_then(|tab| tab.view.editor.as_ref())
+            .and_then(|editor| editor.block_editor())
+            .and_then(|blocks| blocks.block(index))
+            .expect("the block");
+        let spans =
+            state.editor_block_spans(&block.edit, &SyntaxTheme::neutral(true), block.range.clone(), rune::Color::WHITE);
+        spans.iter().filter(|span| span.underline.is_some()).map(|span| (span.start, span.end)).collect::<Vec<_>>()
+    };
+    assert_eq!(underlined(&state, 0), vec![(6, 10)], "block-local coordinates");
+    assert!(underlined(&state, 1).is_empty());
+
+    // Scrolling checks the newly visible rows without a keystroke.
+    state.editor.visible_blocks = Some(1..2);
+    state.poll(1.0, &mut tx);
+    wait_for_spell(&mut state, tab, &spell_ranges(&[(18, 22)]));
+    assert_eq!(state.editor.spell.ranges(tab), Some(spell_ranges(&[(18, 22)]).as_slice()));
+    assert!(underlined(&state, 0).is_empty(), "the first block is no longer covered");
+    assert_eq!(underlined(&state, 1), vec![(6, 10)]);
+}
+
+#[test]
+fn without_a_dictionary_the_editor_never_checks_or_paints() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("plain.md");
+    std::fs::write(&path, "hello wrld\n").unwrap();
+    let mut state = window(&temp);
+    state.shared().seed_spell(None, None);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    let tab = state.active_tab().map(|tab| tab.id).expect("the tab");
+
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    state.poll(1.0, &mut tx);
+    assert!(!state.editor.spell.is_checking(tab), "no engine, no job");
+    assert!(state.editor.spell.ranges(tab).is_none());
+    assert!(painted_spans(&state).iter().all(|span| span.underline.is_none()));
+}
+
+#[test]
+fn turning_spellcheck_off_stops_the_checker_and_the_underlines() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("spell.md");
+    std::fs::write(&path, "hello wrld\n").unwrap();
+    let mut state = window(&temp);
+    seed_spell(&state);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    let tab = state.active_tab().map(|tab| tab.id).expect("the tab");
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    state.poll(0.31, &mut tx);
+    wait_for_spell(&mut state, tab, &spell_ranges(&[(6, 10)]));
+
+    state.set_spellcheck(false);
+    assert!(painted_spans(&state).iter().all(|span| span.underline.is_none()), "off hides the squiggles at once");
+    state.poll(2.0, &mut tx);
+    assert!(!state.editor.spell.is_checking(tab), "off stops new checks");
+
+    state.set_spellcheck(true);
+    state.poll(2.0, &mut tx);
+    state.poll(2.31, &mut tx);
+    assert!(state.editor.spell.is_checking(tab), "on checks again without waiting for a keystroke");
+}
+
+#[test]
+fn the_app_discovers_a_dictionary_beside_its_data_and_checks_with_it() {
+    let temp = TempDir::new().unwrap();
+    let dirs = test_support::dirs(&temp);
+    // The launch's UI locale, so a system dictionary for another language can
+    // never win over the fixture in the app's own folder.
+    std::fs::create_dir_all(&dirs.config).unwrap();
+    std::fs::write(dirs.prefs_path(), br#"{"locale": "en"}"#).unwrap();
+    let dictionaries = dirs.data.join("dictionaries");
+    std::fs::create_dir_all(&dictionaries).unwrap();
+    let fixture = spell_fixture().files;
+    for path in [&fixture.aff, &fixture.dic] {
+        std::fs::copy(path, dictionaries.join(path.file_name().expect("a file name"))).unwrap();
+    }
+
+    let path = temp.path().join("discovered.md");
+    std::fs::write(&path, "hello wrld\n").unwrap();
+    let mut state = WindowState::new(AppShared::start(dirs));
+    open_loaded(&mut state, &path);
+
+    // Discovery runs from the first poll, on a worker (ADR-008).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut now = 0.0;
+    let mut tx = Tx::default();
+    while state.spell_availability().is_none() {
+        assert!(Instant::now() < deadline, "the app never found the dictionary beside its data");
+        state.poll(now, &mut tx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let availability = state.spell_availability().expect("the fixture dictionary");
+    assert_eq!(availability.language(), "en_US");
+
+    enter_editor(&mut state);
+    let tab = state.active_tab().map(|tab| tab.id).expect("the tab");
+    while state.editor.spell.ranges(tab).is_none_or(|ranges| ranges.is_empty()) {
+        assert!(Instant::now() < deadline, "the app never loaded and checked with the dictionary");
+        now += 0.1;
+        state.poll(now, &mut tx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(state.editor.spell.ranges(tab), Some(spell_ranges(&[(6, 10)]).as_slice()));
 }

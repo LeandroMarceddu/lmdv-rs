@@ -410,6 +410,11 @@ impl WindowState {
                 self.set_format_bar(!shown);
                 true
             }
+            "settings-spellcheck" => {
+                let on = self.shared().prefs().editor.spellcheck;
+                self.set_spellcheck(!on);
+                true
+            }
             "settings-language-trigger" => {
                 self.settings.language_open = !self.settings.language_open;
                 true
@@ -564,6 +569,19 @@ impl WindowState {
     /// Shows or hides the editor's format bar.
     pub fn set_format_bar(&mut self, shown: bool) {
         self.patch_prefs(|prefs| prefs.editor.format_bar = shown);
+    }
+
+    /// Turns spellcheck on or off (E-32).
+    ///
+    /// The switch is shown only while a dictionary exists for the launch's
+    /// locale (E-SPELL); the preference is stored as `editor.spellcheck`
+    /// (P-11) and survives the next start. Disabling it drops the current
+    /// underlines at once.
+    pub fn set_spellcheck(&mut self, on: bool) {
+        self.patch_prefs(|prefs| prefs.editor.spellcheck = on);
+        if !on {
+            self.editor.spell.reset();
+        }
     }
 
     /// The language label the picker shows.

@@ -1,15 +1,16 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins and P6-SAFE batch 4 are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0 release are complete. P6 settings/spellcheck and i18n remainders, panes/export work and the P7 audit remain. P0–P5 and P6-01 complete.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck and the math a11y patch are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0/v0.5.5 releases are complete. Remaining: OI-104 (PDF papercuts, held), OI-165 (help links, blocked), panes/export extras and the P7 audit. P0–P5 and P6-01 complete.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
 
 - Git repo and baseline commits.
 - Full pinned Rune vendored at `vendor/rune/` (`cca5df6`, 2026-11-17, Rust 1.99.1); root repeats the five `[patch.crates-io]` entries (including `accesskit_macos`).
-- Patch 0001 (`0001-text-inline-object.patch`): `Span::image` + `Span::rise`, independent inline image size/ascent/descent, zero-width placeholders, drawing, caching and selection behavior. Layout and live-scene tests pass; the app's `--scene proof-math` draws an inline image on the text baseline.
+- Patch 0001 (`0001-text-inline-object.patch`): `Span::image` + `Span::rise`, `InlineImage::label`, independent inline image size/ascent/descent, zero-width placeholders, drawing, caching and selection behavior. Layout and live-scene tests pass; the app's `--scene proof-math` draws an inline image on the text baseline.
 - Patch 0002 (`0002-close-request-veto.patch`): `App::on_close_request`/`WindowSpec::on_close_request`, native-close veto before hiding; programmatic closes stay force-close. Three tests pass.
+- Patch 0003 (`0003-a11y-inline-object.patch`): the accessibility text speaks an inline image's label instead of U+FFFC in node names, values and text runs, keeping character lengths and word starts consistent. Two Rune a11y tests and a renderer tree test pass; `scripts/test-rune-patches.sh` covers the other two patches.
 - `lmdv-core`: IDs, `SourceBuffer`, `Document`, `DocumentRegistry`, edit lease, prefs, nav/draft/session types; 53 tests pass.
 - `scripts/run-gates.sh` is green: parity checklist, vendor check, formatting (own crates only), workspace check/test/clippy. Vendor patch proof tests are separate (`scripts/test-rune-patches.sh`, after a vendor bump or patch edit) so the gate does not rebuild `vendor/rune/target` every time.
 - User-level handler scripts tested end-to-end in a temporary HOME: install, MIME default, wrapper launching the real binary, uninstall restore.
@@ -371,7 +372,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0** was published from it (unsigned, no checksums).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0** and **v0.5.5** were published from it (unsigned, no checksums).
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
@@ -391,15 +392,28 @@
 - A deleted or unreadable file offers its crash draft, and the recovered text reaches **Save again**; the document watcher's setup error is shown once.
 - Commits `c2f37b2` (io) and `252b0c5` (app); 607 i18n keys; full gate green. New follow-ups OI-169–173.
 
+## P6-I18N spellcheck — complete
+
+- `lmdv-edit::spell` (Spellbook, pure Rust, no C dependency): dictionary discovery in the app's `dictionaries` folder, `$XDG_DATA_HOME/hunspell`, `/usr/share/hunspell` and `/usr/share/myspell`; the UI locale picks the tag (region then base) and English stands in only when nothing matches.
+- `Spell::check` returns misspelled byte ranges (front matter, code, HTML, link targets and URLs skipped); `compose_underlines` paints them over the cached syntax spans without overlap in both editor modes.
+- The app runs discovery, loading and checks on workers with a 300 ms trailing debounce; block mode checks only the visible rows. The Settings switch exists only while a dictionary is available, persists in `prefs.json`, and applies to spelling on the next start (E-32).
+- 17 engine, 74 editor and 34 settings tests; fixtures under `tests/fixtures/spell/`; 608 i18n keys. Residuals: OI-174 (suggestion menu), OI-175 (wire key), OI-176 (test-only locale skip).
+
+## P6-I18N math a11y — complete (patch 0003)
+
+- `InlineImage::label` carries the words a screen reader says where the image draws; the renderer passes the localized `Math: {tex}` template for formulas and the alt text for inline pictures.
+- Patch 0003 substitutes that label for U+FFFC in a11y names, values and text runs, with per-character lengths and word starts that still match the spoken value.
+- `--tree` on `tests/fixtures/commonmark-math.md` reads `Math: E = mc^2` (and `Math: \sqrt{a^2 + b^2}`) where it used to read the object marker; the real `accessibility_tree()` regression test asserts no U+FFFC. `scripts/test-rune-patches.sh` passes with three patches.
+
 ## Next up
 
-P6-SAFE batch 4 is complete (see above); no worker is running.
+Batch A (P6-I18N spellcheck + math a11y) is complete; v0.5.5 is tagged. OI-104 is held at the user's request, so PDF papercuts are not in this release.
 
 **Next when work resumes:**
 
-1. OI-072: accept or reject the documented E-14 substitute (tab-scoped edit sessions), then close it with a `docs/FEATURE_PARITY.md` row.
-2. P6-I18N remainder: spellcheck (OI-152), OI-037 math placeholder a11y, OI-104 PDF date/file-selection, OI-165 H-04 links.
-3. P6-PANES/P5-EXPORT; P7 audit and cross-platform checks after the feature pass.
+1. OI-104 (PDF local date, “Show in folder” selection, Print temp cleanup) when the user unholds it.
+2. P6-PANES/P5-EXPORT extras (MathML/OMML, DOCX TOC field/compression, PDF page splits, Mermaid raster, export benchmark).
+3. P7 audit and packaging hardening (OI-153, OI-155), then the 342-row parity audit.
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

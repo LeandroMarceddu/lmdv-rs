@@ -12,6 +12,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lmdv_core::{DocumentId, DocumentKey, DocumentRegistry, PasteId, Prefs, ScrollAnchor, WindowId};
+use lmdv_edit::spell::{Availability, Spell};
 use lmdv_io::instance::{InstanceServer, LaunchRequest};
 use lmdv_io::store::{
     PositionTable, RECENTS_MAX, Recent, SessionSnapshot, StateFile, StoreHandle, StoreIssue, StorePatch, UiPrefs,
@@ -110,7 +111,40 @@ pub struct AppShared {
     watch_error_shown: Cell<bool>,
     /// Documents whose large-document warning has already been shown (OI-010).
     large_warned: RefCell<BTreeSet<DocumentId>>,
+    /// The Linux spellchecker's dictionary choice and loaded engine (ADR-008).
+    spell: RefCell<SpellRuntime>,
 }
+
+/// What the process knows about the Linux spellchecker (ADR-008, E-SPELL).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SpellDiscovery {
+    /// No window has asked yet.
+    #[default]
+    Unknown,
+    /// A worker is scanning the folders.
+    Pending,
+    /// The scan finished; `None` means no usable dictionary exists, and the
+    /// settings row stays hidden.
+    Ready(Option<Availability>),
+}
+
+/// The process-wide checker: one dictionary, chosen at the first scan from the
+/// UI locale and kept until the next start (E-32, P-11).
+#[derive(Default)]
+struct SpellRuntime {
+    discovery: SpellDiscovery,
+    dictionary: Option<Arc<Spell>>,
+    discovery_generation: u64,
+    load_generation: u64,
+    loading: bool,
+    /// When the running scan/load started. A window that closed before its
+    /// worker answered would otherwise leave the process without a checker.
+    discovery_started: Option<std::time::Instant>,
+    load_started: Option<std::time::Instant>,
+}
+
+/// A scan or load whose window disappeared is asked again after this long.
+const SPELL_RETRY: Duration = Duration::from_secs(10);
 
 /// What startup found wrong with the resolved folders and the state files.
 ///
@@ -189,6 +223,7 @@ impl AppShared {
             startup: RefCell::new(StartupWarnings { dirs: dirs_issues, store: store_issues, shown: false }),
             watch_error_shown: Cell::new(false),
             large_warned: RefCell::new(BTreeSet::new()),
+            spell: RefCell::new(SpellRuntime::default()),
         })
     }
 
@@ -235,6 +270,96 @@ impl AppShared {
         let available = crate::session::positions_available();
         self.pin_support.set(Some(available));
         available
+    }
+
+    /// What this process knows about the Linux checker (ADR-008, E-SPELL).
+    pub fn spell_discovery(&self) -> SpellDiscovery {
+        self.spell.borrow().discovery.clone()
+    }
+
+    /// The dictionary the checker will use, once discovery found one.
+    ///
+    /// The settings row is shown only while this answers `Some`; a machine
+    /// without a dictionary hides the toggle entirely (E-SPELL).
+    pub fn spell_availability(&self) -> Option<Availability> {
+        match &self.spell.borrow().discovery {
+            SpellDiscovery::Ready(found) => found.clone(),
+            SpellDiscovery::Unknown | SpellDiscovery::Pending => None,
+        }
+    }
+
+    /// Marks discovery as running and returns its generation, or `None` when
+    /// another window already asked or the scan is done.
+    pub fn begin_spell_discovery(&self) -> Option<u64> {
+        let mut spell = self.spell.borrow_mut();
+        let stale = spell.discovery == SpellDiscovery::Pending
+            && spell.discovery_started.is_some_and(|started| started.elapsed() > SPELL_RETRY);
+        if spell.discovery != SpellDiscovery::Unknown && !stale {
+            return None;
+        }
+        spell.discovery_generation = spell.discovery_generation.wrapping_add(1);
+        spell.discovery = SpellDiscovery::Pending;
+        spell.discovery_started = Some(std::time::Instant::now());
+        Some(spell.discovery_generation)
+    }
+
+    /// Accepts a discovery answer. A stale generation changes nothing.
+    pub fn finish_spell_discovery(&self, generation: u64, found: Option<Availability>) -> bool {
+        let mut spell = self.spell.borrow_mut();
+        if spell.discovery != SpellDiscovery::Pending || spell.discovery_generation != generation {
+            return false;
+        }
+        spell.discovery = SpellDiscovery::Ready(found);
+        spell.discovery_started = None;
+        true
+    }
+
+    /// The loaded dictionary, shared by every window.
+    pub fn spell_dictionary(&self) -> Option<Arc<Spell>> {
+        self.spell.borrow().dictionary.clone()
+    }
+
+    /// Starts one dictionary load, if a dictionary exists and none is loading.
+    pub fn begin_spell_load(&self) -> Option<u64> {
+        self.spell_availability()?;
+        let mut spell = self.spell.borrow_mut();
+        let stale = spell.loading && spell.load_started.is_some_and(|started| started.elapsed() > SPELL_RETRY);
+        if spell.dictionary.is_some() || (spell.loading && !stale) {
+            return None;
+        }
+        spell.load_generation = spell.load_generation.wrapping_add(1);
+        spell.loading = true;
+        spell.load_started = Some(std::time::Instant::now());
+        Some(spell.load_generation)
+    }
+
+    /// Accepts a load answer. `None` means the pair could not be parsed, so the
+    /// toggle is hidden for the rest of the process.
+    pub fn finish_spell_load(&self, generation: u64, dictionary: Option<Arc<Spell>>) -> bool {
+        let mut spell = self.spell.borrow_mut();
+        if !spell.loading || spell.load_generation != generation {
+            return false;
+        }
+        spell.loading = false;
+        spell.load_started = None;
+        match dictionary {
+            Some(dictionary) => {
+                spell.dictionary = Some(dictionary);
+            }
+            None => spell.discovery = SpellDiscovery::Ready(None),
+        }
+        true
+    }
+
+    /// Seeds the checker for a unit test, skipping the worker round trip.
+    #[cfg(test)]
+    pub(crate) fn seed_spell(&self, availability: Option<Availability>, dictionary: Option<Arc<Spell>>) {
+        let mut spell = self.spell.borrow_mut();
+        spell.discovery = SpellDiscovery::Ready(availability);
+        spell.dictionary = dictionary;
+        spell.loading = false;
+        spell.discovery_started = None;
+        spell.load_started = None;
     }
 
     /// Sends one window's always-on-top state, through the native handle or a
@@ -1591,6 +1716,45 @@ mod tests {
             future,
             "the newer version's file is untouched"
         );
+    }
+
+    fn spell_fixture() -> Availability {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spell/system");
+        Availability {
+            files: lmdv_edit::spell::DictionaryFiles {
+                language: "en_US".to_owned(),
+                aff: root.join("en_US.aff"),
+                dic: root.join("en_US.dic"),
+            },
+            fallback: false,
+        }
+    }
+
+    #[test]
+    fn spell_discovery_is_one_scan_and_a_stale_answer_is_dropped() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        assert_eq!(shared.spell_discovery(), SpellDiscovery::Unknown);
+        assert!(shared.spell_availability().is_none());
+
+        let generation = shared.begin_spell_discovery().expect("the first scan");
+        assert!(shared.begin_spell_discovery().is_none(), "a second window joins the first scan");
+        assert!(!shared.finish_spell_discovery(generation + 1, None), "a stale generation changes nothing");
+        assert!(shared.finish_spell_discovery(generation, Some(spell_fixture())));
+        assert_eq!(shared.spell_availability().map(|found| found.language().to_owned()).as_deref(), Some("en_US"));
+        assert!(shared.begin_spell_discovery().is_none(), "the scan is done for this launch");
+    }
+
+    #[test]
+    fn a_dictionary_that_cannot_load_hides_the_checker() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        shared.seed_spell(Some(spell_fixture()), None);
+        let generation = shared.begin_spell_load().expect("the load");
+        assert!(shared.begin_spell_load().is_none(), "one load at a time");
+        assert!(shared.finish_spell_load(generation, None));
+        assert!(shared.spell_availability().is_none(), "an unreadable dictionary hides the toggle");
+        assert!(shared.spell_dictionary().is_none());
     }
 
     #[test]

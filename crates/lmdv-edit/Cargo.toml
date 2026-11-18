@@ -10,4 +10,5 @@ rune.workspace = true
 rune-kit.workspace = true
 lmdv-core = { path = "../lmdv-core" }
 regex = "1"
+spellbook = "0.4"
 unicode-segmentation = "1.13"

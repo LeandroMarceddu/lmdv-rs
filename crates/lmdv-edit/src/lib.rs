@@ -13,7 +13,9 @@
 //! - [`format`](mod@format): the formatting bar, line commands and block
 //!   inserts from the original's `src/editCommands.ts` (E-22–E-31);
 //! - [`syntax`](mod@syntax): Markdown source highlighting from `rune-kit`'s
-//!   highlighter, mapped to [`rune::Span`]s.
+//!   highlighter, mapped to [`rune::Span`]s;
+//! - [`spell`](mod@spell): Hunspell dictionary discovery, checking and the
+//!   underline spans that compose with the syntax spans (ADR-008, E-SPELL).
 //!
 //! Canonical text is always LF. A file's line ending lives beside the buffer
 //! and is applied only by [`EditorSession::save_text`], which also never adds
@@ -25,6 +27,7 @@ pub mod block;
 pub mod find;
 pub mod format;
 pub mod session;
+pub mod spell;
 pub mod syntax;
 
 pub use block::{
@@ -37,4 +40,8 @@ pub use format::{
     move_line_up, select_line, set_heading, toggle_comment, toggle_line_prefix, toggle_wrap,
 };
 pub use session::{EditorSession, EditorSnapshot};
+pub use spell::{
+    APP_DICTIONARY_DIR, Availability, DictionaryFiles, SUGGESTION_LIMIT, Spell, SpellError, compose_underlines,
+    dictionary_roots, discover, requested_tags,
+};
 pub use syntax::{SYNTAX_MAX_BYTES, SyntaxCache, syntax_spans};
