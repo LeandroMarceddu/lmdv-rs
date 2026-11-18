@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps and tab quick wins complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC and the Rune `cca5df6` bump are complete. P6 settings/spellcheck remainder, P6-SAFE, panes/export work and P7 audit/packaging remain. P0–P5 and P6-01 complete.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins and P6-SAFE batch 4 are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0 release are complete. P6 settings/spellcheck and i18n remainders, panes/export work and the P7 audit remain. P0–P5 and P6-01 complete.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -371,8 +371,8 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; unsigned and without checksums.
-- Validation: shellcheck, desktop-file-validate, xmllint, JSON, namcap, SRCINFO diff; AppStream expected warnings; no end-to-end signed release yet (OI-153).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0** was published from it (unsigned, no checksums).
+- Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
 
@@ -381,15 +381,25 @@
 - Windows compilation is verified by the user (`cargo check --workspace --all-targets`), and `.github/workflows/ci.yml` repeats that compile check on `windows-latest` for pushes to `main` and pull requests. Windows is compile-checked only; the runtime gaps stay open in OI-155.
 - CI: `ubuntu-latest` installs the winit/wgpu/fontconfig packages plus `poppler-utils`/`qpdf` so the PDF tests assert instead of skip, then runs `scripts/run-gates.sh` (parity checklist, vendor check, fmt, workspace check/test, clippy); `windows-latest` runs the compile check. Superseded runs are cancelled; Linux caches only the Cargo registry.
 
+## P6-SAFE batch 4 — complete
+
+- OI-005/007/010/012/071/073 fixed; OI-072 waits on the user's decision about the E-14 substitute (behavior unchanged).
+- One document per file: load completion compares the canonical path and `(dev, ino)`. An already-ready document wins over the async read, a loading duplicate is absorbed, tabs keep their strip place, anchor and history, and other windows join through `UiMsg::DocumentMerged`.
+- Save As (E-11/E-12): folder is the file's own, else the pane root, else the platform Documents folder; pasted Back/Forward places are renamed; a worker probe runs before any write, a dirty duplicate aborts, and a clean duplicate is released (in-window, or cross-window via `UiMsg::ReleaseDocument`).
+- Startup: `AppDirs::resolve_reported` (portable→XDG fallback), the five `*_reported` loaders and `StoreHandle::start_with`/`protect_files` keep a future-schema or foreign state file untouched; one notice per launch.
+- Documents over 8 MiB warn once and open in the reader; restored edit mode is suppressed and `Ctrl+E` still edits.
+- A deleted or unreadable file offers its crash draft, and the recovered text reaches **Save again**; the document watcher's setup error is shown once.
+- Commits `c2f37b2` (io) and `252b0c5` (app); 607 i18n keys; full gate green. New follow-ups OI-169–173.
+
 ## Next up
 
-Batch 3 (P6-TAB-QUICK) is complete; no worker is running. The session stops here per the user's instruction.
+P6-SAFE batch 4 is complete (see above); no worker is running.
 
 **Next when work resumes:**
 
-1. P6-SAFE file-safety edges (OI-005/007/010/012/071/072/073).
+1. OI-072: accept or reject the documented E-14 substitute (tab-scoped edit sessions), then close it with a `docs/FEATURE_PARITY.md` row.
 2. P6-I18N remainder: spellcheck (OI-152), OI-037 math placeholder a11y, OI-104 PDF date/file-selection, OI-165 H-04 links.
-3. P6-PANES/P5-EXPORT; P4/P7 packaging and cross-platform checks after the feature pass.
+3. P6-PANES/P5-EXPORT; P7 audit and cross-platform checks after the feature pass.
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 
