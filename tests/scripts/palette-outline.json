@@ -1,0 +1,6 @@
+[
+  {"t": 0.3, "type": "key", "name": "Escape"},
+  {"t": 0.6, "type": "key", "name": "k", "cmd": true},
+  {"t": 0.9, "type": "type", "text": "#"},
+  {"t": 1.8, "type": "mark", "name": "outline"}
+]

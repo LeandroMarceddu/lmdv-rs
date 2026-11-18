@@ -1,0 +1,17 @@
+[package]
+name = "lmdv-md"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+pulldown-cmark = { version = "0.13", default-features = false }
+serde = { version = "1", features = ["derive", "rc"] }
+html5ever = "0.35"
+markup5ever_rcdom = "0.35"
+percent-encoding = "2"
+stacker = "0.1"
+
+[dev-dependencies]
+serde_json = "1"

@@ -1,0 +1,19 @@
+[
+  {"t": 0.4, "type": "mark", "name": "open"},
+  {"t": 0.7, "type": "key", "name": "Down"},
+  {"t": 0.9, "type": "mark", "name": "down"},
+  {"t": 1.1, "type": "key", "name": "PageDown"},
+  {"t": 1.3, "type": "mark", "name": "next-group"},
+  {"t": 1.5, "type": "type", "text": "d"},
+  {"t": 1.8, "type": "mark", "name": "query-read"},
+  {"t": 2.0, "type": "key", "name": "PageUp"},
+  {"t": 2.2, "type": "mark", "name": "previous-group"},
+  {"t": 2.4, "type": "key", "name": "Escape"},
+  {"t": 2.7, "type": "mark", "name": "closed"},
+  {"t": 3.0, "type": "key", "name": "k", "cmd": true},
+  {"t": 3.3, "type": "mark", "name": "reopened"},
+  {"t": 3.6, "type": "type", "text": "save"},
+  {"t": 4.0, "type": "mark", "name": "save-query"},
+  {"t": 4.3, "type": "key", "name": "Escape"},
+  {"t": 4.6, "type": "mark", "name": "closed-again"}
+]

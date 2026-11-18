@@ -1,0 +1,6 @@
+[
+  {"t": 0.4, "type": "mark", "name": "start"},
+  {"t": 0.5, "type": "click", "key": "outline-h12"},
+  {"t": 1.4, "type": "mark", "name": "landed"},
+  {"t": 2.4, "type": "mark", "name": "after"}
+]

@@ -1,0 +1,30 @@
+[package]
+name = "lmdv-export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lmdv-md = { path = "../lmdv-md" }
+lmdv-math = { path = "../lmdv-math" }
+lmdv-i18n = { path = "../lmdv-i18n" }
+# Presentation-only syntax tokenizer (no Rune runtime, renderer or webview).
+rune-highlights = { path = "../../vendor/rune/crates/rune-highlights" }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+percent-encoding = "2"
+thiserror = "2"
+# PDF export: a real typesetter with a page model (ADR-015, SP-02). No network
+# at runtime; fonts and files come from the caller through a World.
+typst = "0.15.1"
+typst-layout = "0.15.1"
+typst-pdf = "0.15.1"
+# Typst's bundled text faces are the no-caller-font fallback; caller fonts are
+# loaded first and win for the families they provide.
+typst-assets = { version = "0.15.1", features = ["fonts"] }
+
+[dev-dependencies]
+# Reading the generated DOCX package and parsing its XML in the tests.
+roxmltree = "0.21"
+zip = { version = "2.4", default-features = false }

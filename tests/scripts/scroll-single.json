@@ -1,0 +1,6 @@
+[
+  {"t": 0.6, "type": "key", "name": "e", "cmd": true},
+  {"t": 1.2, "type": "mark", "name": "editing"},
+  {"t": 1.6, "type": "wheel", "x": 220, "y": 500, "dy": -520},
+  {"t": 2.2, "type": "mark", "name": "after-source"}
+]

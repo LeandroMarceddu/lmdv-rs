@@ -1,0 +1,89 @@
+# Maintainer: lmdv maintainers <maintainers@example.invalid>
+#
+# Source build. Rune pins Rust 1.99.1 (rust-toolchain.toml); Rustup supplies that
+# toolchain explicitly, so the build does not depend on Arch's rolling rustc.
+# The full workspace under vendor/rune/ is part of the release tarball.
+#
+# Before submitting:
+#   1. Replace $url and source=() with the real release location, then run
+#      `updpkgsums`.
+#   2. Regenerate .SRCINFO with `makepkg --printsrcinfo > .SRCINFO`.
+#   3. Sanity-check with `namcap PKGBUILD` and build in a clean chroot.
+# See README.md for the lmdv-bin variant and packaging decisions.
+
+pkgname=lmdv
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Native Markdown viewer and editor built with Rust and Rune"
+arch=('x86_64' 'aarch64')
+# No project homepage by decision. This is the release-source base used by
+# source=(), not a homepage; replace the placeholder when publishing.
+url="https://example.invalid/lmdv"
+license=('MIT')
+depends=(
+  'glibc'
+  'gcc-libs'
+  'libxkbcommon'
+  'wayland'
+  'vulkan-icd-loader'
+  'shared-mime-info'
+  'desktop-file-utils'
+  'hicolor-icon-theme'
+)
+makedepends=('rustup')
+optdepends=(
+  'vulkan-radeon: Vulkan driver for AMD GPUs'
+  'vulkan-intel: Vulkan driver for Intel GPUs'
+  'nvidia-utils: Vulkan driver for NVIDIA GPUs'
+  'xdg-desktop-portal: file dialogs and document portal on sandboxed sessions'
+)
+# No options=(!strip): the release binary needs no debug symbols; makepkg's
+# strip only removes them. Add !strip (and debug) if you need symbolized panic
+# backtraces.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+
+  # Reproducible toolchain: Rune's pinned channel, not the host rustc.
+  if ! rustup toolchain list --installed | grep -q '^1\.99\.1'; then
+    rustup toolchain install 1.99.1 --profile minimal --no-self-update
+  fi
+
+  # Populate the cargo registry; build() and check() then run --frozen.
+  RUSTUP_TOOLCHAIN=1.99.1 cargo fetch --locked
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  RUSTUP_TOOLCHAIN=1.99.1 cargo build --release --frozen --locked -p lmdv
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  # GUI-only tests are skipped without RUNE_GUI_TESTS=1; headless tests run.
+  RUSTUP_TOOLCHAIN=1.99.1 cargo test --release --frozen --locked --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  install -Dm755 target/release/lmdv "$pkgdir/usr/bin/lmdv"
+
+  # The packaged desktop entry uses Exec=lmdv %f and the stable name lmdv,
+  # matching APP_ID in crates/lmdv-app/src/shared.rs.
+  install -Dm644 packaging/lmdv.desktop "$pkgdir/usr/share/applications/lmdv.desktop"
+  install -Dm644 assets/lmdv.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/lmdv.svg"
+
+  # AppStream metadata. The component id is md.lmdv (the XDG data root); the
+  # desktop file it launches is lmdv.desktop. See packaging/README.md.
+  install -Dm644 packaging/lmdv.metainfo.xml "$pkgdir/usr/share/metainfo/md.lmdv.metainfo.xml"
+
+  # Markdown type registration (aliases, extra globs, stable weight). Arch's
+  # shared-mime-info/desktop-file-utils/gtk-update-icon-cache hooks refresh the
+  # /usr caches automatically, so no .INSTALL file is needed.
+  install -Dm644 packaging/lmdv.xml "$pkgdir/usr/share/mime/packages/lmdv.xml"
+
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

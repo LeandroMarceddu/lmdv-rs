@@ -1,0 +1,18 @@
+[
+  {"t": 0.3, "type": "key", "name": "Escape"},
+  {"t": 0.6, "type": "key", "name": "k", "cmd": true},
+  {"t": 0.9, "type": "type", "text": ">"},
+  {"t": 1.2, "type": "mark", "name": "commands"},
+  {"t": 1.4, "type": "type", "text": "save"},
+  {"t": 1.8, "type": "mark", "name": "save"},
+  {"t": 2.0, "type": "key", "name": "Backspace"},
+  {"t": 2.1, "type": "key", "name": "Backspace"},
+  {"t": 2.2, "type": "key", "name": "Backspace"},
+  {"t": 2.3, "type": "key", "name": "Backspace"},
+  {"t": 2.4, "type": "key", "name": "Backspace"},
+  {"t": 2.6, "type": "key", "name": "Backspace"},
+  {"t": 2.9, "type": "type", "text": "#"},
+  {"t": 3.2, "type": "mark", "name": "outline"},
+  {"t": 3.4, "type": "type", "text": "quiet"},
+  {"t": 3.8, "type": "mark", "name": "heading"}
+]

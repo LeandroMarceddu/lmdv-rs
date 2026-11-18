@@ -1,0 +1,106 @@
+name: CI
+
+# Linux is the primary target and runs the full workspace gate.
+# Windows is compile-checked only: it must keep building, but runtime
+# integration (single-instance routing, identity, external open) is not
+# claimed yet. See docs/OPEN_ITEMS.md OI-155.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch or pull request cancels the older run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  linux:
+    name: Linux gate (Wayland/X11, headless)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # winit dlopens X11/Wayland/xkbcommon and wgpu needs a Vulkan loader with
+      # a device; the dev packages carry both the header/pkg-config surface and
+      # the runtime libraries. mesa-vulkan-drivers ships lavapipe, the software
+      # Vulkan device a GPU-less runner renders with; fonts-dejavu-core gives
+      # fontconfig the sans/mono faces Rune uses, and fonts-noto-core the Noto
+      # Sans the PDF exporter prefers over its serif fallback.
+      # poppler-utils and qpdf are optional in the PDF tests: installing them
+      # turns those assertions on instead of skipping them.
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libfontconfig1-dev \
+            fonts-dejavu-core \
+            fonts-noto-core \
+            poppler-utils \
+            qpdf \
+            pkg-config
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+
+      # Registry and git checkouts only. The gate builds and links the whole
+      # workspace test suite with line tables; caching that target/ directory
+      # would spend most of GitHub's 10 GB repository cache budget on one
+      # Linux entry and evict the Windows cache with it.
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-gate
+          cache-targets: false
+
+      # Parity checklist, vendor check, fmt, workspace check/test and clippy.
+      - name: Workspace gate
+        run: scripts/run-gates.sh
+
+  windows:
+    name: Windows compile check (not runtime support)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+
+      # `cargo check` writes metadata plus small build-script binaries, so a
+      # target cache stays well under the repository cache limit and saves
+      # most of the cold build of Rune/wgpu/typst.
+      - name: Cache Cargo registry and check artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-check
+
+      # The command the user verified on Windows. A `cargo build -p lmdv`
+      # would additionally link the GUI binary (MSVC link + winres icon), which
+      # has not been validated in CI; add it once Windows runtime support is
+      # actually gated.
+      - name: cargo check --workspace --all-targets
+        run: cargo check --workspace --all-targets

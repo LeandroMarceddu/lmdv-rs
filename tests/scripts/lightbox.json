@@ -1,0 +1,131 @@
+[
+  {
+    "t": 0.5,
+    "type": "mark",
+    "name": "start"
+  },
+  {
+    "t": 0.8,
+    "type": "key",
+    "name": "Escape"
+  },
+  {
+    "t": 1.2,
+    "type": "mark",
+    "name": "scene-preview-closed"
+  },
+  {
+    "t": 1.6,
+    "type": "move",
+    "key": "media-b2"
+  },
+  {
+    "t": 1.9,
+    "type": "mark",
+    "name": "hint-hovered"
+  },
+  {
+    "t": 2.2,
+    "type": "tap",
+    "key": "media-b2"
+  },
+  {
+    "t": 2.6,
+    "type": "mark",
+    "name": "image-open"
+  },
+  {
+    "t": 3.0,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 3.18,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 3.36,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 3.54,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 4.0,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 4.0,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 4.08,
+    "type": "key",
+    "name": "+"
+  },
+  {
+    "t": 4.0,
+    "type": "mark",
+    "name": "zoomed"
+  },
+  {
+    "t": 4.3,
+    "type": "drag",
+    "key": "lightbox-viewport",
+    "dx": -80,
+    "dy": -40,
+    "dur": 0.4
+  },
+  {
+    "t": 4.9,
+    "type": "mark",
+    "name": "panned"
+  },
+  {
+    "t": 5.2,
+    "type": "key",
+    "name": "Escape"
+  },
+  {
+    "t": 5.6,
+    "type": "mark",
+    "name": "image-closed"
+  },
+  {
+    "t": 6.0,
+    "type": "tap",
+    "key": "media-b4"
+  },
+  {
+    "t": 6.5,
+    "type": "mark",
+    "name": "diagram-open"
+  },
+  {
+    "t": 6.9,
+    "type": "wheel",
+    "key": "lightbox-viewport",
+    "dy": -120
+  },
+  {
+    "t": 7.3,
+    "type": "mark",
+    "name": "diagram-zoomed"
+  },
+  {
+    "t": 7.7,
+    "type": "key",
+    "name": "Escape"
+  },
+  {
+    "t": 8.1,
+    "type": "mark",
+    "name": "end"
+  }
+]

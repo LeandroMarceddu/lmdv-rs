@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for lmdv.
+
+  The component id is md.lmdv (the app's XDG data root, crates/lmdv-io/src/dirs.rs).
+  The app still reports the window id "lmdv" (crates/lmdv-app/src/shared.rs APP_ID),
+  so the launchable is lmdv.desktop; keep the two in sync if APP_ID ever becomes
+  reverse-DNS.
+
+  Known validator findings (see packaging/README.md):
+    * cid-desktopapp-is-not-rdns: md.lmdv has two components; AppStream wants a
+      reverse-DNS id with a project component.
+    * url-homepage-missing: accepted by decision; no project homepage will be provided.
+-->
+<component type="desktop-application">
+  <id>md.lmdv</id>
+  <name>lmdv</name>
+  <summary>View and edit Markdown documents</summary>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>lmdv is a native Linux Markdown viewer and editor built with Rust and Rune. It
+      renders CommonMark, GFM tables and task lists, footnotes, GitHub callouts, front
+      matter, Mermaid diagrams and TeX math without a webview or a browser engine.</p>
+    <p>Documents open in a distraction-free reader that remembers the reading position.
+      Editing is an explicit mode; files are written only when you save, line endings and
+      the byte-order mark are preserved, and unsaved changes are never silently replaced
+      by a change on disk.</p>
+    <p>HTML, DOCX and PDF export work offline and never upload a document.</p>
+  </description>
+
+  <launchable type="desktop-id">lmdv.desktop</launchable>
+  <provides>
+    <binary>lmdv</binary>
+  </provides>
+
+  <categories>
+    <category>Office</category>
+    <category>Viewer</category>
+    <category>Utility</category>
+  </categories>
+
+  <developer id="md.lmdv">
+    <name>lmdv contributors</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-15" type="development">
+      <description>
+        <p>First packaging preview: desktop entry, AppStream metadata, AppImage,
+          Flatpak and AUR recipes.</p>
+      </description>
+    </release>
+  </releases>
+</component>

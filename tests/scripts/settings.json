@@ -1,0 +1,18 @@
+[
+  {"t": 0.4, "type": "key", "name": ",", "cmd": true},
+  {"t": 0.7, "type": "mark", "name": "open"},
+  {"t": 1.0, "type": "tap", "key": "settings-theme-3"},
+  {"t": 1.4, "type": "mark", "name": "dark"},
+  {"t": 1.8, "type": "tap", "key": "settings-font-1"},
+  {"t": 2.2, "type": "mark", "name": "serif"},
+  {"t": 2.6, "type": "tap", "key": "settings-size-up"},
+  {"t": 3.0, "type": "mark", "name": "larger"},
+  {"t": 3.4, "type": "tap", "key": "settings-format-bar"},
+  {"t": 3.8, "type": "mark", "name": "format-off"},
+  {"t": 4.2, "type": "tap", "key": "settings-language-trigger"},
+  {"t": 4.6, "type": "mark", "name": "language-open"},
+  {"t": 5.0, "type": "tap", "key": "option2"},
+  {"t": 5.4, "type": "mark", "name": "italian"},
+  {"t": 5.8, "type": "key", "name": "Escape"},
+  {"t": 6.2, "type": "mark", "name": "closed"}
+]

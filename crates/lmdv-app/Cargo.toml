@@ -1,0 +1,25 @@
+[package]
+name = "lmdv-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+lmdv-core = { path = "../lmdv-core" }
+lmdv-io = { path = "../lmdv-io" }
+lmdv-md = { path = "../lmdv-md" }
+lmdv-edit = { path = "../lmdv-edit" }
+lmdv-render = { path = "../lmdv-render" }
+lmdv-math = { path = "../lmdv-math" }
+lmdv-i18n = { path = "../lmdv-i18n" }
+lmdv-export = { path = "../lmdv-export" }
+fontdb = "0.23"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

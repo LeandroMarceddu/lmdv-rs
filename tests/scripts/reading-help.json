@@ -1,0 +1,7 @@
+[
+  {"t": 0.4, "type": "mark", "name": "closed"},
+  {"t": 0.5, "type": "key", "name": "?"},
+  {"t": 0.9, "type": "mark", "name": "open"},
+  {"t": 1.0, "type": "key", "name": "?"},
+  {"t": 1.4, "type": "mark", "name": "closed-again"}
+]

@@ -1,0 +1,7 @@
+[
+  {"t": 0.4, "type": "mark", "name": "start"},
+  {"t": 0.8, "type": "wheel", "x": 220, "y": 500, "dy": -400},
+  {"t": 1.4, "type": "mark", "name": "after-source"},
+  {"t": 1.8, "type": "wheel", "x": 900, "y": 500, "dy": -260},
+  {"t": 2.4, "type": "mark", "name": "after-preview"}
+]

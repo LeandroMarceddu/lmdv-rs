@@ -1,0 +1,21 @@
+[
+  {"t": 0.4, "type": "mark", "name": "start"},
+  {"t": 0.8, "type": "key", "name": "Escape"},
+  {"t": 1.2, "type": "mark", "name": "filter-cleared"},
+  {"t": 1.5, "type": "key", "name": "Escape"},
+  {"t": 1.9, "type": "mark", "name": "preview-closed"},
+  {"t": 2.2, "type": "move", "key": "table-copy-b2"},
+  {"t": 2.6, "type": "mark", "name": "bar-hovered"},
+  {"t": 2.9, "type": "tap", "key": "table-preview-b2"},
+  {"t": 3.3, "type": "mark", "name": "preview-opened"},
+  {"t": 3.5, "type": "tap", "key": "table-preview-query"},
+  {"t": 3.8, "type": "type", "text": "alpha beta"},
+  {"t": 4.4, "type": "mark", "name": "filtered"},
+  {"t": 4.6, "type": "tap", "key": "table-preview-head-0"},
+  {"t": 5.0, "type": "mark", "name": "sorted"},
+  {"t": 5.2, "type": "tap", "key": "table-preview-copy"},
+  {"t": 6.0, "type": "mark", "name": "copied"},
+  {"t": 6.3, "type": "key", "name": "Escape"},
+  {"t": 6.6, "type": "key", "name": "Escape"},
+  {"t": 7.0, "type": "mark", "name": "closed"}
+]

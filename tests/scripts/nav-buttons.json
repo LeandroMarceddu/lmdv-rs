@@ -1,0 +1,10 @@
+[
+  {"t":0.8, "type":"tap","key":"outline-h8"},
+  {"t":1.5, "type":"mark","name":"jumped"},
+  {"t":1.7, "type":"tap","x":297,"y":173},
+  {"t":2.6, "type":"mark","name":"deeper"},
+  {"t":2.9, "type":"tap","x":600,"y":300,"button":"back"},
+  {"t":3.6, "type":"mark","name":"back"},
+  {"t":3.9, "type":"tap","x":600,"y":300,"button":"forward"},
+  {"t":4.6, "type":"mark","name":"forward"}
+]

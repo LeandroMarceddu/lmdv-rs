@@ -1,0 +1,9 @@
+[
+  {"t": 0.5, "type": "mark", "name": "first"},
+  {"t": 0.9, "type": "key", "name": "Tab", "cmd": true},
+  {"t": 1.4, "type": "mark", "name": "next"},
+  {"t": 1.8, "type": "key", "name": "Tab", "cmd": true},
+  {"t": 2.3, "type": "mark", "name": "next-wrap"},
+  {"t": 2.7, "type": "key", "name": "Tab", "cmd": true, "shift": true},
+  {"t": 3.2, "type": "mark", "name": "previous"}
+]

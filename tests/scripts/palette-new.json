@@ -1,0 +1,7 @@
+[
+  {"t": 0.4, "type": "key", "name": "Escape"},
+  {"t": 0.8, "type": "key", "name": "k", "cmd": true},
+  {"t": 1.2, "type": "mark", "name": "start"},
+  {"t": 1.6, "type": "type", "text": "theme"},
+  {"t": 2.2, "type": "mark", "name": "themes"}
+]

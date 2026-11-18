@@ -1,0 +1,15 @@
+[package]
+name = "lmdv-i18n"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rune-i18n = { path = "../../vendor/rune/crates/rune-i18n" }
+
+[build-dependencies]
+rune-i18n = { path = "../../vendor/rune/crates/rune-i18n", features = ["codegen"] }
+
+[dev-dependencies]
+serde_json = "1"

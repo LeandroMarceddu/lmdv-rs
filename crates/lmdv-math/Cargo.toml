@@ -1,0 +1,16 @@
+[package]
+name = "lmdv-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+ratex-parser = "0.1.15"
+ratex-layout = "0.1.15"
+# `embed-fonts` makes the crate self-contained: no KaTeX font directory is
+# needed at runtime, and no system font is required for standard math glyphs.
+ratex-render = { version = "0.1.15", features = ["embed-fonts"] }
+ratex-types = "0.1.15"
+image = { version = "0.25", default-features = false, features = ["png"] }
+thiserror = "2"

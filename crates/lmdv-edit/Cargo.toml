@@ -1,0 +1,13 @@
+[package]
+name = "lmdv-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+lmdv-core = { path = "../lmdv-core" }
+regex = "1"
+unicode-segmentation = "1.13"

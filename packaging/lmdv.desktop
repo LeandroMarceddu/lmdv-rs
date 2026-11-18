@@ -1,0 +1,26 @@
+# lmdv desktop entry for system packages (pacman, AppImage, Flatpak).
+# The per-user development installer writes its own copy under
+# ~/.local/share/applications with an absolute Exec path; that copy takes
+# precedence over this one. See packaging/README.md.
+#
+# Exec uses %f (one local path), not %F: the CLI parses only the first
+# positional (docs/LINUX_INTEGRATION.md §2.2), so advertising multi-file
+# selection would silently drop files.
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=lmdv
+GenericName=Markdown Viewer
+Comment=View and edit Markdown documents
+Exec=lmdv %f
+TryExec=lmdv
+Icon=lmdv
+Terminal=false
+StartupNotify=false
+StartupWMClass=lmdv
+SingleMainWindow=true
+DBusActivatable=false
+NoDisplay=false
+Categories=Office;Viewer;Utility;
+Keywords=markdown;md;mdown;mkd;mkdn;mdwn;view;preview;text;
+MimeType=text/markdown;text/x-markdown;application/x-markdown;

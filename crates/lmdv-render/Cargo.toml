@@ -1,0 +1,12 @@
+[package]
+name = "lmdv-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+lmdv-md = { path = "../lmdv-md" }
+lmdv-i18n = { path = "../lmdv-i18n" }

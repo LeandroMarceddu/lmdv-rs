@@ -1,0 +1,5 @@
+[
+  {"t": 0.6, "type": "key", "name": "e", "cmd": true},
+  {"t": 1.2, "type": "double-click", "x": 580, "y": 284},
+  {"t": 1.8, "type": "mark", "name": "after-double"}
+]

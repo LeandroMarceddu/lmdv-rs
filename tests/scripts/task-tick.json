@@ -1,0 +1,7 @@
+[
+  {"t": 0.5, "type": "mark", "name": "start"},
+  {"t": 1.0, "type": "tap", "key": "task-hit-b8-2-335575d7"},
+  {"t": 2.5, "type": "mark", "name": "ticked"},
+  {"t": 3.0, "type": "tap", "key": "notice-action"},
+  {"t": 4.5, "type": "mark", "name": "undone"}
+]

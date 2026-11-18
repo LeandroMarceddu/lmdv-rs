@@ -1,0 +1,1281 @@
+//! Versioned JSON state with one coalescing writer thread.
+//!
+//! The store owns `prefs.json`, `recents.json`, `positions.json`, `ui.json`,
+//! `session.json` and one file per draft. `StoreHandle::patch` is non-blocking;
+//! the writer keeps at most one write per file per 300 ms and only `flush` on
+//! close/quit forces pending values out. Every file is written atomically and
+//! carries `schema` + `app`; a corrupt file is renamed to `.bad-<timestamp>`
+//! and defaults are used.
+//!
+//! Loading is explicit and happens on a worker: [`load_recents`],
+//! [`load_positions`], [`load_ui`], [`load_session`], [`load_prefs`],
+//! [`load_drafts`] and [`load_draft`].
+
+use std::collections::{BTreeMap, HashMap};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use lmdv_core::{
+    DRAFT_MAX_CHARS, DRAFT_MAX_ENTRIES, Draft, LEFT_WIDTH_DEFAULT, LEFT_WIDTH_MAX, NavHistory, Prefs,
+    RIGHT_WIDTH_DEFAULT, RIGHT_WIDTH_MAX, ScrollAnchor,
+};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+
+use crate::atomic::write_atomic_with;
+use crate::dirs::AppDirs;
+
+/// The current state schema.
+pub const STORE_SCHEMA: u32 = 1;
+/// The value written in every file's `app` field.
+pub const APP_NAME: &str = "lmdv";
+/// Minimum time between two writes of the same state file.
+pub const COALESCE: Duration = Duration::from_millis(300);
+/// Maximum recents.
+pub const RECENTS_MAX: usize = 12;
+/// Maximum reading positions.
+pub const POSITIONS_MAX: usize = 100;
+/// Maximum closed tabs restored for one window.
+pub const CLOSED_TABS_MAX: usize = 25;
+/// Maximum command ids remembered by the palette.
+pub const PALETTE_RECENT_MAX: usize = 8;
+
+const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// A recently opened document.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Recent {
+    /// The document path, spelled as `DocumentKey::File` spells it.
+    pub path: PathBuf,
+    /// The file name, for display.
+    pub name: String,
+    /// The parent folder, for display.
+    pub dir: PathBuf,
+    /// Last open, milliseconds since the epoch.
+    pub opened_at: u64,
+}
+
+impl Recent {
+    /// Builds an entry from a path; the name and folder are derived for display.
+    pub fn new(path: impl Into<PathBuf>, opened_at: u64) -> Self {
+        let path = path.into();
+        let name = path.file_name().map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+        let dir = path.parent().map_or_else(PathBuf::new, Path::to_path_buf);
+        Self { path, name, dir, opened_at }
+    }
+}
+
+/// One remembered reading position.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Position {
+    /// The heading id; empty for a raw offset.
+    pub id: String,
+    /// How far the anchor sat above the viewport top.
+    pub offset: f32,
+    /// Last update, milliseconds since the epoch.
+    pub at: u64,
+}
+
+impl Position {
+    /// Captures an anchor for storage.
+    pub fn from_anchor(anchor: &ScrollAnchor, at: u64) -> Self {
+        let mut anchor = anchor.clone();
+        anchor.sanitize();
+        Self { id: anchor.id, offset: anchor.offset, at }
+    }
+
+    /// Recovers the anchor, sanitizing corrupt offsets.
+    pub fn to_anchor(&self) -> ScrollAnchor {
+        let mut anchor = ScrollAnchor { id: self.id.clone(), offset: self.offset };
+        anchor.sanitize();
+        anchor
+    }
+}
+
+/// Reading positions keyed by the document path.
+///
+/// JSON object keys are strings, so a non-UTF-8 Linux path uses its lossy
+/// UTF-8 spelling; the application's canonical paths are UTF-8 in practice.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PositionTable(BTreeMap<String, Position>);
+
+impl PositionTable {
+    /// An empty table.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The remembered anchor, or `None` when the document starts at the top.
+    pub fn get(&self, path: &Path) -> Option<ScrollAnchor> {
+        self.0.get(&path_key(path)).map(Position::to_anchor)
+    }
+
+    /// Stores an anchor. An at-top anchor forgets the entry; the table is
+    /// capped at [`POSITIONS_MAX`] with the oldest `at` evicted.
+    pub fn remember(&mut self, path: &Path, anchor: &ScrollAnchor, at: u64) {
+        let key = path_key(path);
+        let mut anchor = anchor.clone();
+        anchor.sanitize();
+        if anchor.is_top() {
+            self.0.remove(&key);
+            return;
+        }
+        self.0.insert(key, Position::from_anchor(&anchor, at));
+        self.normalize();
+    }
+
+    /// Forgets one document.
+    pub fn forget(&mut self, path: &Path) {
+        self.0.remove(&path_key(path));
+    }
+
+    /// Moves a position when its file is renamed.
+    pub fn rename(&mut self, from: &Path, to: &Path) {
+        let from = path_key(from);
+        let to = path_key(to);
+        if from == to {
+            return;
+        }
+        if let Some(position) = self.0.remove(&from) {
+            self.0.insert(to, position);
+        }
+    }
+
+    /// Evicts the oldest entries above the cap, drops at-top entries and
+    /// sanitizes offsets.
+    pub fn normalize(&mut self) {
+        for position in self.0.values_mut() {
+            if !position.offset.is_finite() {
+                position.offset = 0.0;
+            }
+        }
+        self.0.retain(|_, position| !(position.id.is_empty() && position.offset <= 0.0));
+        while self.0.len() > POSITIONS_MAX {
+            let Some(oldest) = self.0.iter().min_by_key(|(_, position)| position.at).map(|(key, _)| key.clone()) else {
+                break;
+            };
+            self.0.remove(&oldest);
+        }
+    }
+
+    /// Number of stored positions.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no position is stored.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Iterates the table in path order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &Position)> {
+        self.0.iter().map(|(path, position)| (path.as_str(), position))
+    }
+}
+
+/// Window and file-browser state that survives a restart.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct UiPrefs {
+    /// File-browser width, clamped to the real panel range.
+    pub left_width: f32,
+    /// Outline width, clamped to the real panel range.
+    pub right_width: f32,
+    pub left_hidden: bool,
+    pub right_hidden: bool,
+    /// Explicitly collapsed folders.
+    pub collapsed_folders: Vec<PathBuf>,
+    /// The commands used most recently from the palette, newest first.
+    pub palette_recent: Vec<String>,
+    /// The folder last shown by the file browser.
+    pub tree_root: Option<PathBuf>,
+}
+
+impl Default for UiPrefs {
+    fn default() -> Self {
+        Self {
+            left_width: LEFT_WIDTH_DEFAULT as f32,
+            right_width: RIGHT_WIDTH_DEFAULT as f32,
+            left_hidden: false,
+            right_hidden: false,
+            collapsed_folders: Vec::new(),
+            palette_recent: Vec::new(),
+            tree_root: None,
+        }
+    }
+}
+
+impl UiPrefs {
+    /// Clamps widths, de-duplicates folders and caps the palette list.
+    pub fn normalize(&mut self) {
+        if !self.left_width.is_finite() {
+            self.left_width = LEFT_WIDTH_DEFAULT as f32;
+        }
+        if !self.right_width.is_finite() {
+            self.right_width = RIGHT_WIDTH_DEFAULT as f32;
+        }
+        self.left_width = self.left_width.clamp(LEFT_WIDTH_DEFAULT as f32, LEFT_WIDTH_MAX as f32);
+        self.right_width = self.right_width.clamp(RIGHT_WIDTH_DEFAULT as f32, RIGHT_WIDTH_MAX as f32);
+
+        let mut seen = std::collections::HashSet::new();
+        self.collapsed_folders.retain(|folder| seen.insert(folder.clone()));
+        let mut seen = std::collections::HashSet::new();
+        self.palette_recent.retain(|id| !id.is_empty() && seen.insert(id.clone()));
+        self.palette_recent.truncate(PALETTE_RECENT_MAX);
+    }
+}
+
+/// One window in the restored session.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WindowSession {
+    /// Native window position/size; `None` on Wayland or when unknown.
+    pub placement: Option<WindowPlacement>,
+    /// The window opened maximized. Kept beside `placement` because a session
+    /// written on X11 may be restored on Wayland, where no placement exists.
+    pub maximized: bool,
+    /// Why the window exists, so a torn-off start page stays non-reusable.
+    pub kind: SessionWindowKind,
+    pub tabs: Vec<TabSession>,
+    /// Index into `tabs`; clamped by [`SessionSnapshot::normalize`].
+    pub active: usize,
+    /// Closed tabs, most recent last.
+    pub closed: Vec<ClosedTabSession>,
+}
+
+/// Why a window exists, as the original's `WindowKind` records it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionWindowKind {
+    /// An ordinary window opened by the user or a launch.
+    #[default]
+    Normal,
+    /// A window created by tearing out a start page; launch routing never
+    /// reuses its lone start page.
+    TornOffStart,
+}
+
+/// A window rectangle remembered for the next restore.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct WindowPlacement {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub maximized: bool,
+}
+
+/// What a restored tab shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum TabSource {
+    /// The start page.
+    #[default]
+    Start,
+    /// A file.
+    File { path: PathBuf },
+    /// Pasted text, restored from its draft.
+    Pasted { id: u64, title: String },
+}
+
+/// A tab in a restored session. Editor text is never stored here; drafts
+/// handle recovery.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct TabSession {
+    pub source: TabSource,
+    pub anchor: Option<ScrollAnchor>,
+    /// A `--line` or link target, 1-based.
+    pub line: Option<usize>,
+    /// A heading id target.
+    pub anchor_id: Option<String>,
+    /// The tab's Back/Forward places, as reopened (O-15); empty when the schema
+    /// predates them.
+    pub nav: NavHistory,
+    /// The mode the tab was in; text and undo always come from the file and
+    /// its draft, never from the session.
+    pub mode: TabMode,
+}
+
+/// A tab's reading mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TabMode {
+    /// Read-only rendered view.
+    #[default]
+    Viewer,
+    /// Source editor on the left, live preview on the right.
+    Editor,
+}
+
+/// A closed tab that Ctrl+Shift+T can reopen.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ClosedTabSession {
+    pub source: TabSource,
+    pub index: usize,
+    pub anchor: Option<ScrollAnchor>,
+}
+
+/// The whole restorable session.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SessionSnapshot {
+    /// `false` while running, `true` after a clean quit; a false value means
+    /// the previous run crashed.
+    pub clean: bool,
+    pub windows: Vec<WindowSession>,
+}
+
+impl SessionSnapshot {
+    /// Clamps active indexes, sanitizes anchors and caps closed tabs.
+    pub fn normalize(&mut self) {
+        for window in &mut self.windows {
+            if window.tabs.is_empty() {
+                window.active = 0;
+            } else {
+                window.active = window.active.min(window.tabs.len() - 1);
+            }
+            if let Some(placement) = &mut window.placement {
+                placement.width = placement.width.max(0);
+                placement.height = placement.height.max(0);
+                window.maximized |= placement.maximized;
+                placement.maximized = window.maximized;
+            }
+            for tab in &mut window.tabs {
+                if let Some(anchor) = &mut tab.anchor {
+                    anchor.sanitize();
+                }
+                tab.nav.sanitize();
+            }
+            if window.closed.len() > CLOSED_TABS_MAX {
+                let excess = window.closed.len() - CLOSED_TABS_MAX;
+                window.closed.drain(0..excess);
+            }
+            for tab in &mut window.closed {
+                if let Some(anchor) = &mut tab.anchor {
+                    anchor.sanitize();
+                }
+            }
+        }
+    }
+}
+
+/// A state change sent to the writer thread. Values are whole snapshots; the
+/// writer replaces the previous pending value for the same file.
+#[derive(Clone, Debug)]
+pub enum StorePatch {
+    /// `prefs.json`.
+    Prefs(Prefs),
+    /// `recents.json`, newest first.
+    Recents(Vec<Recent>),
+    /// `positions.json`.
+    Positions(PositionTable),
+    /// `session.json`.
+    Session(SessionSnapshot),
+    /// `ui.json`.
+    Ui(UiPrefs),
+    /// One draft, keyed by the document path or `pasted:<id>`.
+    ///
+    /// The core `Draft` carries no key, so this variant adds it; the writer
+    /// hashes the key into the draft file name.
+    Draft { key: String, draft: Draft },
+    /// Removes one draft by key.
+    RemoveDraft(String),
+}
+
+/// A handle to the writer thread. Cloning shares the same writer.
+#[derive(Clone, Debug)]
+pub struct StoreHandle {
+    tx: Sender<StoreMsg>,
+}
+
+impl StoreHandle {
+    /// Starts the writer for `dirs`. The directories are created if needed.
+    ///
+    /// The thread is detached; dropping every handle lets it drain pending
+    /// values and exit. Call [`Self::flush`] on close/quit when the caller
+    /// needs a guarantee.
+    pub fn start(dirs: AppDirs) -> io::Result<Self> {
+        dirs.ensure()?;
+        let _ = enforce_draft_caps(&dirs);
+        let (tx, rx) = mpsc::channel();
+        thread::Builder::new().name("lmdv-store".to_owned()).spawn(move || Writer::new(dirs, rx).run())?;
+        Ok(Self { tx })
+    }
+
+    /// Queues a whole-file patch. This never blocks.
+    pub fn patch(&self, patch: StorePatch) {
+        let _ = self.tx.send(StoreMsg::Patch(patch));
+    }
+
+    /// Writes every pending value and waits for the writer to acknowledge.
+    ///
+    /// Use only on close/quit, never in a frame. Returns `false` on timeout,
+    /// when the writer is gone, or when a write failed. Drafts are already
+    /// written on their own debounce, so data loss is bounded either way.
+    pub fn flush(&self, timeout: Duration) -> bool {
+        let (ack, wait) = mpsc::sync_channel(1);
+        if self.tx.send(StoreMsg::Flush(ack)).is_err() {
+            return false;
+        }
+        wait.recv_timeout(timeout).unwrap_or(false)
+    }
+}
+
+enum StoreMsg {
+    Patch(StorePatch),
+    Flush(SyncSender<bool>),
+}
+
+#[derive(Clone, Debug)]
+enum Value {
+    Prefs(Prefs),
+    Recents(Vec<Recent>),
+    Positions(PositionTable),
+    Session(SessionSnapshot),
+    Ui(UiPrefs),
+    Draft(Draft),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Key {
+    Prefs,
+    Recents,
+    Positions,
+    Session,
+    Ui,
+    Draft(String),
+}
+
+struct Pending {
+    value: Value,
+    due: Instant,
+    attempts: u8,
+}
+
+struct Writer {
+    dirs: AppDirs,
+    rx: Receiver<StoreMsg>,
+    pending: HashMap<Key, Pending>,
+    last_write: HashMap<Key, Instant>,
+    coalesce: Duration,
+    failed: bool,
+}
+
+impl Writer {
+    fn new(dirs: AppDirs, rx: Receiver<StoreMsg>) -> Self {
+        Self { dirs, rx, pending: HashMap::new(), last_write: HashMap::new(), coalesce: COALESCE, failed: false }
+    }
+
+    fn run(&mut self) {
+        loop {
+            let now = Instant::now();
+            let next_due = self.pending.values().map(|pending| pending.due).min();
+            let message = match next_due {
+                None => match self.rx.recv() {
+                    Ok(message) => Some(message),
+                    Err(_) => break,
+                },
+                Some(due) => match due.checked_duration_since(now) {
+                    Some(wait) if !wait.is_zero() => match self.rx.recv_timeout(wait) {
+                        Ok(message) => Some(message),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    },
+                    _ => None,
+                },
+            };
+
+            match message {
+                Some(StoreMsg::Patch(patch)) => self.apply(patch),
+                Some(StoreMsg::Flush(ack)) => {
+                    self.write_all();
+                    let ok = self.pending.is_empty() && !self.failed;
+                    self.failed = false;
+                    let _ = ack.send(ok);
+                }
+                None => self.write_due(),
+            }
+
+            if let Some(due) = self.pending.values().map(|pending| pending.due).min()
+                && due <= Instant::now()
+            {
+                self.write_due();
+            }
+        }
+        // A dropped sender is a crash or a missing flush; write what remains.
+        self.write_all();
+    }
+
+    fn apply(&mut self, patch: StorePatch) {
+        let (key, value) = match patch {
+            StorePatch::Prefs(mut prefs) => {
+                prefs.sanitize();
+                (Key::Prefs, Value::Prefs(prefs))
+            }
+            StorePatch::Recents(mut recents) => {
+                normalize_recents(&mut recents);
+                (Key::Recents, Value::Recents(recents))
+            }
+            StorePatch::Positions(mut positions) => {
+                positions.normalize();
+                (Key::Positions, Value::Positions(positions))
+            }
+            StorePatch::Session(mut session) => {
+                session.normalize();
+                (Key::Session, Value::Session(session))
+            }
+            StorePatch::Ui(mut ui) => {
+                ui.normalize();
+                (Key::Ui, Value::Ui(ui))
+            }
+            StorePatch::Draft { key, draft } => (Key::Draft(key), Value::Draft(draft)),
+            StorePatch::RemoveDraft(key) => {
+                self.pending.remove(&Key::Draft(key.clone()));
+                let _ = fs::remove_file(draft_path(&self.dirs, &key));
+                return;
+            }
+        };
+
+        let due = self.due_for(&key);
+        self.pending.insert(key, Pending { value, due, attempts: 0 });
+    }
+
+    fn due_for(&self, key: &Key) -> Instant {
+        let now = Instant::now();
+        match self.last_write.get(key) {
+            Some(last) => (*last + self.coalesce).max(now),
+            None => now,
+        }
+    }
+
+    fn write_due(&mut self) {
+        let now = Instant::now();
+        let due: Vec<Key> =
+            self.pending.iter().filter(|(_, pending)| pending.due <= now).map(|(key, _)| key.clone()).collect();
+        let had_draft = due.iter().any(|key| matches!(key, Key::Draft(_)));
+        for key in due {
+            self.write_key(&key);
+        }
+        if had_draft {
+            let _ = enforce_draft_caps(&self.dirs);
+        }
+    }
+
+    fn write_all(&mut self) {
+        let keys: Vec<Key> = self.pending.keys().cloned().collect();
+        let had_draft = keys.iter().any(|key| matches!(key, Key::Draft(_)));
+        for key in keys {
+            self.write_key(&key);
+        }
+        if had_draft {
+            let _ = enforce_draft_caps(&self.dirs);
+        }
+    }
+
+    fn write_key(&mut self, key: &Key) {
+        let Some(mut pending) = self.pending.remove(key) else {
+            return;
+        };
+        self.last_write.insert(key.clone(), Instant::now());
+        let result = match (key, &pending.value) {
+            (Key::Prefs, Value::Prefs(prefs)) => write_json(&self.dirs.prefs_path(), prefs),
+            (Key::Recents, Value::Recents(recents)) => write_json(&self.dirs.recents_path(), recents),
+            (Key::Positions, Value::Positions(positions)) => write_json(&self.dirs.positions_path(), positions),
+            (Key::Session, Value::Session(session)) => write_json(&self.dirs.session_path(), session),
+            (Key::Ui, Value::Ui(ui)) => write_json(&self.dirs.ui_path(), ui),
+            (Key::Draft(draft_key), Value::Draft(draft)) => write_draft(&self.dirs, draft_key, draft),
+            _ => return,
+        };
+
+        if result.is_err() {
+            pending.attempts = pending.attempts.saturating_add(1);
+            if pending.attempts < 3 {
+                pending.due = Instant::now() + Duration::from_secs(1);
+                self.pending.insert(key.clone(), pending);
+            } else {
+                self.failed = true;
+            }
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Envelope<T> {
+    schema: u32,
+    app: String,
+    data: T,
+}
+
+fn write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
+    ensure_private_parent(path)?;
+    let bytes = serde_json::to_vec_pretty(&Envelope { schema: STORE_SCHEMA, app: APP_NAME.to_owned(), data: value })
+        .map_err(io::Error::other)?;
+    write_private(path, &bytes)
+}
+
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    // State files are user-private where the platform has POSIX modes;
+    // Windows keeps the ACL inherited from the profile folder.
+    #[cfg(unix)]
+    const PRIVATE: Option<u32> = Some(0o600);
+    #[cfg(not(unix))]
+    const PRIVATE: Option<u32> = None;
+
+    write_atomic_with(path, PRIVATE, |file| {
+        use std::io::Write;
+        file.write_all(bytes)
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_parent(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    let existed = fs::symlink_metadata(parent).is_ok();
+    fs::DirBuilder::new().recursive(true).mode(0o700).create(parent)?;
+    if existed {
+        // Never chmod an arbitrary existing parent (a misconfigured test root
+        // could otherwise be `/tmp`); AppDirs::ensure owns the real app dirs.
+        return Ok(());
+    }
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+}
+
+#[cfg(not(unix))]
+fn ensure_private_parent(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent)
+}
+
+enum EnvelopeRead<T> {
+    Data(T),
+    Ignore,
+    Corrupt,
+}
+
+/// Inspects the envelope before deserializing the payload, so a future schema
+/// or another application's file is ignored without being treated as corrupt.
+fn read_envelope<T: DeserializeOwned>(bytes: &[u8]) -> EnvelopeRead<T> {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return EnvelopeRead::Corrupt;
+    };
+    let schema = value.get("schema").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    if schema > u64::from(STORE_SCHEMA) {
+        return EnvelopeRead::Ignore;
+    }
+    if let Some(app) = value.get("app").and_then(serde_json::Value::as_str)
+        && !app.is_empty()
+        && app != APP_NAME
+    {
+        return EnvelopeRead::Ignore;
+    }
+    let Some(data) = value.get("data") else {
+        return EnvelopeRead::Corrupt;
+    };
+    match serde_json::from_value(data.clone()) {
+        Ok(data) => EnvelopeRead::Data(data),
+        Err(_) => EnvelopeRead::Corrupt,
+    }
+}
+
+fn read_state<T>(path: &Path) -> T
+where
+    T: DeserializeOwned + Default,
+{
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return T::default(),
+    };
+    if metadata.len() > MAX_STATE_BYTES {
+        quarantine(path);
+        return T::default();
+    }
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return T::default(),
+    };
+    if bytes.len() as u64 > MAX_STATE_BYTES {
+        quarantine(path);
+        return T::default();
+    }
+    match read_envelope(&bytes) {
+        EnvelopeRead::Data(data) => data,
+        EnvelopeRead::Ignore => T::default(),
+        EnvelopeRead::Corrupt => {
+            quarantine(path);
+            T::default()
+        }
+    }
+}
+
+fn quarantine(path: &Path) -> Option<PathBuf> {
+    let stamp = now_ms();
+    for attempt in 0..100u32 {
+        let candidate = PathBuf::from(format!(
+            "{}.bad-{stamp}{}",
+            path.display(),
+            if attempt == 0 { String::new() } else { format!("-{attempt}") }
+        ));
+        if candidate.exists() {
+            continue;
+        }
+        if fs::rename(path, &candidate).is_ok() {
+            return Some(candidate);
+        }
+        return None;
+    }
+    None
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_millis() as u64)
+}
+
+fn path_key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn normalize_recents(recents: &mut Vec<Recent>) {
+    let mut seen = std::collections::HashSet::new();
+    recents.retain(|recent| !recent.path.as_os_str().is_empty() && seen.insert(recent.path.clone()));
+    recents.truncate(RECENTS_MAX);
+}
+
+/// Loads recents, newest first, capped at [`RECENTS_MAX`].
+pub fn load_recents(dirs: &AppDirs) -> Vec<Recent> {
+    let mut recents = read_state::<Vec<Recent>>(&dirs.recents_path());
+    normalize_recents(&mut recents);
+    recents
+}
+
+/// Loads reading positions, capped at [`POSITIONS_MAX`].
+pub fn load_positions(dirs: &AppDirs) -> PositionTable {
+    let mut positions = read_state::<PositionTable>(&dirs.positions_path());
+    positions.normalize();
+    positions
+}
+
+/// Loads UI state with widths and caps normalized.
+pub fn load_ui(dirs: &AppDirs) -> UiPrefs {
+    let mut ui = read_state::<UiPrefs>(&dirs.ui_path());
+    ui.normalize();
+    ui
+}
+
+/// Loads the restorable session with active indexes and closed tabs normalized.
+pub fn load_session(dirs: &AppDirs) -> SessionSnapshot {
+    let mut session = read_state::<SessionSnapshot>(&dirs.session_path());
+    session.normalize();
+    session
+}
+
+/// Loads preferences. A corrupt file is quarantined and defaults are returned.
+pub fn load_prefs(dirs: &AppDirs) -> Prefs {
+    let mut prefs = read_state::<Prefs>(&dirs.prefs_path());
+    prefs.sanitize();
+    prefs
+}
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(default)]
+struct DraftRecord {
+    key: String,
+    draft: Draft,
+}
+
+fn draft_path(dirs: &AppDirs, key: &str) -> PathBuf {
+    let hash = blake3::hash(key.as_bytes()).to_hex();
+    dirs.drafts_dir().join(format!("{hash}.json"))
+}
+
+fn write_draft(dirs: &AppDirs, key: &str, draft: &Draft) -> io::Result<()> {
+    let bytes = serde_json::to_vec(&Envelope {
+        schema: STORE_SCHEMA,
+        app: APP_NAME.to_owned(),
+        data: DraftRecord { key: key.to_owned(), draft: draft.clone() },
+    })
+    .map_err(io::Error::other)?;
+    if bytes.len() as u64 > MAX_STATE_BYTES {
+        return Err(io::Error::other("draft exceeds the state file limit"));
+    }
+    let path = draft_path(dirs, key);
+    ensure_private_parent(&path)?;
+    write_private(&path, &bytes)
+}
+
+/// Loads every draft, newest first, capped at the entry and character limits.
+pub fn load_drafts(dirs: &AppDirs) -> Vec<(String, Draft)> {
+    let mut drafts = read_all_drafts(dirs);
+    drafts.sort_by_key(|entry| std::cmp::Reverse(entry.1.at));
+    let mut kept = Vec::new();
+    let mut total = 0usize;
+    for (key, draft, _) in drafts {
+        let chars = draft.char_count();
+        if kept.len() >= DRAFT_MAX_ENTRIES || (total + chars > DRAFT_MAX_CHARS && !kept.is_empty()) {
+            continue;
+        }
+        total += chars;
+        kept.push((key, draft));
+    }
+    kept
+}
+
+/// Loads one draft by key.
+pub fn load_draft(dirs: &AppDirs, key: &str) -> Option<Draft> {
+    let path = draft_path(dirs, key);
+    let record = read_draft_file(&path)?;
+    (record.key == key).then_some(record.draft)
+}
+
+fn read_all_drafts(dirs: &AppDirs) -> Vec<(String, Draft, PathBuf)> {
+    let Ok(entries) = fs::read_dir(dirs.drafts_dir()) else {
+        return Vec::new();
+    };
+    let mut drafts = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|extension| extension != std::ffi::OsStr::new("json")) {
+            continue;
+        }
+        if let Some(record) = read_draft_file(&path)
+            && !record.key.is_empty()
+        {
+            drafts.push((record.key, record.draft, path));
+        }
+    }
+    drafts
+}
+
+fn read_draft_file(path: &Path) -> Option<DraftRecord> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    if metadata.len() > MAX_STATE_BYTES {
+        quarantine(path);
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() as u64 > MAX_STATE_BYTES {
+        quarantine(path);
+        return None;
+    }
+    match read_envelope(&bytes) {
+        EnvelopeRead::Data(data) => Some(data),
+        EnvelopeRead::Ignore => None,
+        EnvelopeRead::Corrupt => {
+            quarantine(path);
+            None
+        }
+    }
+}
+
+fn enforce_draft_caps(dirs: &AppDirs) -> io::Result<()> {
+    let mut drafts = read_all_drafts(dirs);
+    drafts.sort_by_key(|entry| std::cmp::Reverse(entry.1.at));
+    let mut kept = 0usize;
+    let mut total = 0usize;
+    for (_, draft, path) in drafts {
+        let chars = draft.char_count();
+        let over_count = kept >= DRAFT_MAX_ENTRIES;
+        let over_total = total + chars > DRAFT_MAX_CHARS && kept > 0;
+        if !over_count && !over_total {
+            kept += 1;
+            total += chars;
+        } else {
+            fs::remove_file(path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::TempDir;
+
+    use super::*;
+    use lmdv_core::ThemePref;
+
+    fn dirs(temp: &TempDir) -> AppDirs {
+        let root = temp.path();
+        AppDirs {
+            config: root.join("config"),
+            data: root.join("data"),
+            cache: root.join("cache"),
+            state: root.join("state"),
+            logs: root.join("state/logs"),
+            portable: false,
+            instance_id: "test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn recents_are_capped_and_deduplicated() {
+        let mut recents: Vec<Recent> =
+            (0..20).map(|index| Recent::new(format!("/tmp/{index}.md"), index as u64)).collect();
+        recents.push(Recent::new("/tmp/5.md", 99));
+        normalize_recents(&mut recents);
+        assert_eq!(recents.len(), RECENTS_MAX);
+        assert_eq!(recents[0].path, PathBuf::from("/tmp/0.md"));
+        assert!(recents.iter().filter(|recent| recent.path == Path::new("/tmp/5.md")).count() <= 1);
+    }
+
+    #[test]
+    fn positions_forget_the_top_evict_the_oldest_and_rename() {
+        let mut positions = PositionTable::new();
+        positions.remember(Path::new("/a.md"), &ScrollAnchor { id: "h".into(), offset: 10.0 }, 1);
+        assert_eq!(positions.get(Path::new("/a.md")).unwrap().id, "h");
+        positions.remember(Path::new("/a.md"), &ScrollAnchor::top(), 2);
+        assert!(positions.get(Path::new("/a.md")).is_none(), "top forgets");
+
+        for index in 0..(POSITIONS_MAX + 10) {
+            positions.remember(
+                Path::new(&format!("/{index}.md")),
+                &ScrollAnchor { id: "h".into(), offset: 1.0 },
+                index as u64,
+            );
+        }
+        assert_eq!(positions.len(), POSITIONS_MAX);
+        assert!(positions.get(Path::new("/0.md")).is_none(), "oldest evicted");
+        assert!(positions.get(Path::new("/109.md")).is_some());
+
+        positions.remember(Path::new("/old.md"), &ScrollAnchor { id: "x".into(), offset: 2.0 }, 200);
+        positions.rename(Path::new("/old.md"), Path::new("/new.md"));
+        assert!(positions.get(Path::new("/old.md")).is_none());
+        assert_eq!(positions.get(Path::new("/new.md")).unwrap().id, "x");
+    }
+
+    #[test]
+    fn ui_widths_clamp_and_palette_is_capped() {
+        let mut ui = UiPrefs { left_width: 9999.0, right_width: 1.0, ..UiPrefs::default() };
+        ui.palette_recent = (0..20).map(|index| format!("cmd.{index}")).collect();
+        ui.normalize();
+        assert_eq!(ui.left_width, LEFT_WIDTH_MAX as f32);
+        assert_eq!(ui.right_width, RIGHT_WIDTH_DEFAULT as f32);
+        assert_eq!(ui.palette_recent.len(), PALETTE_RECENT_MAX);
+    }
+
+    #[test]
+    fn session_active_index_and_closed_tabs_are_bounded() {
+        let mut session = SessionSnapshot {
+            clean: false,
+            windows: vec![WindowSession {
+                tabs: vec![TabSession::default()],
+                active: 9,
+                closed: (0..40).map(|index| ClosedTabSession { index, ..ClosedTabSession::default() }).collect(),
+                ..WindowSession::default()
+            }],
+        };
+        session.normalize();
+        assert_eq!(session.windows[0].active, 0);
+        assert_eq!(session.windows[0].closed.len(), CLOSED_TABS_MAX);
+        assert_eq!(session.windows[0].closed.first().unwrap().index, 15, "the newest closed tabs are kept");
+        assert_eq!(session.windows[0].closed.last().unwrap().index, 39);
+    }
+
+    #[test]
+    fn session_carries_mode_kind_and_maximized_with_defaults_for_old_files() {
+        let session = SessionSnapshot {
+            clean: true,
+            windows: vec![WindowSession {
+                placement: Some(WindowPlacement { x: 10, y: 20, width: 800, height: 600, maximized: true }),
+                maximized: true,
+                kind: SessionWindowKind::TornOffStart,
+                tabs: vec![
+                    TabSession {
+                        source: TabSource::File { path: PathBuf::from("/tmp/a.md") },
+                        anchor: Some(ScrollAnchor { id: "intro".into(), offset: 12.0 }),
+                        line: Some(4),
+                        anchor_id: None,
+                        nav: NavHistory::default(),
+                        mode: TabMode::Editor,
+                    },
+                    TabSession {
+                        source: TabSource::Pasted { id: 7, title: "Notes".to_owned() },
+                        ..TabSession::default()
+                    },
+                ],
+                active: 1,
+                closed: Vec::new(),
+            }],
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let parsed: SessionSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, session);
+
+        // A file written before mode/kind/maximized existed still loads.
+        let old: SessionSnapshot = serde_json::from_str(
+            r#"{"clean":false,"windows":[{"tabs":[{"source":{"kind":"file","path":"/tmp/a.md"}}]}]}"#,
+        )
+        .unwrap();
+        assert!(!old.windows[0].maximized);
+        assert_eq!(old.windows[0].kind, SessionWindowKind::Normal);
+        assert_eq!(old.windows[0].tabs[0].mode, TabMode::Viewer);
+    }
+
+    #[test]
+    fn normalize_keeps_the_maximized_flag_consistent_with_the_placement() {
+        let mut session = SessionSnapshot {
+            clean: false,
+            windows: vec![
+                WindowSession {
+                    placement: Some(WindowPlacement { maximized: true, ..WindowPlacement::default() }),
+                    ..WindowSession::default()
+                },
+                WindowSession {
+                    maximized: true,
+                    placement: Some(WindowPlacement::default()),
+                    ..WindowSession::default()
+                },
+            ],
+        };
+        session.normalize();
+        assert!(session.windows[0].maximized, "an old file's placement flag reaches the window flag");
+        assert_eq!(
+            session.windows[1].placement.map(|placement| placement.maximized),
+            Some(true),
+            "a restored maximized window is also recorded in its placement"
+        );
+    }
+
+    #[test]
+    fn values_round_trip_through_the_writer_and_a_reopen() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+
+        let recents = vec![Recent::new("/tmp/a.md", 2), Recent::new("/tmp/b.md", 1)];
+        let mut positions = PositionTable::new();
+        positions.remember(Path::new("/tmp/a.md"), &ScrollAnchor { id: "intro".into(), offset: 8.0 }, 5);
+        let prefs = Prefs { theme: ThemePref::Sepia, ..Prefs::default() };
+        let ui = UiPrefs { tree_root: Some(PathBuf::from("/tmp/notes")), ..UiPrefs::default() };
+        let session = SessionSnapshot {
+            clean: true,
+            windows: vec![WindowSession {
+                placement: Some(WindowPlacement { x: 1, y: 2, width: 800, height: 600, maximized: false }),
+                tabs: vec![TabSession {
+                    source: TabSource::File { path: PathBuf::from("/tmp/a.md") },
+                    anchor: Some(ScrollAnchor { id: "intro".into(), offset: 4.0 }),
+                    line: Some(3),
+                    anchor_id: None,
+                    nav: NavHistory::default(),
+                    mode: TabMode::Editor,
+                }],
+                active: 0,
+                closed: Vec::new(),
+                ..WindowSession::default()
+            }],
+        };
+
+        handle.patch(StorePatch::Prefs(prefs.clone()));
+        handle.patch(StorePatch::Recents(recents.clone()));
+        handle.patch(StorePatch::Positions(positions.clone()));
+        handle.patch(StorePatch::Ui(ui.clone()));
+        handle.patch(StorePatch::Session(session.clone()));
+        assert!(handle.flush(Duration::from_secs(2)));
+
+        drop(handle);
+        assert_eq!(load_prefs(&dirs), prefs);
+        assert_eq!(load_recents(&dirs), recents);
+        assert_eq!(load_positions(&dirs).get(Path::new("/tmp/a.md")).unwrap().id, "intro");
+        assert_eq!(load_ui(&dirs), ui);
+        assert_eq!(load_session(&dirs), session);
+
+        for path in [dirs.prefs_path(), dirs.recents_path(), dirs.positions_path(), dirs.ui_path(), dirs.session_path()]
+        {
+            let text = fs::read_to_string(&path).unwrap();
+            let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(json["schema"], STORE_SCHEMA);
+            assert_eq!(json["app"], APP_NAME);
+        }
+    }
+
+    #[test]
+    fn drafts_survive_a_crash_style_reopen_and_can_be_removed() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        let key = "/tmp/note.md";
+        handle.patch(StorePatch::Draft { key: key.to_owned(), draft: Draft::new("edited\n", "base\n", 42) });
+        assert!(handle.flush(Duration::from_secs(2)));
+
+        // Simulate a crash: drop the handle without a clean quit; the draft is
+        // already on disk and a new process can read it.
+        drop(handle);
+        let draft = load_draft(&dirs, key).expect("draft after reopen");
+        assert_eq!(draft.text, "edited\n");
+        assert_eq!(draft.base, "base\n");
+        assert_eq!(load_drafts(&dirs).len(), 1);
+
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::RemoveDraft(key.to_owned()));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert!(load_draft(&dirs, key).is_none());
+        assert!(load_drafts(&dirs).is_empty());
+    }
+
+    #[test]
+    fn drafts_are_capped_by_count_and_characters() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        for index in 0..(DRAFT_MAX_ENTRIES + 3) {
+            handle
+                .patch(StorePatch::Draft { key: format!("/tmp/{index}.md"), draft: Draft::new("x", "", index as u64) });
+        }
+        assert!(handle.flush(Duration::from_secs(2)));
+        let drafts = load_drafts(&dirs);
+        assert_eq!(drafts.len(), DRAFT_MAX_ENTRIES);
+        assert_eq!(drafts[0].1.at, (DRAFT_MAX_ENTRIES + 2) as u64, "newest first");
+        assert!(drafts.iter().any(|(key, _)| key == &format!("/tmp/{}.md", DRAFT_MAX_ENTRIES + 2)), "newest kept");
+
+        drop(handle);
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        let big = "x".repeat(1_100_000);
+        for index in 0..3 {
+            handle.patch(StorePatch::Draft {
+                key: format!("/tmp/big{index}.md"),
+                draft: Draft::new(big.clone(), "", 100 + index as u64),
+            });
+        }
+        assert!(handle.flush(Duration::from_secs(5)));
+        let drafts = load_drafts(&dirs);
+        let total: usize = drafts.iter().map(|(_, draft)| draft.char_count()).sum();
+        assert_eq!(drafts[0].0, "/tmp/big2.md", "the newest large draft is kept");
+        assert!(total <= DRAFT_MAX_CHARS, "the total stays within the 2M character cap, got {total}");
+        assert_eq!(drafts.iter().filter(|(_, draft)| draft.char_count() > 100_000).count(), 1);
+    }
+
+    #[test]
+    fn a_corrupt_file_is_quarantined_and_defaults_are_returned() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        fs::write(dirs.recents_path(), b"{ not json").unwrap();
+
+        assert!(load_recents(&dirs).is_empty());
+        assert!(!dirs.recents_path().exists());
+        let quarantined: Vec<_> = fs::read_dir(&dirs.data)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("recents.json.bad-"))
+            .collect();
+        assert_eq!(quarantined.len(), 1, "one quarantine copy");
+    }
+
+    #[test]
+    fn a_future_schema_is_not_overwritten_or_quarantined() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let future = serde_json::json!({
+            "schema": 99,
+            "app": "lmdv",
+            "data": [{"path": "/tmp/future.md", "name": "future.md", "dir": "/tmp", "openedAt": 1}]
+        });
+        fs::write(dirs.recents_path(), serde_json::to_vec(&future).unwrap()).unwrap();
+
+        assert!(load_recents(&dirs).is_empty(), "unknown future schema reads as defaults");
+        assert!(dirs.recents_path().exists(), "the future file is left alone");
+        let quarantined = fs::read_dir(&dirs.data)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".bad-"));
+        assert!(!quarantined, "a future schema is not corrupt");
+    }
+
+    #[test]
+    fn patches_are_coalesced_per_file() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+
+        let first = vec![Recent::new("/tmp/first.md", 1)];
+        let second = vec![Recent::new("/tmp/second.md", 2)];
+        let third = vec![Recent::new("/tmp/third.md", 3)];
+        handle.patch(StorePatch::Recents(first));
+        std::thread::sleep(Duration::from_millis(40));
+        handle.patch(StorePatch::Recents(second));
+        std::thread::sleep(Duration::from_millis(40));
+        handle.patch(StorePatch::Recents(third));
+        assert!(handle.flush(Duration::from_secs(2)));
+
+        let recents = load_recents(&dirs);
+        assert_eq!(recents.len(), 1);
+        assert_eq!(recents[0].path, PathBuf::from("/tmp/third.md"), "the last patch wins");
+    }
+
+    #[test]
+    fn flush_works_through_a_clone() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let handle = StoreHandle::start(dirs).unwrap();
+        let clone = handle.clone();
+        drop(handle);
+        // The clone still holds the sender, so this is a live writer.
+        assert!(clone.flush(Duration::from_secs(1)));
+        drop(clone);
+    }
+
+    #[test]
+    fn a_leftover_temp_file_is_ignored() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        fs::write(dirs.data.join(".recents.json.1.2.tmp"), b"not json").unwrap();
+        assert!(load_recents(&dirs).is_empty());
+        assert!(dirs.data.join(".recents.json.1.2.tmp").exists(), "a crash leftover is inert");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn state_files_are_private_even_when_an_old_copy_was_loose() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        fs::write(dirs.recents_path(), br#"{"schema":1,"app":"lmdv","data":[]}"#).unwrap();
+        fs::set_permissions(dirs.recents_path(), fs::Permissions::from_mode(0o644)).unwrap();
+
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Recents(vec![Recent::new("/tmp/a.md", 1)]));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(fs::metadata(dirs.recents_path()).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn preferences_keep_their_wire_shape() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let mut file = fs::File::create(dirs.prefs_path()).unwrap();
+        file.write_all(br#"{"schema":1,"app":"lmdv","data":{"theme":"dark"}}"#).unwrap();
+        let prefs = load_prefs(&dirs);
+        assert_eq!(prefs.theme, ThemePref::Dark);
+        assert_eq!(prefs.editor, lmdv_core::EditorPrefs::default());
+    }
+}

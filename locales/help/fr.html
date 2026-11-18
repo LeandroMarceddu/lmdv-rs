@@ -1,0 +1,385 @@
+        <p class="help-lead">Une visionneuse et un éditeur rapides pour les documents Markdown. Les fichiers ne sont modifiés que lorsque vous enregistrez avec <kbd>Ctrl</kbd>+<kbd>S</kbd>.</p>
+
+        <h3>Ouvrir des documents</h3>
+        <ul>
+          <li>Double-cliquez sur un fichier <code>.md</code> dans le gestionnaire de fichiers.</li>
+          <li>Glissez un fichier sur la fenêtre.</li>
+          <li>Appuyez sur <kbd>Ctrl</kbd>+<kbd>O</kbd> ou utilisez le bouton dossier de la barre d'outils.</li>
+        </ul>
+        <p>
+          Les documents s'ouvrent dans des <strong>onglets</strong>, dans la barre d'outils. Un fichier ouvert
+          depuis l'extérieur pendant que l'application tourne (double-clic, <em>Ouvrir avec</em>,
+          <code>lmdv fichier.md</code>) s'ouvre dans un nouvel onglet de la dernière fenêtre utilisée ; s'il est déjà
+          ouvert, son onglet passe au premier plan. Dans l'application, un clic sur un fichier, un document
+          récent, un résultat de recherche ou un lien l'ouvre dans l'onglet courant ; <kbd>Ctrl</kbd>+clic (ou
+          le bouton du milieu) l'ouvre dans un nouvel onglet en arrière-plan,
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+clic dans un nouvel onglet au premier plan et <kbd>Maj</kbd>+clic dans
+          une nouvelle fenêtre, tout comme <em>Ouvrir dans un nouvel onglet</em> et <em>Ouvrir dans une
+          nouvelle fenêtre</em> dans son menu contextuel. Les fichiers ouverts avec <kbd>Ctrl</kbd>+<kbd>O</kbd>
+          ou glissés sur la fenêtre ont chacun leur onglet. Un document n'est jamais ouvert deux fois dans la
+          même fenêtre : l'ouvrir à nouveau ramène son onglet au premier plan.
+        </p>
+        <p>
+          Un nouvel onglet commence par la page d'accueil, qui liste les fichiers ouverts récemment : cliquez
+          sur l'un d'eux pour l'y ouvrir. Chaque document <strong>se souvient aussi de l'endroit où vous vous
+          êtes arrêté</strong> et y revient à la prochaine ouverture.
+        </p>
+        <p>
+          <strong>Coller et lire :</strong> le Markdown copié depuis ChatGPT, Claude ou une page web se lit sans
+          l'enregistrer d'abord. Appuyez sur <kbd>Ctrl</kbd>+<kbd>V</kbd> n'importe où hors de l'éditeur et des
+          champs de saisie (la barre de recherche, les filtres), ou utilisez <strong>Coller depuis le
+          presse-papiers</strong> sur la page d'accueil ou <strong>Coller du Markdown comme nouveau
+          document</strong> dans la palette de commandes. Le texte s'ouvre dans son propre onglet, nommé d'après
+          son premier titre (à défaut, sa première ligne) : si l'onglet au premier plan est une page d'accueil,
+          il devient ce document ; sinon, un nouvel onglet s'ouvre au premier plan. Seul du texte est collé (si
+          le presse-papiers contient une image, un avis le signale), et dans l'éditeur
+          <kbd>Ctrl</kbd>+<kbd>V</kbd> colle comme d'habitude.
+        </p>
+        <p>
+          Le texte collé se lit comme n'importe quel document, avec le plan, la recherche, l'impression, le PDF,
+          Word et la copie. <kbd>Ctrl</kbd>+<kbd>E</kbd> le modifie et <kbd>Ctrl</kbd>+<kbd>S</kbd> l'enregistre
+          dans un fichier (<strong>Enregistrer sous…</strong>, avec un nom proposé d'après son titre) ; il devient
+          alors un document comme les autres. Fermer son onglet sans modification ne demande rien, et
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>T</kbd> le rouvre tant que la fenêtre reste ouverte ; avec des
+          modifications, lmdv demande s'il faut l'enregistrer. Fermer la fenêtre pose la question dans tous
+          les cas, avec ou sans modifications : le texte n'est dans aucun fichier et disparaîtrait avec la
+          fenêtre. Les liens et les images qui pointent vers
+          d'autres fichiers fonctionnent une fois le texte enregistré dans un dossier (d'ici là, un lien vers un
+          autre fichier le signale). Si lmdv se ferme de façon inattendue avec des modifications, le texte revient
+          au démarrage suivant, modifications comprises.
+        </p>
+        <p>
+          Depuis un terminal, <code>lmdv fichier.md</code> ouvre un fichier, <code>--line 40</code> l'ouvre
+          à cette ligne et <code>--new-window</code> dans sa propre fenêtre (<code>lmdv --new-window</code>
+          sans fichier ouvre une fenêtre vide) ; la commande <code>lmdv</code> est disponible une fois
+          l'application installée.
+        </p>
+
+        <h3>Onglets et fenêtres</h3>
+        <p>
+          <kbd>Ctrl</kbd>+<kbd>T</kbd>, ou le <strong>+</strong> après le dernier onglet, ouvre un nouvel onglet,
+          et <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>N</kbd> une nouvelle fenêtre. <kbd>Ctrl</kbd>+<kbd>W</kbd> ferme
+          l'onglet, tout comme sa croix × et un clic du milieu dessus : fermer le dernier document laisse la page
+          d'accueil, et <kbd>Ctrl</kbd>+<kbd>W</kbd> sur une page d'accueil restée seule ferme la fenêtre.
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>W</kbd> ferme la fenêtre avec tous ses onglets, et
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>T</kbd> rouvre le dernier onglet fermé. Un onglet qui contient des
+          modifications non enregistrées pose la question avant de se fermer : <strong>Enregistrer</strong>,
+          <strong>Ne pas enregistrer</strong> ou <strong>Annuler</strong> ; fermer la fenêtre ne la pose qu'une
+          fois, en listant les documents qui contiennent des modifications non enregistrées et les textes collés
+          qui ne sont pas encore dans un fichier.
+        </p>
+        <p>
+          <kbd>Ctrl</kbd>+<kbd>Tab</kbd>, <kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>9</kbd> et les autres touches des
+          onglets, sous <em>Raccourcis clavier</em>, passent d'un onglet à l'autre au clavier. Chaque onglet garde
+          sa propre position de lecture, ses modifications avec leur historique d'annulation, son historique
+          Précédent / Suivant et le dossier du panneau des fichiers. Survolez un onglet pour voir son dossier et
+          son temps de lecture ; quand les onglets ne tiennent plus, la flèche au bout de la bande les liste tous.
+          Un clic droit sur un onglet propose <strong>Déplacer vers une nouvelle fenêtre</strong>, <strong>Fermer
+          les autres onglets</strong>, <strong>Fermer les onglets à droite</strong>, <strong>Copier le
+          chemin</strong> et <strong>Afficher dans le dossier</strong>.
+        </p>
+        <p>
+          Faites glisser un onglet le long de la bande pour changer sa place (<kbd>Échap</kbd> le remet où il était). Tirez-le hors de la bande et il
+          s'ouvre dans sa propre fenêtre, qui suit le pointeur ; lâchez-le sur les onglets d'une autre fenêtre de
+          lmdv et il y passe, modifications non enregistrées et annulation comprises. Faire glisser l'unique
+          onglet d'une fenêtre déplace toute la fenêtre, et le lâcher sur les onglets d'une autre fenêtre réunit
+          les deux.
+        </p>
+        <p>
+          La barre d'outils sert aussi de barre de titre, aux couleurs du thème : faites glisser sa partie vide
+          pour déplacer la fenêtre, double-cliquez dessus pour l'agrandir ou la restaurer, et survolez le bouton
+          Agrandir pour afficher les dispositions d'ancrage aux bords de l'écran.
+        </p>
+
+        <h3>Touches de lecture</h3>
+        <p>Pendant la lecture, des touches seules déplacent dans le document (elles sont sans effet pendant la saisie dans un champ ou l'édition) :</p>
+        <table class="help-keys">
+          <tbody>
+            <tr><td><kbd>j</kbd> / <kbd>k</kbd></td><td>Défiler un peu vers le bas / le haut</td></tr>
+            <tr><td><kbd>Espace</kbd> / <kbd>Maj</kbd>+<kbd>Espace</kbd></td><td>Page suivante / précédente</td></tr>
+            <tr><td><kbd>.</kbd> / <kbd>,</kbd></td><td>Titre suivant / précédent</td></tr>
+            <tr><td><kbd>g</kbd> <kbd>g</kbd> / <kbd>G</kbd></td><td>Début / fin du document</td></tr>
+            <tr><td><kbd>n</kbd> / <kbd>N</kbd></td><td>Résultat suivant / précédent de la recherche</td></tr>
+            <tr><td><kbd>?</kbd></td><td>Afficher ou masquer l'aide-mémoire des touches</td></tr>
+          </tbody>
+        </table>
+        <p>Un trait fin en haut du document indique où vous en êtes, et l'onglet au premier plan affiche après son nom le temps de lecture estimé (si la bande des onglets est pleine, survolez l'onglet pour le voir).</p>
+        <p>
+          <kbd>Ctrl</kbd>+<kbd>C</kbd> sur une sélection la copie avec sa mise en forme, prête pour Word ou
+          Outlook, ainsi qu'en texte brut. Le document peut aussi être déplacé comme une feuille de papier :
+          avec le bouton du milieu n'importe où, ou avec le bouton gauche sur l'espace vide à côté du texte.
+        </p>
+        <p>
+          Un clic droit sur le document — ou <kbd>Maj</kbd>+<kbd>F10</kbd> ou la touche Menu — ouvre son menu :
+          copier la sélection (mise en forme ou en texte brut) ou la chercher dans le document ou le dossier ;
+          ouvrir ou copier un lien ; ouvrir une image, un diagramme ou un tableau avec <strong>Ouvrir
+          l'aperçu</strong>, copier un bloc de code ou un tableau ; <strong>Copier le lien vers cette
+          section</strong> donne <code>[Titre](fichier.md#titre)</code>, un lien qui fonctionne depuis n'importe
+          quel autre document et aussi sur GitHub ; <strong>Modifier à partir d'ici</strong> ouvre l'éditeur à
+          cet endroit ; <strong>Copier tout le document</strong> le copie avec sa mise en forme, comme
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>C</kbd> ; imprimer ou enregistrer en PDF.
+        </p>
+        <p>
+          Comme dans un navigateur, <kbd>Alt</kbd>+<kbd>←</kbd> (ou le bouton latéral <em>précédent</em> de la souris) revient là où vous étiez avant un lien vers une section, un clic dans le plan ou le passage à un autre document ; <kbd>Alt</kbd>+<kbd>→</kbd> (ou le bouton <em>suivant</em>) refait le chemin. <strong>Précédent</strong> et <strong>Suivant</strong> sont aussi en haut du menu du clic droit. Chaque onglet a son propre historique.
+        </p>
+
+        <h3>Raccourcis clavier</h3>
+        <table class="help-keys">
+          <tbody>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd> / <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>P</kbd></td><td>Palette de commandes (dans l'éditeur, seulement <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>P</kbd>)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Ouvrir un fichier</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>V</kbd></td><td>Coller du Markdown comme nouveau document (hors de l'éditeur)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>E</kbd></td><td>Entrer ou sortir du mode édition</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>S</kbd></td><td>Enregistrer le fichier (en édition)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd></td><td>Chercher dans le document</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>F</kbd></td><td>Chercher dans tout le dossier</td></tr>
+            <tr><td><kbd>Entrée</kbd> / <kbd>Maj</kbd>+<kbd>Entrée</kbd></td><td>Résultat suivant / précédent</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd></td><td>Afficher ou masquer les fichiers (gras en édition)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>Afficher ou masquer le plan (italique en édition)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>P</kbd></td><td>Imprimer ou enregistrer en PDF</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>C</kbd></td><td>Copier le document en texte enrichi</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>E</kbd></td><td>Ouvrir le menu Partager</td></tr>
+            <tr><td><kbd>Maj</kbd>+<kbd>F10</kbd></td><td>Ouvrir le menu contextuel (aussi la touche Menu)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>Ctrl</kbd>+<kbd>−</kbd></td><td>Texte plus grand / plus petit</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>0</kbd></td><td>Réinitialiser la taille du texte</td></tr>
+            <tr><td><kbd>F5</kbd> / <kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Recharger le fichier depuis le disque</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>T</kbd></td><td>Nouvel onglet</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>W</kbd> / <kbd>Ctrl</kbd>+<kbd>F4</kbd></td><td>Fermer l'onglet</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>T</kbd></td><td>Rouvrir le dernier onglet fermé</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Tab</kbd> / <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>Tab</kbd></td><td>Onglet suivant / précédent (aussi <kbd>Ctrl</kbd>+<kbd>Pg suiv</kbd> / <kbd>Ctrl</kbd>+<kbd>Pg préc</kbd>)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>8</kbd> / <kbd>Ctrl</kbd>+<kbd>9</kbd></td><td>Onglet 1 à 8 / dernier onglet (dans l'éditeur, <kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>3</kbd> restent les titres)</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>Pg préc</kbd> / <kbd>Pg suiv</kbd></td><td>Déplacer l'onglet à gauche / à droite</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>N</kbd></td><td>Nouvelle fenêtre</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>W</kbd></td><td>Fermer la fenêtre</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+clic / clic du milieu</td><td>Ouvrir un fichier, un document récent, un résultat de recherche ou un lien dans un nouvel onglet</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+clic</td><td>De même, dans un nouvel onglet au premier plan</td></tr>
+            <tr><td><kbd>Maj</kbd>+clic</td><td>De même, dans une nouvelle fenêtre</td></tr>
+            <tr><td><kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>Alt</kbd>+<kbd>→</kbd></td><td>Précédent / suivant (aussi les boutons latéraux de la souris)</td></tr>
+            <tr><td><kbd>?</kbd></td><td>Aide-mémoire des touches</td></tr>
+            <tr><td><kbd>F1</kbd></td><td>Afficher cette aide</td></tr>
+            <tr><td><kbd>Échap</kbd></td><td>Fermer la barre de recherche, l'aperçu ou cette aide</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Dans la <strong>palette de commandes</strong>, quelques lettres suffisent pour trouver une commande
+          (avec son raccourci à côté), un titre du document, un onglet ouvert, un fichier du dossier ou un
+          fichier récent. Les accents et les majuscules ne comptent pas, et les noms anglais des commandes
+          fonctionnent dans toutes les langues. <kbd>Entrée</kbd> exécute ou ouvre ;
+          <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> ouvre un fichier dans un nouvel onglet,
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>Entrée</kbd> dans un nouvel onglet au premier plan et
+          <kbd>Maj</kbd>+<kbd>Entrée</kbd> dans une nouvelle fenêtre ; commencez par <kbd>&gt;</kbd> pour n'avoir
+          que les commandes, ou par <kbd>#</kbd> pour les titres du document, et <kbd>Échap</kbd> la ferme. Les
+          commandes sans touche propre y sont aussi (<strong>Enregistrer en PDF</strong>, <strong>Exporter en
+          HTML / DOCX</strong>, <strong>Garder au premier plan</strong>, les thèmes, <strong>Nouvelle page à
+          chaque titre 1</strong>, <strong>Réglages de lecture</strong>) et, pendant l'édition, celles de
+          l'éditeur. Dans l'éditeur, <kbd>Ctrl</kbd>+<kbd>K</kbd> insère un lien : la palette s'y ouvre donc avec
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>P</kbd> ; <kbd>Ctrl</kbd>+<kbd>P</kbd> imprime toujours.
+        </p>
+        <p>
+          Au clavier, <kbd>Tab</kbd> atteint les onglets, les boutons de la barre d'outils et les réglages de
+          lecture <strong>Aa</strong>, et le focus reste toujours visible ; sur les onglets, <kbd>←</kbd> /
+          <kbd>→</kbd> passent de l'un à l'autre, <kbd>Entrée</kbd> en affiche un et <kbd>Suppr</kbd> le ferme ;
+          dans les menus (Partager, le menu contextuel, le menu de copie de l'aperçu), <kbd>↑</kbd> /
+          <kbd>↓</kbd> et <kbd>Début</kbd> / <kbd>Fin</kbd> passent d'une entrée à l'autre, et <kbd>Échap</kbd>
+          les ferme.
+        </p>
+
+        <h3>Édition</h3>
+        <p>
+          Appuyez sur <kbd>Ctrl</kbd>+<kbd>E</kbd> ou sur le bouton crayon (<strong>Modifier</strong>) pour
+          modifier le document ouvert : l'éditeur de texte apparaît à gauche, avec l'aperçu en direct à droite.
+          Pendant l'édition, le bouton montre un livre ouvert : <strong>Revenir à la lecture</strong>. Dans une
+          fenêtre de moins de 760 pixels environ, seul l'éditeur s'affiche ; l'aperçu revient quand la fenêtre
+          s'élargit ou quand vous revenez à la lecture.
+        </p>
+        <p>
+          Un point orange sur l'onglet du document, à la place de sa croix ×, signale des modifications non enregistrées — enregistrez avec
+          <kbd>Ctrl</kbd>+<kbd>S</kbd>, et le point devient un instant une coche (les lecteurs d'écran annoncent
+          « Enregistré »). Quitter le mode édition ou ouvrir un autre document avec des modifications non
+          enregistrées demande d'abord confirmation. Si le fichier change sur le disque pendant que vous avez des
+          modifications non enregistrées, un avertissement apparaît au lieu d'écraser votre travail, et
+          enregistrer par-dessus un fichier modifié depuis son ouverture demande confirmation.
+        </p>
+        <p>
+          Pendant l'édition, un <strong>double-clic dans l'aperçu</strong> place le curseur de l'éditeur sur ce
+          mot, et l'aperçu ne bouge pas ; pendant la lecture, un double-clic sélectionne un mot comme d'habitude.
+        </p>
+        <p>
+          <strong>Mise en forme :</strong> la barre au-dessus de l'éditeur met en forme la sélection — ou le mot
+          sous le curseur — et insère tableaux, diagrammes Mermaid, formules et encadrés. Tapez <kbd>/</kbd> en
+          début de ligne pour choisir un bloc par son nom. Coller un lien sur un texte sélectionné le transforme
+          en lien Markdown.
+        </p>
+        <table class="help-keys">
+          <tbody>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>B</kbd> / <kbd>Ctrl</kbd>+<kbd>I</kbd></td><td>Gras / italique</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>X</kbd></td><td>Barré</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>M</kbd></td><td>Code en ligne</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>K</kbd></td><td>Insérer un lien</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>1</kbd> … <kbd>3</kbd></td><td>Titre 1 à 3 (de nouveau pour retirer)</td></tr>
+            <tr><td><kbd>/</kbd></td><td>Menu des blocs, en début de ligne</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>F</kbd> / <kbd>Ctrl</kbd>+<kbd>H</kbd></td><td>Chercher / chercher et remplacer dans le texte</td></tr>
+            <tr><td><kbd>F3</kbd> / <kbd>Maj</kbd>+<kbd>F3</kbd></td><td>Résultat suivant / précédent</td></tr>
+            <tr><td><kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>Alt</kbd>+<kbd>↓</kbd></td><td>Monter / descendre la ligne</td></tr>
+            <tr><td><kbd>Maj</kbd>+<kbd>Alt</kbd>+<kbd>↓</kbd></td><td>Dupliquer la ligne</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>K</kbd></td><td>Supprimer la ligne</td></tr>
+            <tr><td><kbd>Alt</kbd>+<kbd>L</kbd></td><td>Sélectionner la ligne</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>D</kbd></td><td>Ajouter l'occurrence suivante à la sélection</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>↓</kbd></td><td>Ajouter un curseur au-dessus / en dessous</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>/</kbd></td><td>Commenter / décommenter la ligne</td></tr>
+            <tr><td><kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>G</kbd></td><td>Aller à la ligne</td></tr>
+            <tr><td><kbd>Échap</kbd>, puis <kbd>Tab</kbd></td><td>Quitter l'éditeur au clavier</td></tr>
+          </tbody>
+        </table>
+        <p>
+          <strong>Outils</strong> (le bouton à curseurs à droite de la barre) regroupe chercher et remplacer, les
+          commandes de ligne, <strong>Commenter la ligne</strong> et la <strong>Correction
+          orthographique</strong>. <strong>Commenter la ligne</strong> (<kbd>Ctrl</kbd>+<kbd>/</kbd>, c'est-à-dire
+          <kbd>Ctrl</kbd> avec les touches qui tapent <kbd>/</kbd> : sur un clavier italien ou allemand,
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>7</kbd>) place les lignes dans <code>&lt;!-- --&gt;</code>, si bien
+          qu'elles sont masquées à la lecture ; dans un bloc de code, il utilise le commentaire de ce langage, et
+          une seconde fois il le retire. La <strong>Correction orthographique</strong> souligne les mots mal
+          orthographiés avec le dictionnaire de la langue de l'interface et propose des corrections au clic
+          droit (après un changement de langue dans les réglages de lecture, au prochain démarrage).
+        </p>
+        <p>
+          <kbd>Tab</kbd> indente. Pour quitter l'éditeur au clavier, appuyez sur <kbd>Échap</kbd> puis sur
+          <kbd>Tab</kbd> dans les deux secondes ; si du texte est sélectionné ou si un panneau (comme chercher et
+          remplacer) ou un menu est ouvert, appuyez d'abord deux fois sur <kbd>Échap</kbd>.
+        </p>
+        <p>
+          <strong>Récupération :</strong> tant que vous avez des modifications non enregistrées, une copie du
+          texte est mise de côté. Si l'application se ferme sans enregistrer (plantage, arrêt forcé), un avis
+          propose de la restaurer à la prochaine ouverture du fichier. Le fichier lui-même n'est jamais touché
+          avant que vous n'enregistriez.
+        </p>
+        <p>
+          <strong>Images :</strong> collez une capture d'écran (<kbd>Ctrl</kbd>+<kbd>V</kbd>) ou déposez un
+          fichier image dans l'éditeur — il est enregistré dans un dossier <code>assets</code> à côté du document
+          et lié par un chemin relatif.
+        </p>
+
+        <h3>Parcourir les fichiers</h3>
+        <p>
+          Le panneau de gauche liste les fichiers Markdown du dossier ouvert, jusqu'à quatre niveaux de
+          sous-dossiers. Ouvrir un fichier depuis le panneau garde le même dossier racine, pour ne jamais perdre
+          le fil ; la <strong>flèche vers le haut</strong> à côté de <em>Fichiers</em> déplace la racine au dossier
+          parent. Ouvrir un document hors du dossier courant y déplace le panneau. Les dossiers que vous repliez
+          restent repliés pendant la navigation — et après un redémarrage.
+        </p>
+        <p>Les dossiers sans fichier Markdown sont masqués, comme les dossiers cachés et de build tels que <code>node_modules</code>.</p>
+        <p>Le panneau se met à jour tout seul quand des fichiers sont ajoutés, renommés ou supprimés dans le dossier. Renommez le document ouvert et la fenêtre le suit ; supprimez-le ou déplacez-le et son texte reste à l'écran, avec un avis qui propose <strong>Enregistrer à nouveau</strong>.</p>
+        <p>
+          Au clavier, la liste fonctionne comme une arborescence : <kbd>↑</kbd> / <kbd>↓</kbd> se déplacent,
+          <kbd>→</kbd> ouvre un dossier ou y entre, <kbd>←</kbd> le ferme ou remonte au dossier parent,
+          <kbd>Début</kbd> / <kbd>Fin</kbd> vont aux extrémités, <kbd>Entrée</kbd> ou <kbd>Espace</kbd> ouvre,
+          et <kbd>Ctrl</kbd>+<kbd>Entrée</kbd> ouvre dans un nouvel onglet.
+        </p>
+        <p>
+          Les deux panneaux latéraux s'élargissent en tirant leur bord intérieur — un double-clic sur le bord
+          rétablit la largeur par défaut. La taille de leur texte suit <strong>Panneaux</strong> dans les réglages
+          de lecture.
+        </p>
+        <p>
+          Une fenêtre peut descendre jusqu'à 480 pixels de large : la moitié d'un écran de portable, ou une
+          disposition d'ancrage aux bords de l'écran. Quand la fenêtre devient étroite, le plan puis les fichiers se
+          replient d'eux-mêmes ; leurs boutons de la barre d'outils (ou <kbd>Ctrl</kbd>+<kbd>I</kbd> et
+          <kbd>Ctrl</kbd>+<kbd>B</kbd>) les ouvrent alors par-dessus le texte, et <kbd>Échap</kbd>, un clic
+          ailleurs ou un choix les referme.
+        </p>
+        <p>
+          Le champ de recherche au-dessus de l'arborescence (<kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>F</kbd>) trouve du
+          texte dans chaque fichier Markdown du dossier — les résultats montrent le fichier et un extrait, et en
+          ouvrir un surligne le terme dans le document. <kbd>Échap</kbd> efface la recherche et ramène
+          l'arborescence.
+        </p>
+
+        <h3>Plan</h3>
+        <p>
+          Le panneau de droite liste les titres du document et met en évidence celui que vous lisez. Cliquez
+          sur une entrée pour y aller. Sur les longs documents, un champ de filtre apparaît au-dessus de la
+          liste : tapez pour restreindre les titres, puis <kbd>↑</kbd> / <kbd>↓</kbd> et <kbd>Entrée</kbd> pour
+          sauter à l'un d'eux ; <kbd>Échap</kbd> l'efface.
+        </p>
+        <p>
+          Après un saut — depuis le plan, un lien vers une section, les touches <kbd>.</kbd> / <kbd>,</kbd> ou
+          <code>--line</code> — le titre ou le bloc où vous arrivez s'illumine un instant, pour que l'œil le
+          trouve. Précédent et Suivant ne l'illuminent pas.
+        </p>
+        <p>
+          Quand le plan est fermé, ou que la fenêtre est trop étroite pour lui, une fine ligne en haut du texte
+          affiche <strong>la section que vous lisez</strong> : son titre et les titres qui la contiennent, par
+          exemple <em>2. Décisions › 2.1 Budget</em>, sans le titre du document. Elle apparaît dès que ce titre
+          est sorti de la vue par le haut, et s'efface tant qu'un titre ou la ligne d'en-tête d'un tableau occupe
+          le haut ; un clic sur l'une de ses parties ramène à ce titre. Elle n'apparaît qu'en lecture (pas dans
+          l'aperçu de l'éditeur) et n'est jamais imprimée.
+        </p>
+
+        <h3>Rechargement automatique</h3>
+        <p>Les fichiers ouverts sont surveillés sur le disque. Quand l'un d'eux change, la vue se rafraîchit d'elle-même en gardant votre position de lecture — utile pendant qu'un document est régénéré ; un onglet en arrière-plan se met à jour quand vous y revenez. En mode édition, le rafraîchissement n'a lieu que tant que votre tampon n'a pas de modification non enregistrée.</p>
+        <p><kbd>F5</kbd> ou <kbd>Ctrl</kbd>+<kbd>R</kbd> relit le fichier à la demande en gardant votre position ; avec des modifications non enregistrées, rien ne se passe.</p>
+
+        <h3>Rendu</h3>
+        <ul>
+          <li>Markdown à la GitHub : tableaux, listes de tâches, barré, liens automatiques. Les adresses web deviennent des liens, y compris celles qui commencent par <code>www.</code>, comme sur GitHub ; les noms de fichiers comme <code>README.md</code> restent du texte.</li>
+          <li>Les retours à la ligne suivent CommonMark, comme GitHub quand il affiche un fichier : un simple retour à la ligne dans un paragraphe compte comme une espace ; pour forcer le retour à la ligne, terminez la ligne par deux espaces ou par une barre oblique inverse (<code>\</code>).</li>
+          <li>Les blocs de code sont colorés et ont un bouton de copie au survol.</li>
+          <li>Les blocs <code>mermaid</code> deviennent des diagrammes ; une syntaxe invalide retombe sur le bloc de code avec une note d'erreur.</li>
+          <li>Un tableau ou un diagramme plus large que la colonne de lecture s'élargit jusqu'à toute la largeur disponible, centré : pas de défilement horizontal, et le texte du diagramme garde sa taille.</li>
+          <li>Dans un long tableau, la ligne d'en-tête reste en haut de la fenêtre pendant la lecture, jusqu'à ce que la dernière ligne du tableau soit passée. Un tableau trop large même pour toute la fenêtre défile horizontalement : sa barre de défilement reste en bas de la fenêtre tant que le tableau est visible, inutile donc d'aller au bout du tableau pour le déplacer ; <kbd>Maj</kbd>+molette et le pavé tactile fonctionnent aussi n'importe où sur le tableau.</li>
+          <li>Cliquez sur un diagramme ou une image pour l'ouvrir en plein écran : <kbd>+</kbd> / <kbd>−</kbd> ou la molette zooment, glisser déplace et <kbd>Échap</kbd> ferme. <strong>Ajuster</strong> (<kbd>0</kbd>) l'ajuste à la fenêtre, <strong>Largeur</strong> (<kbd>W</kbd>) à la largeur, en partant du haut, et <strong>100 %</strong> (<kbd>1</kbd>) l'affiche à sa taille réelle. Le bouton de copie propose l'image en PNG (normal ou grand), un diagramme aussi en SVG, et les deux peuvent être enregistrés dans un fichier.</li>
+          <li>Les formules utilisent KaTeX : <code>$…$</code> en ligne, <code>$$…$$</code> ou un bloc de code <code>math</code> (même avec un titre après <code>math</code>) pour les formules centrées. Les dollars se lisent comme sur GitHub : un bloc <code>$$</code> ne s'ouvre que s'il est fermé, si bien qu'un prix comme <code>$$ 100</code> ne transforme pas le reste du document en formule ; le texte qui suit un <code>$$</code> fermant est conservé ; <code>$$…$$</code> au milieu d'une phrase affiche la formule sans couper le paragraphe ; <code>$ x $</code> avec des espaces à l'intérieur et les montants comme <code>$5 et $10</code> restent du texte.</li>
+          <li>Encadrés à la GitHub : une citation commençant par <code>[!NOTE]</code>, <code>[!TIP]</code>, <code>[!IMPORTANT]</code>, <code>[!WARNING]</code> ou <code>[!CAUTION]</code>.</li>
+          <li>Notes de bas de page : <code>[^1]</code> dans le texte et <code>[^1]: …</code> n'importe où ; les notes sont rassemblées à la fin, avec des liens aller-retour.</li>
+          <li>Les listes de tâches sont actives : cliquer sur une case met aussitôt à jour <code>[ ]</code> / <code>[x]</code> dans le fichier (avec <em>Annuler</em> dans l'avis), ou dans le tampon de l'éditeur pendant l'édition. Seule la case coche la tâche : cliquer ou double-cliquer sur son texte, pour sélectionner un mot, ne change rien.</li>
+          <li>Les tableaux ont deux boutons en haut à droite, visibles au survol ou quand vous les atteignez au clavier : <strong>Copier le tableau (pour Excel)</strong> le place dans le presse-papiers en texte séparé par des tabulations, prêt pour Excel ou Google Sheets, et <strong>Ouvrir l'aperçu</strong> l'ouvre en plein écran, pour le lire à l'aise (aussi depuis le menu contextuel) : il défile comme la page, sa ligne d'en-tête reste en haut et, quand le tableau défile de côté, sa première colonne reste à gauche ; <kbd>+</kbd> / <kbd>−</kbd> ou <kbd>Ctrl</kbd>+molette changent la taille du texte, et <strong>Largeur</strong> (<kbd>W</kbd>) ajuste le tableau à la fenêtre. <strong>Filtrer les lignes</strong> (<kbd>Ctrl</kbd>+<kbd>F</kbd>) ne garde que les lignes qui contiennent les mots tapés, et un clic sur l'en-tête d'une colonne trie les lignes selon celle-ci : croissant, décroissant, retour à l'ordre d'origine (nombres, montants, pourcentages et dates sont reconnus comme tels). Le document ne change pas, et <strong>Copier le tableau (pour Excel)</strong> copie dans l'aperçu les lignes telles que vous les voyez.</li>
+          <li>Les liens vers d'autres documents fonctionnent comme dans un wiki : <code>[texte](autre)</code> trouve <code>autre.md</code>, <code>[texte](dossier/)</code> ouvre son <code>index.md</code> ou <code>README.md</code>, et <code>autre.md#section</code> saute à ce titre. Les titres ont les mêmes ancres que sur GitHub (<code>## 1. Introduction</code> → <code>#1-introduction</code>) : les tables des matières écrites pour GitHub ou par un assistant IA fonctionnent donc ici aussi, et les liens écrits pour les versions précédentes arrivent toujours à destination.</li>
+          <li>Le front matter YAML entre des lignes <code>---</code> est replié dans un bloc <em>Front matter</em> en tête : cliquez pour voir les champs en tableau.</li>
+          <li>Un paragraphe ne contenant que <code>[TOC]</code> devient une table des matières des titres qui suivent, présente aussi à l'impression, en HTML et en DOCX.</li>
+          <li>Les images à chemin relatif sont résolues par rapport au dossier du document. Les logos prévus pour les thèmes clair et sombre de GitHub (marqués <code>#gh-dark-mode-only</code> / <code>#gh-light-mode-only</code>, ou un <code>&lt;picture&gt;</code> avec une version claire et une version sombre) affichent celui du thème de lmdv ; l'impression et les exports utilisent le clair.</li>
+          <li>Les liens vers des pages web s'ouvrent dans votre navigateur par défaut, les liens <code>mailto:</code> dans votre messagerie ; les liens vers d'autres fichiers Markdown s'ouvrent dans la visionneuse, vers des images dans l'aperçu, vers un dossier dans le panneau des fichiers. Un lien vers tout autre fichier (un PDF, un tableur) propose de l'ouvrir avec son application.</li>
+          <li>Le HTML simple dans le texte fonctionne : <code>&lt;br&gt;</code>, <code>&lt;kbd&gt;</code>, <code>&lt;sup&gt;</code>, <code>&lt;details&gt;</code>, les images (aussi <code>&lt;picture&gt;</code> et <code>srcset</code>), la vidéo et l'audio du dossier du document. Comme sur GitHub, une balise qui n'est pas du HTML, telle que <code>&lt;nom&gt;</code>, ne s'affiche pas : pour la montrer, écrivez-la entre accents graves (<code>`&lt;nom&gt;`</code>) ou précédée d'une barre oblique inverse (<code>\&lt;nom&gt;</code>). Les balises qui changeraient la page, comme <code>&lt;style&gt;</code>, <code>&lt;script&gt;</code>, <code>&lt;title&gt;</code> et <code>&lt;iframe&gt;</code>, s'affichent comme du texte.</li>
+        </ul>
+
+        <h3>Partage et export</h3>
+        <p>Le bouton <strong>Partager</strong> (<kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>E</kbd>) rassemble tout ce qui sort de l'application :</p>
+        <ul>
+          <li><strong>Copier en texte enrichi</strong> (<kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>C</kbd>) : place le document rendu dans le presse-papiers avec sa mise en forme, prêt à coller dans Outlook, Word ou Teams. Les images locales sont incorporées.</li>
+          <li><strong>Imprimer…</strong> (<kbd>Ctrl</kbd>+<kbd>P</kbd>) : n'imprime que le document, mis en page pour le papier, toujours sur fond clair, avec le titre et la date en haut de chaque page et « page / pages » en bas ; un tableau plus large que la page est réduit pour y tenir.</li>
+          <li><strong>Enregistrer en PDF</strong> : la même mise en page écrite directement dans un fichier PDF, sans autre dialogue que le choix du fichier. <strong>Nouvelle page à chaque titre 1</strong> est une option du menu, mémorisée, pour les deux.</li>
+          <li><strong>Exporter en HTML / DOCX</strong> : enregistre le document en une seule page <code>.html</code> autonome qui s'ouvre dans tout navigateur, ou en <code>.docx</code> optimisé pour Microsoft Word — les formules deviennent des équations Word natives, les diagrammes des images.</li>
+        </ul>
+        <p>L'impression et les exports utilisent toujours la mise en page standard du texte, quels que soient les réglages de lecture actifs.</p>
+        <h3>Réglages de lecture</h3>
+        <p>
+          Le bouton <strong>Aa</strong> ouvre les réglages de lecture : taille du texte, police avec ou sans
+          empattement, interligne, largeur de colonne, langue de l'interface et thème : <strong>clair</strong>,
+          <strong>sépia</strong> (papier chaud), <strong>sombre</strong>, <strong>noir</strong> (pour les écrans
+          OLED) ou <strong>auto</strong> (clair ou sombre selon le système). La taille du texte est aussi accessible
+          partout avec <kbd>Ctrl</kbd>+<kbd>=</kbd> / <kbd>Ctrl</kbd>+<kbd>−</kbd>, <kbd>Ctrl</kbd>+molette et
+          <kbd>Ctrl</kbd>+<kbd>0</kbd> pour réinitialiser ; le texte de l'éditeur suit. <strong>Panneaux</strong>
+          règle à part la taille du texte des fichiers et du plan — <kbd>Ctrl</kbd>+molette sur un panneau ne
+          change que celui-ci. Chaque choix est mémorisé entre les redémarrages.
+        </p>
+        <p>
+          Si les <strong>effets d'animation</strong> du système sont désactivés, le défilement saute au lieu de
+          glisser et la mise en évidence après un saut n'est pas animée.
+        </p>
+        <h3>Intégration au bureau</h3>
+        <p>Les fichiers que vous ouvrez sont ajoutés aux fichiers récents de l'application. Double-cliquer sur un fichier <code>.md</code> dans le gestionnaire de fichiers l'ouvre ici une fois le gestionnaire de bureau installé.</p>
+        <p>
+          Dans le gestionnaire de fichiers, <strong>Nouveau</strong> → <strong>Document Markdown</strong> (clic droit dans un
+          dossier) crée un fichier <code>.md</code> vide.
+        </p>
+        <p>
+          Clic droit sur un fichier dans le panneau pour <strong>Ouvrir dans un nouvel onglet</strong>,
+          <strong>Ouvrir dans une nouvelle fenêtre</strong>, <strong>Afficher dans le dossier</strong>,
+          <strong>Copier le chemin</strong> ou <strong>Copier comme lien Markdown</strong> (relatif au document
+          ouvert). Le bouton épingle garde la fenêtre au-dessus des autres ; il n'a plus de raccourci, car
+          <kbd>Ctrl</kbd>+<kbd>Maj</kbd>+<kbd>T</kbd> rouvre désormais le dernier onglet fermé.
+        </p>
+        <p>
+          Une version <strong>portable</strong> est disponible sur GitHub sous forme de zip : décompressez-la
+          n'importe où et lancez-la ; elle garde ses réglages dans un dossier <code>data</code> à côté du
+          programme plutôt que dans votre profil.
+        </p>

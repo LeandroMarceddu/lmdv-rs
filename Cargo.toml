@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/lmdv", "crates/lmdv-core", "crates/lmdv-io", "crates/lmdv-app", "crates/lmdv-md", "crates/lmdv-math", "crates/lmdv-i18n", "crates/lmdv-render", "crates/lmdv-edit", "crates/lmdv-export"]
+exclude = ["vendor/rune"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.99"
+
+[workspace.dependencies]
+rune = { path = "vendor/rune/crates/rune", default-features = false, features = [
+    "accessibility",
+    "dbus",
+    "svg",
+    "native-file-dialog",
+    # Release builds keep `--snap`/`--tree`/`--script`; debug builds have it regardless.
+    "tooling",
+] }
+rune-kit = { path = "vendor/rune/crates/rune-kit", features = ["markdown", "mermaid"] }
+
+# Rune's own workspace patches these five crates; a dependency's [patch] does
+# not apply to the dependent workspace, so repeat them here. `tiny-skia-path`
+# is vendored too, but as a path dependency of `crates/rune` itself rather than
+# a patch, so resvg keeps its own copy of the published crate.
+[patch.crates-io]
+wgpu-hal = { path = "vendor/rune/vendor/wgpu-hal" }
+winit = { path = "vendor/rune/vendor/winit" }
+parley_engine = { path = "vendor/rune/vendor/parley_engine" }
+accesskit_windows = { path = "vendor/rune/vendor/accesskit_windows" }
+accesskit_macos = { path = "vendor/rune/vendor/accesskit_macos" }
+
+[profile.dev]
+# Full debug info makes the app and test binaries ~1.3 GB each; line tables
+# keep useful backtraces without the multi-gigabyte write bursts at link time.
+debug = 1
+
+[profile.test]
+debug = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.perf]
+inherits = "release"
+debug = 1

@@ -1,0 +1,5 @@
+[
+  {"t": 0.4, "type": "mark", "name": "start-page"},
+  {"t": 0.8, "type": "key", "name": "k", "cmd": true},
+  {"t": 1.2, "type": "mark", "name": "palette"}
+]

@@ -1,0 +1,11 @@
+[
+  {"t": 0.6, "type": "key", "name": "e", "cmd": true},
+  {"t": 1.0, "type": "key", "name": "Home"},
+  {"t": 1.2, "type": "type", "text": "A"},
+  {"t": 1.6, "type": "tap", "key": "editor-block-1"},
+  {"t": 1.9, "type": "type", "text": "B"},
+  {"t": 2.6, "type": "key", "name": "s", "cmd": true},
+  {"t": 4.5, "type": "key", "name": "z", "cmd": true},
+  {"t": 4.8, "type": "key", "name": "z", "cmd": true},
+  {"t": 5.2, "type": "mark", "name": "after-undo"}
+]

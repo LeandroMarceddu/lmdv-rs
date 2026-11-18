@@ -1,0 +1,7 @@
+[
+  {"t": 0.5, "type": "secondary-click", "key": "b2"},
+  {"t": 1.0, "type": "mark", "name": "menu"},
+  {"t": 1.15, "type": "key", "name": "Down"},
+  {"t": 1.35, "type": "key", "name": "Enter"},
+  {"t": 1.9, "type": "mark", "name": "edited"}
+]

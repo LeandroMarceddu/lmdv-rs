@@ -1,0 +1,8 @@
+[
+  {"t": 0.2, "type": "move", "x": 380, "y": 76},
+  {"t": 0.9, "type": "mark", "name": "card"},
+  {"t": 1.05, "type": "move", "x": 610, "y": 76},
+  {"t": 1.25, "type": "mark", "name": "followed"},
+  {"t": 1.45, "type": "move", "x": 1180, "y": 520},
+  {"t": 1.85, "type": "mark", "name": "hidden"}
+]

@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "app": "lmdv",
+  "data": {
+    "clean": true,
+    "windows": [
+      { "placement": { "x": 20, "y": 20, "width": 600, "height": 420, "maximized": false }, "maximized": false, "kind": "normal", "tabs": [ { "source": { "kind": "start" }, "mode": "viewer" } ], "active": 0, "closed": [] },
+      { "placement": { "x": 500, "y": 120, "width": 600, "height": 420, "maximized": false }, "maximized": false, "kind": "tornOffStart", "tabs": [ { "source": { "kind": "start" }, "mode": "viewer" } ], "active": 0, "closed": [] }
+    ]
+  }
+}

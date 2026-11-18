@@ -1,0 +1,27 @@
+<!-- lmdv application icon: a paper page with an ochre bookmark ribbon.
+     Self-contained; no external fonts, images, scripts, or references.
+     The per-user installer prepends its own "lmdv-managed" comment, so this
+     file deliberately has no XML declaration. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-labelledby="lmdv-title lmdv-desc">
+  <title id="lmdv-title">lmdv</title>
+  <desc id="lmdv-desc">A warm paper page with an ochre bookmark ribbon and two lines
+    of text, on a deep ink rounded square.</desc>
+
+  <g id="tile">
+    <rect id="tile-shape" x="44" y="44" width="424" height="424" rx="104" fill="#191b1f"/>
+  </g>
+
+  <g id="page">
+    <rect id="page-shape" x="129" y="86" width="254" height="340" rx="32" fill="#ece5d7"/>
+  </g>
+
+  <g id="bookmark">
+    <path id="ribbon" d="M226 86h60v159l-30-44-30 44z" fill="#c98f4a"/>
+  </g>
+
+  <g id="text">
+    <rect id="line-1" x="180" y="277" width="153" height="38" rx="19" fill="#191b1f"/>
+    <rect id="line-2" x="180" y="354" width="102" height="38" rx="19" fill="#6f6c66"/>
+  </g>
+</svg>

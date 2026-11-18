@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  System-level Markdown type registration for packaged installs.
+
+  Shared with the per-user installer (scripts/install-md-handler.sh writes the
+  same definitions into ~/.local/share/mime/packages/lmdv.xml). On a stock Arch
+  system text/markdown already exists in /usr/share/mime; this package only adds
+  the two aliases, the extra extensions and a stable glob weight.
+
+  No magic rule: shared-mime-info has none for Markdown, and content sniffing
+  would misclassify plain text (docs/LINUX_INTEGRATION.md §1).
+-->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="text/markdown">
+    <comment>Markdown document</comment>
+    <glob pattern="*.md" weight="60"/>
+    <glob pattern="*.markdown" weight="58"/>
+    <glob pattern="*.mdown" weight="57"/>
+    <glob pattern="*.mkd" weight="57"/>
+    <glob pattern="*.mkdn" weight="57"/>
+    <glob pattern="*.mdwn" weight="57"/>
+    <alias type="text/x-markdown"/>
+    <alias type="application/x-markdown"/>
+  </mime-type>
+</mime-info>

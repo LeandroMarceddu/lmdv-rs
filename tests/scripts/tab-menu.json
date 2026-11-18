@@ -1,0 +1,7 @@
+[
+  {"t": 0.6, "type": "mark", "name": "menu"},
+  {"t": 1.0, "type": "tap", "key": "tab-menu-item10"},
+  {"t": 1.6, "type": "mark", "name": "closed-others"},
+  {"t": 2.0, "type": "key", "name": "t", "cmd": true, "shift": true},
+  {"t": 2.6, "type": "mark", "name": "reopened"}
+]

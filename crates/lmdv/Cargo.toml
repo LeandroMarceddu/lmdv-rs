@@ -1,0 +1,15 @@
+[package]
+name = "lmdv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rune.workspace = true
+rune-kit.workspace = true
+lmdv-app = { path = "../lmdv-app" }
+lmdv-io = { path = "../lmdv-io" }
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"

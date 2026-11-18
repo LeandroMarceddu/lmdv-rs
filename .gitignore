@@ -1,0 +1,33 @@
+# Rust / Cargo build output
+/target/
+**/target/
+*.rs.bk
+
+# Packaging build output
+/dist/
+*.AppImage
+*.AppImage.zsync
+*.flatpak
+*.flatpakref
+/.flatpak-builder/
+/build-dir/
+/repo/
+packaging/aur/src/
+packaging/aur/pkg/
+packaging/aur/*.pkg.tar.*
+packaging/aur/*.tar.*
+packaging/flatpak/cargo-sources.json
+
+# Python helper caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local tooling and editor files
+.DS_Store
+*.log
+*.swp
+*~
+.vscode/
+.idea/
+.direnv/
