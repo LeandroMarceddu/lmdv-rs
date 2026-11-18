@@ -262,6 +262,9 @@ fn a_deleted_file_still_offers_its_draft_and_restore_leads_to_save_again() {
     assert_eq!(std::fs::read_to_string(&gone).unwrap(), "recovered text\n");
     poll_until(&mut state, "the save completion", |state| !state.active_tab().is_some_and(|tab| tab.view.dirty));
     assert!(!doc.is_dirty(), "Save again made the buffer clean");
+    // The draft removal is queued on the store thread; flush it before reading
+    // the file, or a slow CI runner sees the old draft.
+    assert!(state.shared().flush_store(Duration::from_secs(2)), "the draft removal is written");
     assert!(lmdv_io::store::load_draft(&dirs, &key).is_none(), "the saved draft is gone");
 }
 

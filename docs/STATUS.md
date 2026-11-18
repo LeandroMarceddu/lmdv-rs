@@ -391,6 +391,7 @@
 - Documents over 8 MiB warn once and open in the reader; restored edit mode is suppressed and `Ctrl+E` still edits.
 - A deleted or unreadable file offers its crash draft, and the recovered text reaches **Save again**; the document watcher's setup error is shown once.
 - Commits `c2f37b2` (io) and `252b0c5` (app); 607 i18n keys; full gate green. New follow-ups OI-169–173.
+- CI follow-up: the deleted-file draft test asserted the draft file before the store writer flushed it (run 44386181362). It now flushes the store first, so the check is deterministic; no shipped behavior changed.
 
 ## P6-I18N spellcheck — complete
 
