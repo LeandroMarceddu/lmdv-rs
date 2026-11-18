@@ -5,6 +5,9 @@
 //! copy (marker `lmdv-portable.txt` beside the executable) keeps everything
 //! under `<exe dir>/data` and gets a distinct instance id. `LMDV_HOME`
 //! overrides the root, for tests and advanced users.
+//!
+//! [`AppDirs::resolve_reported`] also says when portable mode could not use
+//! `<exe dir>/data` and the normal XDG roots were substituted.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -17,6 +20,29 @@ use std::path::{Path, PathBuf};
 pub const APP_DIR: &str = "md.lmdv";
 /// The marker file that selects portable mode.
 pub const PORTABLE_MARKER: &str = "lmdv-portable.txt";
+
+/// Why the resolved roots differ from what the environment and the marker
+/// asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DirsIssue {
+    /// Portable mode was selected, but `<exe dir>/data` could not be created.
+    /// The normal XDG roots are used instead, so the copy still starts.
+    PortableUnavailable {
+        /// The portable data root that could not be created.
+        root: PathBuf,
+        /// The creation error, for the notice.
+        reason: String,
+    },
+}
+
+/// The roots to use plus anything that went wrong while resolving them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedDirs {
+    /// The resolved locations.
+    pub dirs: AppDirs,
+    /// Empty on the normal path; one entry per fallback.
+    pub issues: Vec<DirsIssue>,
+}
 
 /// Every location the application writes to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,12 +66,23 @@ pub struct AppDirs {
 impl AppDirs {
     /// Resolves the directories from the process environment and executable.
     ///
-    /// This never creates anything and never fails: a missing environment
-    /// falls back to the home directory, and then to a private temporary
-    /// root, so the application can still start degraded.
+    /// This never fails: a missing environment falls back to the home
+    /// directory, and then to a private temporary root, so the application can
+    /// still start degraded. A portable copy whose data root cannot be created
+    /// falls back to the normal roots; this function drops that issue, so
+    /// callers that show a notice should use [`Self::resolve_reported`].
     pub fn resolve() -> Self {
+        Self::resolve_reported().dirs
+    }
+
+    /// Resolves the directories and reports any fallback.
+    ///
+    /// Portable mode creates `<exe dir>/data` while resolving so it can tell
+    /// whether the copy is usable; if that fails, the normal XDG roots are
+    /// used and [`DirsIssue::PortableUnavailable`] is returned.
+    pub fn resolve_reported() -> ResolvedDirs {
         let executable = std::env::current_exe().ok();
-        Self::resolve_from(&|name| std::env::var_os(name), executable.as_deref())
+        Self::resolve_from_reported(&|name| std::env::var_os(name), executable.as_deref())
     }
 
     /// Creates config, data, cache, state, logs and drafts with mode `0700`.
@@ -99,20 +136,29 @@ impl AppDirs {
         self.cache.join("math")
     }
 
+    #[cfg(test)]
     fn resolve_from(get: &dyn Fn(&str) -> Option<OsString>, executable: Option<&Path>) -> Self {
+        Self::resolve_from_reported(get, executable).dirs
+    }
+
+    fn resolve_from_reported(get: &dyn Fn(&str) -> Option<OsString>, executable: Option<&Path>) -> ResolvedDirs {
         let lexical = |path: PathBuf| crate::launch::absolute_lexical(&path);
+        let mut issues = Vec::new();
 
         if let Some(home) = get("LMDV_HOME").filter(|value| !value.is_empty()) {
             let root = lexical(PathBuf::from(home));
             let state = root.join("state");
-            return Self {
-                config: root.join("config"),
-                data: root.clone(),
-                cache: root.join("cache"),
-                logs: state.join("logs"),
-                state,
-                portable: false,
-                instance_id: format!("local-{}", short_hash(root.as_os_str())),
+            return ResolvedDirs {
+                dirs: Self {
+                    config: root.join("config"),
+                    data: root.clone(),
+                    cache: root.join("cache"),
+                    logs: state.join("logs"),
+                    state,
+                    portable: false,
+                    instance_id: format!("local-{}", short_hash(root.as_os_str())),
+                },
+                issues,
             };
         }
 
@@ -123,16 +169,28 @@ impl AppDirs {
             let has_marker = fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.is_file());
             if has_marker {
                 let root = lexical(exe_dir.join("data"));
-                let state = root.join("state");
-                return Self {
-                    config: root.join("config"),
-                    data: root.clone(),
-                    cache: root.join("cache"),
-                    logs: state.join("logs"),
-                    state,
-                    portable: true,
-                    instance_id: format!("portable-{}", short_hash(exe_dir.as_os_str())),
-                };
+                match fs::create_dir_all(&root) {
+                    Ok(()) => {
+                        let state = root.join("state");
+                        return ResolvedDirs {
+                            dirs: Self {
+                                config: root.join("config"),
+                                data: root.clone(),
+                                cache: root.join("cache"),
+                                logs: state.join("logs"),
+                                state,
+                                portable: true,
+                                instance_id: format!("portable-{}", short_hash(exe_dir.as_os_str())),
+                            },
+                            issues,
+                        };
+                    }
+                    Err(error) => {
+                        // A read-only USB stick or an unpacked archive: keep the
+                        // copy usable on the normal roots and let the app say so.
+                        issues.push(DirsIssue::PortableUnavailable { root, reason: error.to_string() });
+                    }
+                }
             }
         }
 
@@ -173,7 +231,18 @@ impl AppDirs {
         let data = lexical(data_root.join(APP_DIR));
         let cache = lexical(cache_root.join(APP_DIR));
         let state = lexical(state_root.join(APP_DIR));
-        Self { logs: state.join("logs"), config, data, cache, state, portable: false, instance_id: "main".to_owned() }
+        ResolvedDirs {
+            dirs: Self {
+                logs: state.join("logs"),
+                config,
+                data,
+                cache,
+                state,
+                portable: false,
+                instance_id: "main".to_owned(),
+            },
+            issues,
+        }
     }
 }
 
@@ -196,6 +265,15 @@ fn fallback_root() -> PathBuf {
 #[cfg(not(unix))]
 fn fallback_root() -> PathBuf {
     dirs::data_local_dir().unwrap_or_else(std::env::temp_dir).join("lmdv")
+}
+
+/// The user's Documents folder, as the desktop defines it (`XDG_DOCUMENTS_DIR`
+/// on Linux, the known folder on Windows).
+///
+/// Save as uses it for pasted text when the file browser has no folder yet
+/// (E-11). A platform without a Documents folder returns `None`.
+pub fn documents_dir() -> Option<PathBuf> {
+    dirs::document_dir()
 }
 
 /// A short stable hash of a path, used to isolate portable and `LMDV_HOME`
@@ -283,14 +361,44 @@ mod tests {
         let executable = exe_dir.join("lmdv");
         let get = env(&[("HOME", "/home/user"), ("XDG_DATA_HOME", "/x/data")]);
 
-        let dirs = AppDirs::resolve_from(&get, Some(&executable));
+        let resolved = AppDirs::resolve_from_reported(&get, Some(&executable));
+        assert!(resolved.issues.is_empty());
+        let dirs = resolved.dirs;
         assert!(dirs.portable);
         assert_eq!(dirs.data, exe_dir.join("data"));
+        assert!(dirs.data.is_dir(), "resolving a usable portable root creates it");
         assert_eq!(dirs.config, exe_dir.join("data").join("config"));
         assert!(dirs.instance_id.starts_with("portable-"));
 
         let other = AppDirs::resolve_from(&get, None);
         assert_ne!(dirs.instance_id, other.instance_id, "installed and portable copies coexist");
+    }
+
+    #[test]
+    fn a_portable_root_that_cannot_be_created_falls_back_to_xdg() {
+        let temp = TempDir::new().unwrap();
+        let exe_dir = temp.path().join("portable-readonly");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::write(exe_dir.join(PORTABLE_MARKER), b"").unwrap();
+        // A regular file where the data folder should be makes `create_dir_all`
+        // fail on every platform, without relying on POSIX modes or root.
+        fs::write(exe_dir.join("data"), b"not a folder").unwrap();
+        let executable = exe_dir.join("lmdv");
+        let get = env(&[("HOME", "/home/user"), ("XDG_DATA_HOME", "/x/data")]);
+
+        let resolved = AppDirs::resolve_from_reported(&get, Some(&executable));
+        assert!(!resolved.dirs.portable, "the unusable portable root is not selected");
+        assert_eq!(resolved.dirs.instance_id, "main", "the fallback joins the installed instance");
+        assert_ne!(resolved.dirs.data, exe_dir.join("data"));
+        assert_eq!(resolved.issues.len(), 1);
+        match &resolved.issues[0] {
+            DirsIssue::PortableUnavailable { root, reason } => {
+                assert_eq!(root, &exe_dir.join("data"));
+                assert!(!reason.is_empty(), "the notice has a reason");
+            }
+        }
+        #[cfg(unix)]
+        assert_eq!(resolved.dirs.data, PathBuf::from("/x/data/md.lmdv"), "the XDG root is used");
     }
 
     #[test]

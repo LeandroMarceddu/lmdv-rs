@@ -9,9 +9,14 @@
 //!
 //! Loading is explicit and happens on a worker: [`load_recents`],
 //! [`load_positions`], [`load_ui`], [`load_session`], [`load_prefs`],
-//! [`load_drafts`] and [`load_draft`].
+//! [`load_drafts`] and [`load_draft`]. Each `*_reported` variant returns the
+//! same value plus a [`StoreIssue`]: a corrupt or oversized file was
+//! quarantined, while a future-schema or foreign-app file is still on disk.
+//! Pass those issues to [`StoreHandle::start_with`] (or
+//! [`StoreHandle::protect_files`] after a late load) so the writer never
+//! overwrites settings it cannot read.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -45,6 +50,92 @@ pub const CLOSED_TABS_MAX: usize = 25;
 pub const PALETTE_RECENT_MAX: usize = 8;
 
 const MAX_STATE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// One of the five singleton state files the store owns.
+///
+/// Drafts are separate: each one has its own key and its own file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum StateFile {
+    /// `prefs.json`.
+    Prefs,
+    /// `recents.json`.
+    Recents,
+    /// `positions.json`.
+    Positions,
+    /// `ui.json`.
+    Ui,
+    /// `session.json`.
+    Session,
+}
+
+/// Why a state file could not be loaded normally.
+///
+/// Every variant means the loaded value fell back to its default. A corrupt or
+/// oversized file is quarantined; a future-schema or foreign-app file is left
+/// exactly where it is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StoreIssue {
+    /// Written by a newer lmdv with a schema this version cannot read.
+    FutureSchema {
+        /// The file that was ignored.
+        file: StateFile,
+        /// The schema version found in the file.
+        schema: u64,
+    },
+    /// Written by another application that happens to use the same file name.
+    ForeignApp {
+        /// The file that was ignored.
+        file: StateFile,
+        /// The `app` value found in the file.
+        app: String,
+    },
+    /// Larger than the state-size limit, so it was quarantined.
+    Oversized {
+        /// The file that was quarantined.
+        file: StateFile,
+    },
+    /// Unreadable JSON or payload, so it was quarantined.
+    Corrupt {
+        /// The file that was quarantined.
+        file: StateFile,
+    },
+}
+
+impl StoreIssue {
+    /// The file the issue belongs to.
+    pub fn file(&self) -> StateFile {
+        match self {
+            Self::FutureSchema { file, .. }
+            | Self::ForeignApp { file, .. }
+            | Self::Oversized { file }
+            | Self::Corrupt { file } => *file,
+        }
+    }
+
+    /// Whether this file must survive the session untouched.
+    ///
+    /// A newer version's or another application's file is still on disk; this
+    /// version loaded defaults, and writing them back would erase settings it
+    /// cannot read. Pass the issues to [`StoreHandle::start_with`] (or
+    /// [`StoreHandle::protect_files`] for a late load) so the writer skips
+    /// them. A quarantine issue is not protected: the original was already
+    /// moved aside and a fresh file is the normal outcome.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, Self::FutureSchema { .. } | Self::ForeignApp { .. })
+    }
+}
+
+/// A state value plus what happened to its file.
+///
+/// [`LoadedState::value`] is the usable value either way; `issue` is only set
+/// when the file was ignored or quarantined.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedState<T> {
+    /// The loaded value, or its default when the file was ignored or corrupt.
+    pub value: T,
+    /// The file problem, if any.
+    pub issue: Option<StoreIssue>,
+}
 
 /// A recently opened document.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,16 +497,41 @@ impl StoreHandle {
     /// values and exit. Call [`Self::flush`] on close/quit when the caller
     /// needs a guarantee.
     pub fn start(dirs: AppDirs) -> io::Result<Self> {
+        Self::start_with(dirs, &[])
+    }
+
+    /// Starts the writer, never writing the files that `issues` mark read-only.
+    ///
+    /// Use the issues returned by the `*_reported` loaders: a future-schema or
+    /// foreign-app file must keep its contents for a newer version or its own
+    /// application. Corrupt and oversized issues stay writable — their file
+    /// was quarantined, so fresh defaults are the intended result.
+    pub fn start_with(dirs: AppDirs, issues: &[StoreIssue]) -> io::Result<Self> {
         dirs.ensure()?;
         let _ = enforce_draft_caps(&dirs);
+        let read_only = read_only_keys(issues);
         let (tx, rx) = mpsc::channel();
-        thread::Builder::new().name("lmdv-store".to_owned()).spawn(move || Writer::new(dirs, rx).run())?;
+        thread::Builder::new().name("lmdv-store".to_owned()).spawn(move || Writer::new(dirs, read_only, rx).run())?;
         Ok(Self { tx })
     }
 
     /// Queues a whole-file patch. This never blocks.
     pub fn patch(&self, patch: StorePatch) {
         let _ = self.tx.send(StoreMsg::Patch(patch));
+    }
+
+    /// Marks the files named by `issues` as read-only for the rest of the
+    /// session, for a load that happened after [`Self::start`], such as the
+    /// session file.
+    ///
+    /// Send this before the first patch of those files; the writer also drops
+    /// a value that is still pending when the message arrives. It has no
+    /// effect on values already written.
+    pub fn protect_files(&self, issues: &[StoreIssue]) {
+        let files: Vec<StateFile> = issues.iter().filter(|issue| issue.is_read_only()).map(StoreIssue::file).collect();
+        if !files.is_empty() {
+            let _ = self.tx.send(StoreMsg::Protect(files));
+        }
     }
 
     /// Writes every pending value and waits for the writer to acknowledge.
@@ -434,7 +550,12 @@ impl StoreHandle {
 
 enum StoreMsg {
     Patch(StorePatch),
+    Protect(Vec<StateFile>),
     Flush(SyncSender<bool>),
+}
+
+fn read_only_keys(issues: &[StoreIssue]) -> HashSet<Key> {
+    issues.iter().filter(|issue| issue.is_read_only()).map(|issue| issue.file().key()).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -457,6 +578,18 @@ enum Key {
     Draft(String),
 }
 
+impl StateFile {
+    fn key(self) -> Key {
+        match self {
+            Self::Prefs => Key::Prefs,
+            Self::Recents => Key::Recents,
+            Self::Positions => Key::Positions,
+            Self::Ui => Key::Ui,
+            Self::Session => Key::Session,
+        }
+    }
+}
+
 struct Pending {
     value: Value,
     due: Instant,
@@ -468,13 +601,24 @@ struct Writer {
     rx: Receiver<StoreMsg>,
     pending: HashMap<Key, Pending>,
     last_write: HashMap<Key, Instant>,
+    /// Files left in place for a newer version or another application; patches
+    /// for them are dropped for the rest of the session.
+    read_only: HashSet<Key>,
     coalesce: Duration,
     failed: bool,
 }
 
 impl Writer {
-    fn new(dirs: AppDirs, rx: Receiver<StoreMsg>) -> Self {
-        Self { dirs, rx, pending: HashMap::new(), last_write: HashMap::new(), coalesce: COALESCE, failed: false }
+    fn new(dirs: AppDirs, read_only: HashSet<Key>, rx: Receiver<StoreMsg>) -> Self {
+        Self {
+            dirs,
+            rx,
+            pending: HashMap::new(),
+            last_write: HashMap::new(),
+            read_only,
+            coalesce: COALESCE,
+            failed: false,
+        }
     }
 
     fn run(&mut self) {
@@ -498,6 +642,7 @@ impl Writer {
 
             match message {
                 Some(StoreMsg::Patch(patch)) => self.apply(patch),
+                Some(StoreMsg::Protect(files)) => self.protect(files),
                 Some(StoreMsg::Flush(ack)) => {
                     self.write_all();
                     let ok = self.pending.is_empty() && !self.failed;
@@ -547,8 +692,21 @@ impl Writer {
             }
         };
 
+        if self.read_only.contains(&key) {
+            // A newer version's or another application's file stays untouched.
+            self.pending.remove(&key);
+            return;
+        }
         let due = self.due_for(&key);
         self.pending.insert(key, Pending { value, due, attempts: 0 });
+    }
+
+    fn protect(&mut self, files: Vec<StateFile>) {
+        for file in files {
+            let key = file.key();
+            self.read_only.insert(key.clone());
+            self.pending.remove(&key);
+        }
     }
 
     fn due_for(&self, key: &Key) -> Instant {
@@ -584,6 +742,10 @@ impl Writer {
     }
 
     fn write_key(&mut self, key: &Key) {
+        if self.read_only.contains(key) {
+            self.pending.remove(key);
+            return;
+        }
         let Some(mut pending) = self.pending.remove(key) else {
             return;
         };
@@ -670,7 +832,8 @@ fn ensure_private_parent(path: &Path) -> io::Result<()> {
 
 enum EnvelopeRead<T> {
     Data(T),
-    Ignore,
+    FutureSchema(u64),
+    ForeignApp(String),
     Corrupt,
 }
 
@@ -682,13 +845,13 @@ fn read_envelope<T: DeserializeOwned>(bytes: &[u8]) -> EnvelopeRead<T> {
     };
     let schema = value.get("schema").and_then(serde_json::Value::as_u64).unwrap_or(0);
     if schema > u64::from(STORE_SCHEMA) {
-        return EnvelopeRead::Ignore;
+        return EnvelopeRead::FutureSchema(schema);
     }
     if let Some(app) = value.get("app").and_then(serde_json::Value::as_str)
         && !app.is_empty()
         && app != APP_NAME
     {
-        return EnvelopeRead::Ignore;
+        return EnvelopeRead::ForeignApp(app.to_owned());
     }
     let Some(data) = value.get("data") else {
         return EnvelopeRead::Corrupt;
@@ -699,32 +862,39 @@ fn read_envelope<T: DeserializeOwned>(bytes: &[u8]) -> EnvelopeRead<T> {
     }
 }
 
-fn read_state<T>(path: &Path) -> T
+fn read_state<T>(path: &Path, file: StateFile) -> LoadedState<T>
 where
     T: DeserializeOwned + Default,
 {
+    let default = || LoadedState { value: T::default(), issue: None };
     let metadata = match fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => metadata,
-        _ => return T::default(),
+        _ => return default(),
     };
+    let oversized = || LoadedState { value: T::default(), issue: Some(StoreIssue::Oversized { file }) };
     if metadata.len() > MAX_STATE_BYTES {
         quarantine(path);
-        return T::default();
+        return oversized();
     }
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(_) => return T::default(),
+        Err(_) => return default(),
     };
     if bytes.len() as u64 > MAX_STATE_BYTES {
         quarantine(path);
-        return T::default();
+        return oversized();
     }
     match read_envelope(&bytes) {
-        EnvelopeRead::Data(data) => data,
-        EnvelopeRead::Ignore => T::default(),
+        EnvelopeRead::Data(value) => LoadedState { value, issue: None },
+        EnvelopeRead::FutureSchema(schema) => {
+            LoadedState { value: T::default(), issue: Some(StoreIssue::FutureSchema { file, schema }) }
+        }
+        EnvelopeRead::ForeignApp(app) => {
+            LoadedState { value: T::default(), issue: Some(StoreIssue::ForeignApp { file, app }) }
+        }
         EnvelopeRead::Corrupt => {
             quarantine(path);
-            T::default()
+            LoadedState { value: T::default(), issue: Some(StoreIssue::Corrupt { file }) }
         }
     }
 }
@@ -764,37 +934,66 @@ fn normalize_recents(recents: &mut Vec<Recent>) {
 
 /// Loads recents, newest first, capped at [`RECENTS_MAX`].
 pub fn load_recents(dirs: &AppDirs) -> Vec<Recent> {
-    let mut recents = read_state::<Vec<Recent>>(&dirs.recents_path());
-    normalize_recents(&mut recents);
-    recents
+    load_recents_reported(dirs).value
+}
+
+/// Loads recents and reports a future-schema, foreign, oversized or corrupt file.
+pub fn load_recents_reported(dirs: &AppDirs) -> LoadedState<Vec<Recent>> {
+    let mut loaded = read_state::<Vec<Recent>>(&dirs.recents_path(), StateFile::Recents);
+    normalize_recents(&mut loaded.value);
+    loaded
 }
 
 /// Loads reading positions, capped at [`POSITIONS_MAX`].
 pub fn load_positions(dirs: &AppDirs) -> PositionTable {
-    let mut positions = read_state::<PositionTable>(&dirs.positions_path());
-    positions.normalize();
-    positions
+    load_positions_reported(dirs).value
+}
+
+/// Loads reading positions and reports a future-schema, foreign, oversized or
+/// corrupt file.
+pub fn load_positions_reported(dirs: &AppDirs) -> LoadedState<PositionTable> {
+    let mut loaded = read_state::<PositionTable>(&dirs.positions_path(), StateFile::Positions);
+    loaded.value.normalize();
+    loaded
 }
 
 /// Loads UI state with widths and caps normalized.
 pub fn load_ui(dirs: &AppDirs) -> UiPrefs {
-    let mut ui = read_state::<UiPrefs>(&dirs.ui_path());
-    ui.normalize();
-    ui
+    load_ui_reported(dirs).value
+}
+
+/// Loads UI state and reports a future-schema, foreign, oversized or corrupt
+/// file.
+pub fn load_ui_reported(dirs: &AppDirs) -> LoadedState<UiPrefs> {
+    let mut loaded = read_state::<UiPrefs>(&dirs.ui_path(), StateFile::Ui);
+    loaded.value.normalize();
+    loaded
 }
 
 /// Loads the restorable session with active indexes and closed tabs normalized.
 pub fn load_session(dirs: &AppDirs) -> SessionSnapshot {
-    let mut session = read_state::<SessionSnapshot>(&dirs.session_path());
-    session.normalize();
-    session
+    load_session_reported(dirs).value
+}
+
+/// Loads the restorable session and reports a future-schema, foreign,
+/// oversized or corrupt file.
+pub fn load_session_reported(dirs: &AppDirs) -> LoadedState<SessionSnapshot> {
+    let mut loaded = read_state::<SessionSnapshot>(&dirs.session_path(), StateFile::Session);
+    loaded.value.normalize();
+    loaded
 }
 
 /// Loads preferences. A corrupt file is quarantined and defaults are returned.
 pub fn load_prefs(dirs: &AppDirs) -> Prefs {
-    let mut prefs = read_state::<Prefs>(&dirs.prefs_path());
-    prefs.sanitize();
-    prefs
+    load_prefs_reported(dirs).value
+}
+
+/// Loads preferences and reports a future-schema, foreign, oversized or
+/// corrupt file.
+pub fn load_prefs_reported(dirs: &AppDirs) -> LoadedState<Prefs> {
+    let mut loaded = read_state::<Prefs>(&dirs.prefs_path(), StateFile::Prefs);
+    loaded.value.sanitize();
+    loaded
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -883,7 +1082,7 @@ fn read_draft_file(path: &Path) -> Option<DraftRecord> {
     }
     match read_envelope(&bytes) {
         EnvelopeRead::Data(data) => Some(data),
-        EnvelopeRead::Ignore => None,
+        EnvelopeRead::FutureSchema(_) | EnvelopeRead::ForeignApp(_) => None,
         EnvelopeRead::Corrupt => {
             quarantine(path);
             None
@@ -1176,7 +1375,10 @@ mod tests {
         dirs.ensure().unwrap();
         fs::write(dirs.recents_path(), b"{ not json").unwrap();
 
-        assert!(load_recents(&dirs).is_empty());
+        let loaded = load_recents_reported(&dirs);
+        assert!(loaded.value.is_empty());
+        assert_eq!(loaded.issue, Some(StoreIssue::Corrupt { file: StateFile::Recents }));
+        assert!(!loaded.issue.unwrap().is_read_only(), "a quarantined file may be written fresh");
         assert!(!dirs.recents_path().exists());
         let quarantined: Vec<_> = fs::read_dir(&dirs.data)
             .unwrap()
@@ -1187,7 +1389,7 @@ mod tests {
     }
 
     #[test]
-    fn a_future_schema_is_not_overwritten_or_quarantined() {
+    fn a_future_schema_is_reported_but_not_overwritten_or_quarantined() {
         let temp = TempDir::new().unwrap();
         let dirs = dirs(&temp);
         dirs.ensure().unwrap();
@@ -1196,15 +1398,101 @@ mod tests {
             "app": "lmdv",
             "data": [{"path": "/tmp/future.md", "name": "future.md", "dir": "/tmp", "openedAt": 1}]
         });
-        fs::write(dirs.recents_path(), serde_json::to_vec(&future).unwrap()).unwrap();
+        let bytes = serde_json::to_vec(&future).unwrap();
+        fs::write(dirs.recents_path(), &bytes).unwrap();
 
-        assert!(load_recents(&dirs).is_empty(), "unknown future schema reads as defaults");
+        let loaded = load_recents_reported(&dirs);
+        assert!(loaded.value.is_empty(), "unknown future schema reads as defaults");
+        assert_eq!(
+            loaded.issue,
+            Some(StoreIssue::FutureSchema { file: StateFile::Recents, schema: 99 }),
+            "the app can warn instead of failing silently"
+        );
         assert!(dirs.recents_path().exists(), "the future file is left alone");
         let quarantined = fs::read_dir(&dirs.data)
             .unwrap()
             .filter_map(|entry| entry.ok())
             .any(|entry| entry.file_name().to_string_lossy().contains(".bad-"));
         assert!(!quarantined, "a future schema is not corrupt");
+
+        // The writer must keep that file for the newer version.
+        let issue = loaded.issue.expect("reported");
+        assert!(issue.is_read_only());
+        let handle = StoreHandle::start_with(dirs.clone(), &[issue]).unwrap();
+        handle.patch(StorePatch::Recents(vec![Recent::new("/tmp/this-version.md", 2)]));
+        handle.patch(StorePatch::Prefs(Prefs::default()));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(fs::read(dirs.recents_path()).unwrap(), bytes, "the newer version's file is untouched");
+        assert!(dirs.prefs_path().exists(), "other state files still write");
+    }
+
+    #[test]
+    fn a_foreign_app_file_is_reported_and_never_written() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let foreign = serde_json::json!({"schema": 1, "app": "other-app", "data": {"theme": "dark"}});
+        let bytes = serde_json::to_vec(&foreign).unwrap();
+        fs::write(dirs.prefs_path(), &bytes).unwrap();
+
+        let loaded = load_prefs_reported(&dirs);
+        assert_eq!(loaded.value, Prefs::default(), "another app's prefs read as defaults");
+        assert_eq!(loaded.issue, Some(StoreIssue::ForeignApp { file: StateFile::Prefs, app: "other-app".to_owned() }));
+
+        let handle = StoreHandle::start_with(dirs.clone(), &[loaded.issue.expect("reported")]).unwrap();
+        handle.patch(StorePatch::Prefs(Prefs { theme: ThemePref::Dark, ..Prefs::default() }));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(fs::read(dirs.prefs_path()).unwrap(), bytes, "the other app's file is untouched");
+    }
+
+    #[test]
+    fn a_late_load_can_protect_the_session_file() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let future = serde_json::json!({"schema": 99, "app": "lmdv", "data": {"clean": true, "windows": []}});
+        let bytes = serde_json::to_vec(&future).unwrap();
+        fs::write(dirs.session_path(), &bytes).unwrap();
+
+        // The app starts the writer before the session is loaded.
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        let loaded = load_session_reported(&dirs);
+        assert_eq!(loaded.issue, Some(StoreIssue::FutureSchema { file: StateFile::Session, schema: 99 }));
+        let issue = loaded.issue.expect("reported");
+        handle.protect_files(&[issue]);
+        handle.patch(StorePatch::Session(SessionSnapshot { clean: true, ..SessionSnapshot::default() }));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(fs::read(dirs.session_path()).unwrap(), bytes, "the newer session survives");
+    }
+
+    #[test]
+    fn an_oversized_state_file_is_reported_and_quarantined() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let file = fs::File::create(dirs.ui_path()).unwrap();
+        file.set_len(MAX_STATE_BYTES + 1).unwrap();
+        drop(file);
+
+        let loaded = load_ui_reported(&dirs);
+        assert_eq!(loaded.value, UiPrefs::default());
+        assert_eq!(loaded.issue, Some(StoreIssue::Oversized { file: StateFile::Ui }));
+        assert!(!loaded.issue.unwrap().is_read_only(), "a quarantined file may be written fresh");
+        assert!(!dirs.ui_path().exists());
+        let quarantined = fs::read_dir(&dirs.data)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("ui.json.bad-"));
+        assert!(quarantined, "the oversized file is kept aside");
+    }
+
+    #[test]
+    fn a_missing_state_file_reports_no_issue() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let loaded = load_ui_reported(&dirs);
+        assert_eq!(loaded.value, UiPrefs::default());
+        assert!(loaded.issue.is_none(), "first run is not a problem");
     }
 
     #[test]

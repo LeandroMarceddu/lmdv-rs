@@ -19,6 +19,19 @@ use crate::path_policy::{PathError, reject_network_or_device};
 /// The largest document that may be opened: 32 MiB.
 pub const MAX_DOC_BYTES: u64 = 32 * 1024 * 1024;
 
+/// The size above which a document is a “large document”: 8 MiB.
+///
+/// This is a warning threshold, not a limit: the app tells the user and opens
+/// such a document in viewer mode. [`MAX_DOC_BYTES`] is the hard open cap.
+pub const LARGE_DOC_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Whether a document of `len` bytes is large enough for the warning.
+///
+/// The threshold itself is not large; only a document above it is.
+pub fn is_large_document(len: u64) -> bool {
+    len > LARGE_DOC_BYTES
+}
+
 /// How many times an open/read is retried while another process holds a
 /// transient lock.
 const READ_ATTEMPTS: usize = 4;
@@ -296,6 +309,16 @@ mod tests {
         let file = File::create(&path).unwrap();
         file.set_len(MAX_DOC_BYTES + 1).unwrap();
         assert!(matches!(read_document(&path), Err(ReadError::TooLarge { max: MAX_DOC_BYTES, .. })));
+    }
+
+    #[test]
+    fn the_large_document_threshold_sits_below_the_open_cap() {
+        assert_eq!(LARGE_DOC_BYTES, 8 * 1024 * 1024, "OI-010: 8 MiB");
+        const { assert!(LARGE_DOC_BYTES < MAX_DOC_BYTES, "the warning threshold is not the hard cap") };
+        assert!(!is_large_document(0));
+        assert!(!is_large_document(LARGE_DOC_BYTES), "exactly 8 MiB is not large");
+        assert!(is_large_document(LARGE_DOC_BYTES + 1));
+        assert!(is_large_document(MAX_DOC_BYTES));
     }
 
     #[test]
