@@ -189,7 +189,7 @@ Steps:
 - [x] Security corpus/fuzz: HTML, paths, image bombs, socket, huge tables/docs. — *P7-SEC parser corpus + multibyte math fix; image/socket fuzz still partial.*
 - [ ] Performance budgets on the target machine; memory; idle.
 - [ ] Wayland/X11, NVIDIA/Mesa, scaling, IME, multi-window manual matrix.
-- [x] Packaging: AppImage and/or Flatpak, AUR PKGBUILD optional, portable tarball; icon/desktop/MIME; install/uninstall restore. — *P7-PKG recipes + icon; signed/end-to-end release remains OI-153.*
+- [x] Packaging: AppImage and portable mode; icon/desktop/MIME; Windows NSIS installer. — *P7-PKG recipes + icon; signed/end-to-end release remains OI-153.*
 - [ ] Full parity audit; every checklist row has evidence or an accepted substitute/gap.
 - [ ] README/help/known gaps; close OpenChamber plan.
 

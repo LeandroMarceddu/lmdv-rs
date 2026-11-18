@@ -1081,7 +1081,7 @@ Source: `src-tauri/src/lib.rs:171-204,562-611`, `README.md:284-298`.
 | Windows behavior | Where | Linux substitute / gap |
 |---|---|---|
 | `.md` associations, Open With, Explorer “New → Markdown document” | `tauri.conf.json`, `nsis/hooks.nsh`, MSIX resources | XDG MIME type + `.desktop` `MimeType=text/markdown;`; `xdg-mime default`; template in `~/Templates` (Desktop Environment dependent). Record as `substitute`. |
-| `lmdv` command in WindowsApps, Store execution alias | README/installer | Install launcher script/symlink into `~/.local/bin`; AppImage/Flatpak `Exec` alias. |
+| `lmdv` command in WindowsApps, Store execution alias | README/installer | Install launcher script/symlink into `~/.local/bin`; AppImage `Exec` alias. |
 | Single-instance mutex | tauri-plugin-single-instance | Unix socket or D-Bus name; forward argv+cwd. |
 | Recent items + taskbar jump list (`SHAddToRecentDocs`) | `commands.rs:321-336` | `RecentManager`/`gtk_recent` or `xdg-desktop-portal` recent; no jump list on Linux/Wayland; optional `.desktop` actions. `substitute`. |
 | Windows 11 Snap layouts over Maximize | `caption.rs` | Wayland compositor tiling/snap; X11 `_NET_WM` hints. No custom zones; use system decorations or compositor snap. `gap/substitute`. |

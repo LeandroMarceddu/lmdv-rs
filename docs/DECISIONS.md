@@ -310,4 +310,4 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 
 **Decision:** Every app-visible string uses **lmdv**: all six locale catalogs, the window-title template, help pages and packaging metadata. The legacy name is scrubbed from the repository; only a single README attribution line may name it. Do not add `<url type="homepage">` or create a project site; `url=` in packaging recipes is only a release-source base. Keep the AppStream `url-homepage-missing` warning as an accepted gap.
 
-**Consequences:** Branding is consistent with the native app identity. Flathub or another channel that requires a homepage may be unavailable; other channels can ship without one. Future locale/help ports must not reintroduce the legacy name.
+**Consequences:** Branding is consistent with the native app identity. A distribution channel that requires a homepage may be unavailable; the release workflow can ship without one. Future locale/help ports must not reintroduce the legacy name.

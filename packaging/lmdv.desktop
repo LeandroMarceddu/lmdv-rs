@@ -1,4 +1,4 @@
-# lmdv desktop entry for system packages (pacman, AppImage, Flatpak).
+# lmdv desktop entry for the AppImage.
 # The per-user development installer writes its own copy under
 # ~/.local/share/applications with an absolute Exec path; that copy takes
 # precedence over this one. See packaging/README.md.

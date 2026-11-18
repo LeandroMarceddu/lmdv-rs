@@ -22,9 +22,9 @@ Everything marked **verified** was executed on this machine (Plasma 6.8.2, Wayla
 | Routing | port `windowing.rs` rules: activate tab → idle window → last-used → new | the behavior spec |
 | CLI | `lmdv [--new-window] [file] [--line N]`, `-l N`, `--line=N`, `--`, first positional only | exactly `parse_args` in `src/lib.rs:179` |
 | `--wait` | **not in v1**; protocol reserves it | the fixed grammar has no `--wait`; adding it later is purely additive |
-| Packaging order | dev installer → AUR → AppImage → Flatpak | Flatpak needs D-Bus single-instance and portals, a separate design |
+| Packaging order | dev installer → AppImage | AppImage is the Linux package; the Windows NSIS installer is separate |
 
-The reference implementation's Linux single-instance is a **D-Bus well-known name** (`<bundle-id>.SingleInstance`), forwarding `argv` + `cwd` and exiting 0 after the primary accepts (`src/lib.rs:490`). That is a valid alternative, but it silently loses single-instance behavior when the session bus is missing, and it gives no control over timeouts. The Unix socket chosen here is the one already committed to in `PLAN.md:92`; §5 keeps the D-Bus route documented for Flatpak.
+The reference implementation's Linux single-instance is a **D-Bus well-known name** (`<bundle-id>.SingleInstance`), forwarding `argv` + `cwd` and exiting 0 after the primary accepts (`src/lib.rs:490`). That is a valid alternative, but it silently loses single-instance behavior when the session bus is missing, and it gives no control over timeouts. The Unix socket chosen here is the one already committed to in `PLAN.md:92`.
 
 ---
 
@@ -1032,10 +1032,7 @@ gio launch ~/.local/share/applications/lmdv.desktop "$PWD/note.md"
 |---|---|---|---|---|---|---|
 | dev (this repo) | `target/{debug,release}/lmdv` + wrapper `~/.local/bin/lmdv` | `~/.local/share/applications/lmdv.desktop` | `~/.local/share/icons/hicolor/scalable/apps/lmdv.svg` | `~/.local/share/mime/packages/lmdv.xml` | socket | `cargo build` |
 | `cargo install --path .` | `~/.cargo/bin/lmdv` | not installed | not installed | not installed | socket | reinstall |
-| AUR (`lmdv`) | `/usr/bin/lmdv` | `/usr/share/applications/lmdv.desktop` | `/usr/share/icons/hicolor/scalable/apps/lmdv.svg` | `/usr/share/mime/packages/lmdv.xml` | socket | `pacman -Syu` |
-| AUR (`lmdv-bin`) | `/usr/bin/lmdv` | same | same | same | socket | `pacman -Syu` |
 | AppImage | inside the image + `AppRun` | inside `usr/share/applications` | inside `usr/share/icons` | inside `usr/share/mime` | socket (no sandbox) | AppImageUpdate / manual |
-| Flatpak | `/app/bin/lmdv` | `/app/share/applications/<id>.desktop` (exported) | `/app/share/icons/...` | `/app/share/mime/packages/...` | **D-Bus**, not the socket | `flatpak update` |
 
 ### 7.2 Dev install
 
@@ -1073,7 +1070,7 @@ AppDir/
 ```
 
 * The desktop file **inside** the image should use `Exec=lmdv %f`; AppImage integration tools rewrite it to an absolute path to the `.AppImage` when they install it.
-* AppImage does not auto-integrate. Options: `AppImageLauncher` (AUR `appimagelauncher`) or `appimaged` (AUR `appimaged`) moves/copies the file and installs the desktop entry/icon; otherwise:
+* AppImage does not auto-integrate. Options: `AppImageLauncher` or `appimaged` moves/copies the file and installs the desktop entry/icon; otherwise:
   ```bash
   ./lmdv-0.5.0-x86_64.AppImage --appimage-extract
   # copy squashfs-root/usr/share/applications/lmdv.desktop to ~/.local/share/applications,
@@ -1084,114 +1081,7 @@ AppDir/
 * Updates: manual re-download, or AppImageUpdate if the image is built with zsync. Do not build a self-updater into the app.
 * Uninstall: remove the `.AppImage`, the desktop file, icon, MIME package; re-run `update-*`; restore the handler.
 
-### 7.5 Flatpak
-
-Layout inside the sandbox: `/app/bin/lmdv`, `/app/share/applications/org.example.lmdv.desktop`, `/app/share/icons/hicolor/...`, `/app/share/mime/packages/...`.
-
-Flatpak exports the desktop file and icon to:
-
-```
-~/.local/share/flatpak/exports/share/applications/org.example.lmdv.desktop
-~/.local/share/flatpak/exports/share/icons/hicolor/...
-```
-
-That directory is in `XDG_DATA_DIRS`, so the app appears in Open With automatically. The exported `Exec` is rewritten to `flatpak run --file-forwarding … @@ %f @@` (or `@@u %U @@`); see the `flatpak-run(1)` description of `--file-forwarding`: arguments between `@@` are exported in the document store and replaced by sandbox paths.
-
-Manifest sketch:
-
-```yaml
-app-id: org.example.lmdv
-runtime: org.freedesktop.Platform
-runtime-version: '25.08'
-sdk: org.freedesktop.Sdk
-sdk-extensions:
-  - org.freedesktop.Sdk.Extension.rust-stable
-command: lmdv
-finish-args:
-  - --share=ipc
-  - --socket=wayland
-  - --socket=fallback-x11
-  - --device=dri
-  # A viewer needs to read arbitrary user files. Either grant home read-only,
-  # or rely on the document portal for files passed by the file manager:
-  - --filesystem=home:ro
-  # For saving/exporting next to the document, home read-write is simpler:
-  # - --filesystem=home
-  - --talk-name=org.freedesktop.portal.Desktop
-modules:
-  - name: lmdv
-    buildsystem: simple
-    build-commands:
-      - install -Dm755 target/release/lmdv /app/bin/lmdv
-      - install -Dm644 assets/lmdv.desktop /app/share/applications/org.example.lmdv.desktop
-      - install -Dm644 assets/lmdv.svg /app/share/icons/hicolor/scalable/apps/org.example.lmdv.svg
-      - install -Dm644 assets/lmdv.xml /app/share/mime/packages/org.example.lmdv.xml
-    sources:
-      - type: dir
-        path: .
-```
-
-Flatpak-specific rules:
-
-* **Single instance must use D-Bus**, not `$XDG_RUNTIME_DIR/lmdv-$UID.sock`. Each `flatpak run` is a separate sandbox; the host runtime dir is not a reliable shared rendezvous. Implement `org.freedesktop.Application` (or a well-known name like `org.example.lmdv.Instance`) on the session bus; `flatpak run` already mediates the bus.
-* The app sees a **different** path for a host file when it arrives through the document portal (`/run/user/1000/doc/<id>/…`). Canonicalization/dedupe must treat that as the document identity for the session; do not try to map it back to the host path.
-* `--filesystem=home:ro` is enough to *read* a document opened by path, but saving/exporting needs write access or the portal. Decide the product behavior before publishing.
-* `$XDG_RUNTIME_DIR` inside the sandbox is not the host's; any fallback logic must tolerate that.
-* Theme/fonts/GPU: `--device=dri`, Wayland socket; NVIDIA works through the runtime's driver extension if the host has `org.freedesktop.Platform.GL.nvidia-*` installed.
-* Updates are automatic (`flatpak update`, or the desktop's update service). Uninstall: `flatpak uninstall --delete-data org.example.lmdv`; the exported files disappear with it, but a user-level `mimeapps.list` entry pointing at the removed app may remain — our uninstaller cleans only `lmdv.desktop`, not the Flatpak id.
-
-### 7.6 AUR
-
-`PKGBUILD` sketch (source build):
-
-```bash
-pkgname=lmdv
-pkgver=0.5.0
-pkgrel=1
-pkgdesc="Native Markdown viewer and editor (Rust + Rune)"
-arch=('x86_64' 'aarch64')
-url="https://example.invalid/lmdv"
-license=('MIT')
-depends=('glibc' 'gcc-libs' 'vulkan-icd-loader')
-makedepends=('cargo' 'rustup')
-optdepends=('mesa: Vulkan driver for AMD/Intel'
-            'nvidia-utils: Vulkan driver for NVIDIA')
-source=("$pkgname-$pkgver.tar.gz::$url/archive/v$pkgver.tar.gz")
-sha256sums=('SKIP')
-
-prepare() {
-  cd "$pkgname-$pkgver"
-  cargo fetch --locked
-}
-
-build() {
-  cd "$pkgname-$pkgver"
-  # Rune pins 1.99.1; Arch's rustc is 1.98.x. Do not rely on a rustup shim
-  # being first in PATH — name the toolchain explicitly.
-  RUSTUP_TOOLCHAIN=1.99.1 cargo build --release --frozen --locked
-}
-
-check() {
-  cd "$pkgname-$pkgver"
-  RUSTUP_TOOLCHAIN=1.99.1 cargo test --release --frozen --locked
-}
-
-package() {
-  cd "$pkgname-$pkgver"
-  install -Dm755 target/release/lmdv "$pkgdir/usr/bin/lmdv"
-  install -Dm644 assets/lmdv.desktop "$pkgdir/usr/share/applications/lmdv.desktop"
-  install -Dm644 assets/lmdv.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/lmdv.svg"
-  install -Dm644 assets/lmdv.xml "$pkgdir/usr/share/mime/packages/lmdv.xml"
-}
-```
-
-* No `.INSTALL` is needed for MIME/desktop/icon caches: Arch's `shared-mime-info`, `desktop-file-utils` and `gtk-update-icon-cache` hooks run on `/usr/share` changes (**verified** file names). A `.INSTALL` that calls them again is harmless but noisy.
-* `namcap PKGBUILD *.pkg.tar.zst` catches missing deps and unneeded ones.
-* `lmdv-bin` repackages a release tarball: `depends=('glibc' 'gcc-libs')`, no `makedepends`, `package()` copies the prebuilt binary and data.
-* If the desktop file inside the package is named `lmdv.desktop`, the installed path is `/usr/share/applications/lmdv.desktop`; the MIME package must use the same type definitions as §1.3 (or be omitted — the system DB already has `text/markdown`; the package is only for aliases/extra globs).
-* AUR comments/updates: pacman handles everything; no self-update code.
-
-### 7.7 Portable mode
+### 7.5 Portable mode
 
 A marker file next to the executable:
 
@@ -1212,27 +1102,23 @@ Rules:
 * The single-instance socket still belongs in the runtime dir (or `/tmp` fallback); a portable app can still be one instance per user. Do not put the socket in `lmdv-data` unless the path fits and the filesystem supports sockets.
 * Portable mode is for USB sticks and AppImage; it is **not** a replacement for the user-level desktop registration (a portable app cannot register itself without writing outside its directory).
 
-### 7.8 Auto-update expectations
+### 7.6 Auto-update expectations
 
 | Method | Update mechanism |
 |---|---|
 | dev / `cargo install` | manual (rebuild/reinstall) |
-| AUR | pacman/AUR helper |
 | AppImage | manual or AppImageUpdate (zsync) |
-| Flatpak | automatic via `flatpak update` / desktop updater |
 | portable | manual |
 
 Do not add a network self-updater: the project is offline-first, and a viewer that phones home on launch contradicts the product rules. A "check for updates" menu item that opens the releases page is acceptable.
 
-### 7.9 Uninstall
+### 7.7 Uninstall
 
 | Method | Command |
 |---|---|
 | dev | `scripts/install-md-handler.sh --uninstall` (`--purge` to delete state) |
 | `cargo install` | `cargo uninstall lmdv` + the installer's `--uninstall` for the desktop bits |
-| AUR | `sudo pacman -Rns lmdv` (hooks refresh the caches) |
 | AppImage | delete the image, remove the desktop file/icon/MIME package, `update-*`, restore the handler |
-| Flatpak | `flatpak uninstall --delete-data org.example.lmdv` |
 
 The dev uninstaller restores the saved handler only if `lmdv.desktop` is still the current default; otherwise it leaves the user's newer choice alone (§3.6).
 
@@ -2198,8 +2084,6 @@ Expected: one process, ten tabs (or the configured tab limit), no duplicates, no
 | 19 | File named `-x.md` won't open | it is parsed as a flag | try `lmdv -- ./-x.md` | use `--`; file managers pass absolute paths |
 | 20 | `cargo build` then double-click shows an error | `ETXTBSY` during relink | launch log exit 126 | wrapper retries; packaging should rename atomically |
 | 21 | Installing over an existing handler loses it | state file deleted / first install while lmdv already default | `previous-defaults.tsv` contents | keep state; restore is best-effort otherwise |
-| 22 | Flatpak window opens, file missing | host path not visible in the sandbox | `flatpak run` logs; path is `/run/user/…/doc/…` | use `--file-forwarding` / portal; grant `--filesystem` |
-| 23 | AUR build fails on `rustc` version | Rune pins 1.99.1, Arch ships 1.98.x | `rustc --version` vs `rust-toolchain.toml` | pin the toolchain; build with rustup |
 | 24 | Wallpaper/theme makes the icon invisible | monochrome/transparent SVG | inspect in the menu | ship a filled, high-contrast icon |
 
 ---
@@ -2277,7 +2161,7 @@ Arch hooks present (packaged installs refresh caches automatically):
 1. **Canonical MIME is `text/markdown`; aliases are added per-user.** Do not invent a type.
 2. **Extension-based detection only.** No magic rule.
 3. **The desktop entry always points at a wrapper**, never directly at `target/…`, except with `--no-wrapper` for packaging.
-4. **Single instance is `flock` + Unix socket**, not D-Bus, for native builds. D-Bus is reserved for the Flatpak build.
+4. **Single instance is `flock` + Unix socket**, not D-Bus.
 5. **CLI is exactly the reference grammar**, including "first positional only" and ignored unknown flags; `-h/--help` and `-V/--version` are Linux additions.
 6. **`--wait` is deferred** and the protocol reserves a `wait` boolean.
 7. **Routing follows `windowing.rs`**, including the idle-window reuse and the in-flight set.
@@ -2292,7 +2176,5 @@ Arch hooks present (packaged installs refresh caches automatically):
 
 * Does the product want multi-file CLI (`lmdv a.md b.md`) despite the reference ignoring extras? If yes, the routing table and window/tab placement need a rule.
 * Should `--wait` ship in 0.1, or wait for an editor integration to justify it?
-* Is the AppImage or the AUR package the primary distribution? They have different update stories.
-* Flatpak: `--filesystem=home:ro` (read-only viewer, save needs a portal) vs `home` (simple, weaker sandbox). Decide before writing the manifest.
 * Native titlebar / client-side decorations affect `StartupWMClass` and focus; coordinate with the Rune windowing spike (`docs/RISKS_AND_SPIKES.md`).
 * Should the wrapper ever build automatically (`cargo build` on first launch)? Recommendation: **no** — a GUI launch must never block on a multi-minute build, and a build failure would be invisible.

@@ -118,7 +118,13 @@ jobs:
         run: |
           $version = $env:GITHUB_REF_NAME -replace '^v',''
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          $makensis = (Get-Command makensis.exe -ErrorAction Stop).Source
+          $makensis = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe'
+          if (-not (Test-Path $makensis)) {
+            $makensis = Join-Path $env:ProgramFiles 'NSIS\makensis.exe'
+          }
+          if (-not (Test-Path $makensis)) {
+            throw "NSIS makensis.exe was not found after choco install"
+          }
           & $makensis /DVERSION=$version `
             /DSOURCE="$PWD\target\release\lmdv.exe" `
             /DICON="$PWD\assets\lmdv.ico" `
