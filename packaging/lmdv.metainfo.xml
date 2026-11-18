@@ -49,10 +49,10 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
-    <release version="0.1.0" date="2026-11-15" type="development">
+    <release version="0.5.0" date="2026-11-18" type="development">
       <description>
-        <p>First packaging preview: desktop entry, AppStream metadata, AppImage,
-          Flatpak and AUR recipes.</p>
+        <p>Pre-1.0 build: native reading, editing, export, search, tabs and
+          windows, six locales, and GitHub release packaging.</p>
       </description>
     </release>
   </releases>

@@ -371,6 +371,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Flatpak manifest, AUR PKGBUILD/.SRCINFO, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; unsigned and without checksums.
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON, namcap, SRCINFO diff; AppStream expected warnings; no end-to-end signed release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)

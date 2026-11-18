@@ -1,0 +1,152 @@
+name: Release
+
+# Cutting a `v*` tag publishes the Linux AppImage + raw binary and the Windows
+# NSIS installer. Windows remains compile-checked in CI; the installer is built
+# here but runtime support is not claimed (see OI-155).
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  linux:
+    name: Linux release (AppImage + raw binary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libvulkan-dev \
+            mesa-vulkan-drivers \
+            libfontconfig1-dev \
+            fonts-dejavu-core \
+            fonts-noto-core \
+            pkg-config \
+            desktop-file-utils \
+            libxml2-utils \
+            appstream
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-release
+          cache-targets: false
+
+      - name: Build release binary
+        run: cargo build --release -p lmdv --locked
+
+      # linuxdeploy bundles the shared libraries and writes the AppImage. It is
+      # itself an AppImage; GitHub runners have no FUSE, so the AppImage runtime
+      # is told to extract itself before running.
+      - name: Download linuxdeploy
+        run: |
+          mkdir -p tools
+          curl -fL --retry 3 -o tools/linuxdeploy \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x tools/linuxdeploy
+
+      - name: Build AppImage
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          export PATH="$PWD/tools:$PATH"
+          scripts/package-appimage.sh --no-build --app-version "${GITHUB_REF_NAME#v}"
+          # The script stages AppDir under dist/; it is not a release asset.
+          rm -rf dist/AppDir
+
+      - name: Add raw binary
+        run: |
+          install -Dm755 target/release/lmdv "dist/lmdv-${GITHUB_REF_NAME#v}-x86_64"
+          strip "dist/lmdv-${GITHUB_REF_NAME#v}-x86_64" || true
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows release (NSIS installer)
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust 1.99.1
+        uses: dtolnay/rust-toolchain@1.99.1
+
+      - name: Cache Cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-release
+          cache-targets: false
+
+      - name: Build release binary
+        run: cargo build --release -p lmdv --locked
+
+      - name: Install NSIS
+        run: choco install nsis --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $makensis = (Get-Command makensis.exe -ErrorAction Stop).Source
+          & $makensis /DVERSION=$version `
+            /DSOURCE="$PWD\target\release\lmdv.exe" `
+            /DICON="$PWD\assets\lmdv.ico" `
+            /DOUTDIR="$PWD\dist" `
+            packaging\windows\lmdv.nsi
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: dist/*.exe
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [linux, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "*-release"
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: lmdv ${{ github.ref_name }}
+          files: dist/*
+          generate_release_notes: true

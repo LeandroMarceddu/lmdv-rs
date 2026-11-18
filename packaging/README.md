@@ -4,11 +4,10 @@ Recipes for shipping lmdv outside the development checkout: desktop metadata,
 an AppImage builder, a Flatpak manifest and an AUR package. Nothing here changes the
 application code or the existing per-user installer.
 
-**Status:** recipes and metadata only. No signed or reproducible release exists yet;
-the blockers are listed at the end. `AppImage` was not built end-to-end on the
-development machine (no release binary was compiled for this task; the AppDir staging and
-validation path was exercised with a stand-in binary), `Flatpak` was not built
-(flatpak-builder is absent) and the AUR package has placeholder source values.
+**Status:** `.github/workflows/release.yml` builds and publishes the Linux AppImage,
+raw Linux binary and Windows NSIS installer on `v*` tags. Flatpak and AUR remain
+recipes with placeholder source values; there are no signed checksums or
+reproducible-build claims yet. The blockers are listed at the end.
 
 ## Files
 
@@ -23,6 +22,21 @@ validation path was exercised with a stand-in binary), `Flatpak` was not built
 | `flatpak/README.md` | Flatpak build, permissions and portal notes. |
 | `aur/PKGBUILD`, `aur/.SRCINFO` | `pkgname=lmdv` source package for Arch/CachyOS. |
 | `aur/README.md` | AUR build, `lmdv-bin` variant and validation notes. |
+| `windows/lmdv.nsi` | NSIS installer: per-user install, Start Menu entry, optional desktop shortcut and default `.md` association. |
+| `../.github/workflows/release.yml` | Tag-driven Linux AppImage + raw binary and Windows NSIS release. |
+
+## GitHub release
+
+Push a `v*` tag. `.github/workflows/release.yml` builds and publishes:
+
+- Linux: `dist/lmdv-<version>-<arch>.AppImage` and the raw `lmdv-<version>-x86_64` binary.
+- Windows: `dist/lmdv-<version>-setup.exe`, built with `packaging/windows/lmdv.nsi`.
+
+The NSIS installer associates `.md` at the user level and registers lmdv in Open with /
+Default apps. On Windows 10/11 an existing per-user `UserChoice` still wins until the
+user confirms lmdv in Settings > Default apps; the installer never deletes that key.
+
+No Flatpak/AUR/deb/rpm artifacts are built by the release workflow.
 
 ## Identity: `lmdv` vs `md.lmdv`
 
@@ -90,7 +104,7 @@ choice to the user.
 
 ```bash
 scripts/package-appimage.sh --dry-run          # print the exact plan, write nothing
-scripts/package-appimage.sh                    # cargo build --release -p lmdv + dist/lmdv-0.1.0-x86_64.AppImage
+scripts/package-appimage.sh                    # cargo build --release -p lmdv + dist/lmdv-0.5.0-x86_64.AppImage
 scripts/package-appimage.sh --no-build         # reuse target/release/lmdv
 scripts/package-appimage.sh --binary ./target/debug/lmdv --appdir-only \
     --out-dir /tmp/lmdv-appimage               # stage + validate, no image (fast smoke test)

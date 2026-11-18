@@ -32,6 +32,10 @@ CI runs the full workspace gate on Linux for every push to `main` and every pull
 | [`docs/LINUX_INTEGRATION.md`](docs/LINUX_INTEGRATION.md) | MIME, desktop entry, launcher, socket, packaging |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADR log |
 
+## Releases
+
+Tags `v*` build a Linux AppImage, a raw Linux binary and a Windows NSIS installer through [`.github/workflows/release.yml`](.github/workflows/release.yml).
+
 ## Linux prerequisites (CachyOS/Arch)
 
 ```bash

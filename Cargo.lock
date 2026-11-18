@@ -2442,7 +2442,7 @@ checksum = "4744e383959f0db86ede514b809b1c53251889093803c05267acc7d4e7030d70"
 
 [[package]]
 name = "lmdv"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "lmdv-app",
  "lmdv-io",
@@ -2453,7 +2453,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-app"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "fontdb",
  "lmdv-core",
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-core"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "memchr",
@@ -2484,7 +2484,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-edit"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "lmdv-core",
  "regex",
@@ -2495,7 +2495,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-export"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "base64 0.22.1",
  "image",
@@ -2515,7 +2515,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-i18n"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "rune-i18n",
  "serde_json",
@@ -2523,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-io"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "blake3",
  "dirs",
@@ -2541,7 +2541,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-math"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "image",
  "ratex-layout",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-md"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "html5ever",
  "markup5ever_rcdom",
@@ -2566,7 +2566,7 @@ dependencies = [
 
 [[package]]
 name = "lmdv-render"
-version = "0.1.0"
+version = "0.5.0"
 dependencies = [
  "lmdv-i18n",
  "lmdv-md",

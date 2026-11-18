@@ -1075,7 +1075,7 @@ AppDir/
 * The desktop file **inside** the image should use `Exec=lmdv %f`; AppImage integration tools rewrite it to an absolute path to the `.AppImage` when they install it.
 * AppImage does not auto-integrate. Options: `AppImageLauncher` (AUR `appimagelauncher`) or `appimaged` (AUR `appimaged`) moves/copies the file and installs the desktop entry/icon; otherwise:
   ```bash
-  ./lmdv-0.1.0-x86_64.AppImage --appimage-extract
+  ./lmdv-0.5.0-x86_64.AppImage --appimage-extract
   # copy squashfs-root/usr/share/applications/lmdv.desktop to ~/.local/share/applications,
   # rewrite Exec to the absolute .AppImage path, copy the icon, then register as in §3
   ```
@@ -1146,7 +1146,7 @@ Flatpak-specific rules:
 
 ```bash
 pkgname=lmdv
-pkgver=0.1.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Native Markdown viewer and editor (Rust + Rune)"
 arch=('x86_64' 'aarch64')

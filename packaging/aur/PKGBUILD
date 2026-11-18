@@ -12,7 +12,7 @@
 # See README.md for the lmdv-bin variant and packaging decisions.
 
 pkgname=lmdv
-pkgver=0.1.0
+pkgver=0.5.0
 pkgrel=1
 pkgdesc="Native Markdown viewer and editor built with Rust and Rune"
 arch=('x86_64' 'aarch64')

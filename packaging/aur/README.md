@@ -90,7 +90,7 @@ makepkg --printsrcinfo > .SRCINFO && git diff --exit-code .SRCINFO
 ```
 
 `namcap` on the PKGBUILD checks dependency hygiene; run it on the built package
-(``namcap lmdv-0.1.0-1-x86_64.pkg.tar.zst``) to catch missing shared-library or data
+(``namcap lmdv-0.5.0-1-x86_64.pkg.tar.zst``) to catch missing shared-library or data
 dependencies.
 
 ## Relationship to the per-user installer
