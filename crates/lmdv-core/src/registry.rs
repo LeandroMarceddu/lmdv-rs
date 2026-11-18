@@ -135,6 +135,19 @@ impl DocumentRegistry {
         }
     }
 
+    /// Removes one document from the registry because its views joined
+    /// another document for the same file (OI-005).
+    ///
+    /// Only the registry entries are dropped: the returned `Document` stays
+    /// alive wherever a tab still holds it, and the caller points those tabs
+    /// at the surviving document.
+    pub fn remove(&mut self, id: DocumentId) -> Option<Rc<Document>> {
+        let doc = self.docs.remove(&id)?;
+        self.by_path.retain(|_, mapped| *mapped != id);
+        self.by_identity.retain(|_, mapped| *mapped != id);
+        Some(doc)
+    }
+
     /// Removes and returns every document that only the registry still holds.
     /// Path and identity entries for removed documents are purged.
     pub fn collect_unused(&mut self) -> Vec<DocumentId> {
@@ -299,6 +312,25 @@ mod tests {
         assert!(!registry.is_empty());
         assert!(registry.find_path(&path("was.md")).is_none());
         assert!(registry.find_identity(&meta).is_none());
+    }
+
+    #[test]
+    fn removing_a_merged_document_clears_its_path_and_identity_only() {
+        let mut registry = DocumentRegistry::new();
+        let merged_meta = FileMeta { len: 4, mtime_ns: 1, dev: 3, ino: 4 };
+        let merged = ready_doc(DocumentId(1), path("alias.md"), "text", merged_meta);
+        let survivor_meta = FileMeta { len: 9, mtime_ns: 2, dev: 3, ino: 5 };
+        let survivor = ready_doc(DocumentId(2), path("real.md"), "text", survivor_meta);
+        registry.insert_ready(merged.clone());
+        registry.insert_ready(survivor.clone());
+
+        assert_eq!(registry.remove(DocumentId(1)).map(|doc| doc.id), Some(DocumentId(1)));
+        assert!(registry.get(DocumentId(1)).is_none());
+        assert!(registry.find_path(&path("alias.md")).is_none());
+        assert!(registry.find_identity(&merged_meta).is_none());
+        assert!(Rc::ptr_eq(&survivor, &registry.find_path(&path("real.md")).unwrap()));
+        assert!(Rc::ptr_eq(&survivor, &registry.find_identity(&survivor_meta).unwrap()));
+        assert!(registry.remove(DocumentId(1)).is_none(), "removing twice is harmless");
     }
 
     #[test]

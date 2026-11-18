@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use lmdv_io::instance::{Claim, InstancePaths, InstanceServer, LaunchAck, LaunchRequest, forward};
-use lmdv_io::store::{SessionSnapshot, load_session};
-use lmdv_io::{AppDirs, Launch};
+use lmdv_io::store::{SessionSnapshot, load_session_reported};
+use lmdv_io::{AppDirs, DirsIssue, Launch};
 use rune::{AppSpec, Key, KeyEvent, Tx, Waker};
 
 use crate::commands::{command_for_key_in, dispatch_command};
@@ -61,7 +61,8 @@ pub const SCENES: &[(&str, Scene)] = &[
 
 /// Runs lmdv for a parsed launch.
 pub fn run(launch: Launch) {
-    run_with_dirs(AppDirs::resolve(), launch);
+    let resolved = AppDirs::resolve_reported();
+    run_reported(resolved.dirs, resolved.issues, launch);
 }
 
 /// Runs lmdv with explicit directories (tests, portable builds and the
@@ -73,6 +74,15 @@ pub fn run(launch: Launch) {
 /// headless tools their `--window KEY`/`--list-windows` selection, which a
 /// single `App` cannot provide.
 pub fn run_with_dirs(dirs: AppDirs, launch: Launch) {
+    run_reported(dirs, Vec::new(), launch);
+}
+
+/// [`run`] with the folder-resolution issues the launch found.
+///
+/// A portable root that could not be created falls back to XDG with a notice
+/// in the first window (OI-012); the doubts about `dirs` travel beside it
+/// rather than being dropped by `AppDirs::resolve`.
+fn run_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>, launch: Launch) {
     rune::set_app_id(APP_ID);
     // Rune ends a quitting app at once by default (`fast_exit`): the process exits
     // without dropping windows or the shared state, so drafts, the session store
@@ -80,7 +90,7 @@ pub fn run_with_dirs(dirs: AppDirs, launch: Launch) {
     // Their quit hooks cover most of it, but not the socket file or the per-window
     // `Drop`; keep the orderly teardown this app has always had.
     rune::orderly_exit();
-    let shared = AppShared::start(dirs);
+    let shared = AppShared::start_reported(dirs, dirs_issues);
     // The saved language (or the OS's, for Auto) is process-wide and must be in
     // place before the first window builds its strings.
     crate::settings::apply_locale(&shared.prefs());
@@ -119,8 +129,18 @@ pub fn run_with_dirs(dirs: AppDirs, launch: Launch) {
 /// The clean flag starts `false` here: from this point a crash leaves a marker
 /// the next launch reports. A clean close or quit overwrites it with `true`.
 fn startup_windows(shared: Rc<AppShared>, launch: Launch, test_window: Option<PathBuf>) -> Vec<rune::AnyWindowSpec> {
-    let session = crate::session::should_restore(&shared, &launch)
-        .then(|| load_session(shared.dirs()))
+    // The session is read after the store has started, so a future-schema or
+    // foreign file must be protected before the factory's first session patch
+    // — even when this launch will not restore it, because a CLI launch or
+    // `--new-window` replaces the stored session on close.
+    let loaded = (!(shared.is_headless() || rune::is_headless())).then(|| load_session_reported(shared.dirs()));
+    if let Some(issue) = loaded.as_ref().and_then(|loaded| loaded.issue.clone()) {
+        shared.note_store_issue(issue.clone());
+        shared.protect_store_files(std::slice::from_ref(&issue));
+    }
+    let session = loaded
+        .map(|loaded| loaded.value)
+        .filter(|_| crate::session::should_restore(&shared, &launch))
         .filter(|session| !session.windows.is_empty());
     let drafts =
         session.as_ref().map(|session| crate::session::read_restore_drafts(shared.dirs(), session)).unwrap_or_default();
@@ -181,7 +201,15 @@ pub(crate) fn startup_states(
             crate::session::seed_placement(&shared, id, plan);
             let report = crate::session::restore_tabs(&mut state, window_session, restore.drafts, &mut pasted_docs);
             if let Some(notice) = crate::session::restore_notice(restore.session, index, report) {
-                state.notice(notice);
+                // The startup warnings (folder fallback, ignored state files)
+                // belong to the same first frame; keep both sentences.
+                match state.ui.notice.as_mut() {
+                    Some(existing) => {
+                        existing.text.push(' ');
+                        existing.text.push_str(&notice);
+                    }
+                    None => state.notice(notice),
+                }
             }
             state.sync_registry();
             let _ = state.publish_session();
@@ -473,6 +501,7 @@ mod tests {
 
     use super::*;
     use crate::test_support;
+    use lmdv_io::store::load_session;
 
     fn window(temp: &TempDir) -> WindowState {
         WindowState::new(test_support::shared(temp))
@@ -669,6 +698,25 @@ mod tests {
         assert_eq!(specs.iter().map(|spec| spec.key().to_owned()).collect::<Vec<_>>(), vec!["window-1"]);
         drop(specs);
         assert!(!headless.dirs().session_path().exists(), "headless tooling never writes a session");
+    }
+
+    #[test]
+    fn a_future_schema_session_is_never_overwritten() {
+        let temp = TempDir::new().unwrap();
+        let dirs = test_support::dirs(&temp);
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        let future = r#"{"schema": 99, "app": "lmdv", "data": {"clean": true, "windows": []}}"#;
+        std::fs::write(dirs.session_path(), future).unwrap();
+
+        let shared = AppShared::start(dirs.clone());
+        let path = temp.path().join("launch.md");
+        std::fs::write(&path, "# Launch\n").unwrap();
+        // A CLI file skips the restore, but the launch still replaces the
+        // stored session on close: the ignored file must stay untouched.
+        let specs = startup_windows(Rc::clone(&shared), Launch { path: Some(path), ..Launch::default() }, None);
+        assert!(shared.flush_store(std::time::Duration::from_secs(2)));
+        drop(specs);
+        assert_eq!(std::fs::read_to_string(dirs.session_path()).unwrap(), future);
     }
 
     #[test]

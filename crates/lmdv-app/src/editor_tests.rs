@@ -222,6 +222,47 @@ fn a_crash_draft_is_offered_and_restore_enters_edit_mode_without_writing_the_fil
 }
 
 #[test]
+fn a_deleted_file_still_offers_its_draft_and_restore_leads_to_save_again() {
+    let temp = TempDir::new().unwrap();
+    let gone = temp.path().join("gone.md");
+    let dirs = test_support::dirs(&temp);
+    let handle = lmdv_io::store::StoreHandle::start(dirs.clone()).unwrap();
+    let key = gone.to_string_lossy().into_owned();
+    handle.patch(lmdv_io::store::StorePatch::Draft { key: key.clone(), draft: Draft::new("recovered text\n", "", 1) });
+    assert!(handle.flush(Duration::from_secs(2)));
+    drop(handle);
+
+    let shared = crate::shared::AppShared::start(dirs.clone());
+    let mut state = WindowState::new(shared);
+    state.open_path(gone.clone());
+    poll_until(&mut state, "the failed load's draft offer", |state| {
+        matches!(state.prompt(), Some(Prompt::Draft { .. }))
+    });
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("the error tab keeps a document");
+    assert!(matches!(*doc.status.borrow(), DocStatus::Error(_)), "the missing file is the error it was");
+
+    let mut tx = Tx::default();
+    state.prompt_primary(&mut tx);
+    assert_eq!(doc.text().text(), "recovered text\n", "Restore keeps the draft as the buffer");
+    assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor));
+    assert!(doc.is_dirty());
+    assert!(matches!(*doc.status.borrow(), DocStatus::Ready), "the restored buffer is a normal document");
+    assert!(!gone.exists(), "Restore never writes the file");
+
+    // The first save finds the file gone and asks Save again; that writes it.
+    state.request_save_active(&mut tx);
+    poll_until(&mut state, "the deleted-file save question", |state| {
+        matches!(state.prompt(), Some(Prompt::FileDeleted { .. }))
+    });
+    state.prompt_primary(&mut tx);
+    poll_until(&mut state, "Save again", |_| gone.exists());
+    assert_eq!(std::fs::read_to_string(&gone).unwrap(), "recovered text\n");
+    poll_until(&mut state, "the save completion", |state| !state.active_tab().is_some_and(|tab| tab.view.dirty));
+    assert!(!doc.is_dirty(), "Save again made the buffer clean");
+    assert!(lmdv_io::store::load_draft(&dirs, &key).is_none(), "the saved draft is gone");
+}
+
+#[test]
 fn a_draft_equal_to_the_file_is_dropped_silently() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("same.md");
@@ -1112,6 +1153,263 @@ fn an_untitled_document_asks_for_a_path_on_ctrl_s() {
     state.request_save_active(&mut tx);
     assert!(state.editor.after_save.is_empty(), "no job started without a path");
     assert_eq!(state.active_tab().and_then(Tab::document).map(|doc| doc.key.borrow().path().is_some()), Some(false));
+}
+
+// ------------------------------------------------- E-11/E-12 Save as (OI-071)
+
+/// Waits for a Save as to finish: the path probe, then the write.
+fn wait_for_save_as(state: &mut WindowState) {
+    poll_until(state, "the save-as probe and its save", |state| {
+        state.editor.save_as.pending.is_empty() && state.editor.after_save.is_empty() && state.worker().is_empty()
+    });
+}
+
+#[test]
+fn the_save_as_name_is_file_safe_and_ends_in_md() {
+    use crate::editor::suggested_file_name;
+    assert_eq!(suggested_file_name("Budget"), "Budget.md");
+    assert_eq!(suggested_file_name("notes.md"), "notes.md");
+    assert_eq!(suggested_file_name("A/B: C?"), "A-B- C-.md", "path separators and reserved characters become dashes");
+    assert_eq!(suggested_file_name("  ...  "), "Untitled.md");
+    assert_eq!(suggested_file_name(""), "Untitled.md");
+}
+
+#[test]
+fn save_as_starts_in_the_pane_root_and_falls_back_to_documents() {
+    use crate::editor::save_as_folder_for;
+    let note = Path::new("/notes/note.md");
+    let pane = Path::new("/pane");
+    let documents = Path::new("/home/user/Documents");
+    assert_eq!(
+        save_as_folder_for(Some(note), Some(pane), Some(documents)),
+        Some(PathBuf::from("/notes")),
+        "a file saves beside itself"
+    );
+    assert_eq!(
+        save_as_folder_for(None, Some(pane), Some(documents)),
+        Some(PathBuf::from("/pane")),
+        "pasted text starts in the pane root, the paste home"
+    );
+    assert_eq!(
+        save_as_folder_for(None, None, Some(documents)),
+        Some(PathBuf::from("/home/user/Documents")),
+        "with no pane root it falls back to Documents"
+    );
+    assert_eq!(save_as_folder_for(None, None, None), None);
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.set_browser_root(temp.path().to_path_buf());
+    state.open_synthetic("Budget", "# Budget\n");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    assert_eq!(state.save_as_folder(&doc), Some(temp.path().to_path_buf()), "the pasted tab uses the pane's folder");
+
+    // A second, independent state: the first one persisted its pane root.
+    let other = TempDir::new().unwrap();
+    let mut plain = window(&other);
+    plain.open_synthetic("Budget", "# Budget\n");
+    let doc = plain.active_tab().and_then(Tab::document).cloned().expect("document");
+    assert_eq!(
+        plain.save_as_folder(&doc),
+        lmdv_io::documents_dir(),
+        "without a pane root the pasted tab starts at the platform Documents folder"
+    );
+}
+
+#[test]
+fn saving_pasted_text_makes_the_tab_that_file_and_moves_its_places() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let tab = state.open_synthetic("Budget", "# Budget\n\nTotal: 3\n");
+    let doc = state.tab(tab).and_then(Tab::document).cloned().expect("document");
+    let pasted_key = {
+        let key = doc.key.borrow();
+        let lmdv_core::DocumentKey::Untitled(paste) = &*key else { panic!("pasted text") };
+        format!("pasted:{}", paste.0)
+    };
+    // A place the tab left before it was saved, keyed as pasted text.
+    if let Some(tab) = state.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+        tab.view.nav.record(lmdv_core::Place::new(pasted_key.clone(), ScrollAnchor::default()));
+    }
+
+    let chosen = temp.path().join("Budget.md");
+    state.save_as_chosen(doc.id, chosen.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut state);
+
+    let written = std::fs::canonicalize(&chosen).unwrap();
+    let written_key = written.to_string_lossy().into_owned();
+    assert_eq!(std::fs::read_to_string(&written).unwrap(), "# Budget\n\nTotal: 3\n");
+    assert_eq!(*doc.key.borrow(), lmdv_core::DocumentKey::File(written.clone()), "the tab is that file now");
+    assert_eq!(doc.saved.borrow().path.as_deref(), Some(written.as_path()));
+    assert!(!doc.is_dirty(), "the document matches what was written");
+    assert_eq!(state.shared().docs().find_path(&written).map(|found| found.id), Some(doc.id));
+    let tab = state.tab(tab).expect("the tab stayed");
+    assert_eq!(tab.full_title(), "Budget.md");
+    assert!(state.shared().recents().iter().any(|recent| recent.path == written), "the new file is in recents");
+    assert_eq!(
+        tab.view.nav.back.first().map(|place| place.path.as_str()),
+        Some(written_key.as_str()),
+        "the Back place follows the file"
+    );
+    assert!(!state.window_title().contains('•'), "the dirty dot is gone");
+    flush_store(&state);
+    let drafts = lmdv_io::store::load_drafts(&test_support::dirs(&temp));
+    assert!(
+        !drafts.iter().any(|(key, _)| key.starts_with("pasted:") || key == &written_key),
+        "the pasted and file drafts are gone: {drafts:?}"
+    );
+}
+
+#[test]
+fn save_as_refuses_a_file_open_with_unsaved_changes() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("taken.md");
+    std::fs::write(&path, "theirs\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    type_text(&mut state, "dirty ");
+    let other = state.open_synthetic("Copy", "mine\n");
+    let pasted = state.tab(other).and_then(Tab::document).cloned().expect("document");
+
+    state.save_as_chosen(pasted.id, path.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut state);
+
+    let notice = state.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default();
+    assert!(notice.contains("taken.md"), "the warning names the file: {notice}");
+    assert!(notice.contains("unsaved changes"), "the warning says why: {notice}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "nothing was written");
+    assert!(matches!(*pasted.key.borrow(), lmdv_core::DocumentKey::Untitled(_)), "the pasted document stays unsaved");
+    assert_eq!(state.tabs.iter().filter(|tab| tab.document_id().is_some()).count(), 2, "both documents are still open");
+}
+
+#[test]
+fn a_refused_save_as_cancels_the_window_close_it_was_part_of() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("taken.md");
+    std::fs::write(&path, "theirs\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    type_text(&mut state, "dirty ");
+    state.open_synthetic("Copy", "mine\n");
+    let pasted = state.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    // As the close plan leaves it: this window is saving every dirty document.
+    state.editor.close_on_clean = true;
+    state.editor.close_pending.insert(pasted.id);
+    state.save_as_chosen(pasted.id, path.clone(), crate::editor::AfterSave::CloseWindow);
+    wait_for_save_as(&mut state);
+
+    assert!(!state.editor.close_on_clean, "the refused Save as cancels the close");
+    assert!(state.editor.close_pending.is_empty(), "and forgets its pending documents");
+    assert!(!state.ui.close_requested, "the window stays open");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "nothing was written");
+}
+
+#[test]
+fn save_as_merges_with_a_clean_file_open_in_this_window() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("merged.md");
+    std::fs::write(&path, "old text\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    let existing = state.active_tab().and_then(Tab::document).map(|doc| doc.id).expect("document");
+    let tab = state.open_synthetic("Budget", "# Budget\n");
+    let pasted = state.tab(tab).and_then(Tab::document).cloned().expect("document");
+
+    state.save_as_chosen(pasted.id, path.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut state);
+
+    let written = std::fs::canonicalize(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&written).unwrap(), "# Budget\n", "the pasted text took the file over");
+    assert_eq!(*pasted.key.borrow(), lmdv_core::DocumentKey::File(written.clone()));
+    assert_eq!(
+        state.tabs.iter().filter(|tab| tab.document_id().is_some()).count(),
+        1,
+        "one document for the file remains"
+    );
+    assert!(state.tab(tab).is_some(), "the pasted tab is the survivor");
+    assert!(state.shared().docs().get(existing).is_none(), "the released duplicate left the registry");
+    assert!(state.closed_tabs().is_empty(), "a merged view is not a reopen place");
+    assert_eq!(state.shared().watch_refcount(&written), 1, "the file keeps one watch, not two");
+}
+
+#[cfg(unix)]
+#[test]
+fn save_as_finds_a_duplicate_through_a_symlink() {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real.md");
+    std::fs::write(&real, "old text\n").unwrap();
+    let alias = temp.path().join("alias.md");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &real);
+    let existing = state.active_tab().and_then(Tab::document).map(|doc| doc.id).expect("document");
+    state.open_synthetic("Budget", "# Budget\n");
+    let pasted = state.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    state.save_as_chosen(pasted.id, alias.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut state);
+
+    assert_eq!(std::fs::read_to_string(&real).unwrap(), "# Budget\n", "the link points at the file written");
+    assert!(std::fs::symlink_metadata(&alias).is_ok_and(|meta| meta.file_type().is_symlink()), "the alias stays");
+    assert!(state.shared().docs().get(existing).is_none(), "the identity found the duplicate");
+    assert_eq!(state.tabs.iter().filter(|tab| tab.document_id().is_some()).count(), 1);
+}
+
+#[test]
+fn save_as_releases_a_clean_file_open_in_another_window() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("shared.md");
+    std::fs::write(&path, "theirs\n").unwrap();
+    let (shared, mut first, mut second) = two_windows(&temp);
+    open_loaded(&mut first, &path);
+    let existing = first.active_document_id().expect("the first window shows the file");
+    poll_once(&mut second);
+    second.open_synthetic("Copy", "mine\n");
+    let pasted = second.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    second.save_as_chosen(pasted.id, path.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut second);
+
+    let written = std::fs::canonicalize(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&written).unwrap(), "mine\n", "the save took the file over");
+    assert_eq!(*pasted.key.borrow(), lmdv_core::DocumentKey::File(written.clone()));
+    assert!(second.ui.notice.as_ref().is_none_or(|notice| !notice.text.contains("another window")));
+
+    // E-12: the other window is asked to close its clean view; it leaves on
+    // its next poll, and the file keeps one document.
+    poll_once(&mut first);
+    assert_eq!(first.tabs().len(), 1);
+    assert!(first.active_tab().is_some_and(Tab::is_start), "the released view closed");
+    assert!(shared.docs().get(existing).is_none(), "the released document left the registry");
+    assert_eq!(shared.docs().len(), 1, "one document for the file");
+    assert_eq!(shared.docs().find_path(&written).map(|doc| doc.id), Some(pasted.id));
+}
+
+#[test]
+fn save_as_warns_when_the_other_window_cannot_be_asked() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("unreachable.md");
+    std::fs::write(&path, "theirs\n").unwrap();
+    let (shared, mut first, mut second) = two_windows(&temp);
+    open_loaded(&mut first, &path);
+    poll_once(&mut second);
+    // The window is no longer registered (it is closing), but its tab still
+    // holds the document: no release can be delivered, so the warning stays.
+    shared.unregister_window(first.id());
+    second.open_synthetic("Copy", "mine\n");
+    let pasted = second.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    second.save_as_chosen(pasted.id, path.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut second);
+
+    let notice = second.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default();
+    assert!(notice.contains("unreachable.md"), "the warning names the file: {notice}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "nothing was written");
+    assert!(matches!(*pasted.key.borrow(), lmdv_core::DocumentKey::Untitled(_)));
+    assert_eq!(first.tabs().iter().filter(|tab| tab.document_id().is_some()).count(), 1, "the other window keeps it");
 }
 
 #[test]

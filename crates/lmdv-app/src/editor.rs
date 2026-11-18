@@ -12,16 +12,19 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use lmdv_core::{DocStatus, Document, DocumentId, DocumentKey, Draft, EditLease, FileMeta, TabId, hash_text};
 use lmdv_edit::EditorSession;
-use lmdv_io::WriteError;
 use lmdv_io::store::StorePatch;
+use lmdv_io::{ReadError, WriteError};
 use rune::{FileDialogOptions, Key, KeyEvent, TextEdit, Tx};
 
 use crate::commands::MARKDOWN_EXTENSIONS;
+use crate::jobs::{JobMsg, WorkerMailbox};
 use crate::reader::ScrollSnapshot;
+use crate::shared::UiMsg;
 use crate::window::{Mode, Tab, WindowState, title_for_path};
 use crate::windows::{CloseDoc, close_title};
 
@@ -134,6 +137,34 @@ impl QuitGuard {
     }
 }
 
+/// A Save as whose chosen path is being checked before anything is written.
+///
+/// The probe answers with the file's metadata, so E-12's duplicate is found by
+/// identity — a symlink, a hard link or a different spelling of the same file
+/// is the same document.
+#[derive(Clone, Debug)]
+pub struct PendingSaveAs {
+    /// The path the dialog returned.
+    pub path: PathBuf,
+    /// What to do once the write lands.
+    pub after: AfterSave,
+}
+
+/// Save as' path probes, one at a time per document.
+///
+/// The answer is a metadata job on a worker: a handler never stats a file.
+/// It answers into this own mailbox because the window's job dispatcher drops
+/// [`JobMsg::Probed`] today — that route is reserved for the watcher's reload.
+#[derive(Default)]
+pub struct SaveAsState {
+    /// Chosen paths waiting for their probe, by document.
+    pub pending: HashMap<DocumentId, PendingSaveAs>,
+    /// One probe generation per document; a newer Save as supersedes an older.
+    pub probes: crate::jobs::GenerationTracker,
+    /// Where [`crate::jobs::JobHub::probe`] answers, built on first use.
+    mailbox: Option<Arc<WorkerMailbox>>,
+}
+
 /// Editor-side window state. `scratch` keeps the `on_edit` accessor total when
 /// no tab is in edit mode.
 pub struct EditorState {
@@ -153,6 +184,8 @@ pub struct EditorState {
     pub save_texts: HashMap<DocumentId, String>,
     /// A save generation per document, so a stale completion is ignored.
     pub saves: crate::jobs::GenerationTracker,
+    /// Save as paths waiting for their collision probe (E-12).
+    pub save_as: SaveAsState,
     /// Every dirty document must save before the window closes.
     pub close_on_clean: bool,
     /// Documents whose CloseWindow save, or Save As dialog, is still pending.
@@ -212,6 +245,7 @@ impl Default for EditorState {
             after_save: HashMap::new(),
             save_texts: HashMap::new(),
             saves: crate::jobs::GenerationTracker::default(),
+            save_as: SaveAsState::default(),
             close_on_clean: false,
             close_pending: BTreeSet::new(),
             quit: QuitGuard::default(),
@@ -321,7 +355,13 @@ impl WindowState {
             self.focus_editor_field(tx);
             return true;
         }
-        if !is_ready(&doc) {
+        let from_draft = text_override.is_some();
+        // OI-073: a crash draft of a deleted or unreadable file is the only
+        // copy of its text. Restore it even though the file itself could not
+        // be read; the document becomes a normal dirty buffer and the first
+        // save offers Save again.
+        let recovering = from_draft && matches!(*doc.status.borrow(), DocStatus::Error(_) | DocStatus::Gone);
+        if !is_ready(&doc) && !recovering {
             self.notice(lmdv_i18n::t!("msg.docLoading"));
             return false;
         }
@@ -333,7 +373,6 @@ impl WindowState {
         }
         let base = doc.snapshot().to_string();
         let eol = doc.text().eol();
-        let from_draft = text_override.is_some();
         let text = text_override.unwrap_or_else(|| base.clone());
         let previous_find =
             self.active_tab().map(|tab| (tab.view.find_bar.query.text.clone(), tab.view.find_bar.replace.text.clone()));
@@ -353,6 +392,12 @@ impl WindowState {
         crate::block_ui::prime_editor_focus(&mut session);
         let block_focus = session.block_mode_active().then(|| session.active_block()).flatten();
         let revision = if text != base { doc.replace_all(&text, eol) } else { doc.revision() };
+        if recovering {
+            // The draft now is the document: the reader and the editor draw it
+            // as a normal dirty buffer, and the failed load is explained by the
+            // dirty marker and the next save's Save again.
+            *doc.status.borrow_mut() = DocStatus::Ready;
+        }
         session.set_doc_revision(revision);
         let dirty = doc.is_dirty();
         if let Some(tab) = self.active_tab_mut() {
@@ -679,7 +724,7 @@ impl WindowState {
 
     /// Saves `doc` at its current path, or asks for one (E-08/E-11).
     pub(crate) fn request_save(&mut self, doc: DocumentId, after: AfterSave, tx: &mut Tx) {
-        if self.editor.after_save.contains_key(&doc) {
+        if self.editor.after_save.contains_key(&doc) || self.editor.save_as.pending.contains_key(&doc) {
             self.notice(lmdv_i18n::t!("msg.saveInProgress"));
             return;
         }
@@ -695,7 +740,7 @@ impl WindowState {
     pub(crate) fn request_save_as(&mut self, doc: DocumentId, after: AfterSave, tx: &mut Tx) {
         let Some(document) = self.shared.docs().get(doc) else { return };
         let title = document.title.borrow().clone();
-        let directory = document.key.borrow().path().and_then(Path::parent).map(Path::to_path_buf);
+        let directory = self.save_as_folder(&document);
         let options = FileDialogOptions {
             title: lmdv_i18n::t!("tab.saveAs").to_owned(),
             directory,
@@ -704,7 +749,7 @@ impl WindowState {
         }
         .filter("Markdown", &MARKDOWN_EXTENSIONS);
         tx.save_file(options, move |state: &mut WindowState, result, _| match result {
-            Ok(Some(path)) => state.start_save(doc, path, None, true, after),
+            Ok(Some(path)) => state.save_as_chosen(doc, path, after),
             Ok(None) => {
                 // Cancelling the path cancels a pending close or quit as well.
                 state.abandon_quit();
@@ -716,6 +761,197 @@ impl WindowState {
                 state.notice(lmdv_i18n::t!("msg.saveDialogFailed", "err" => error));
             }
         });
+    }
+
+    /// The folder Save as opens in for `document` (E-11).
+    ///
+    /// A file saves beside itself. Pasted text has no folder of its own: it
+    /// starts in the file browser's folder — the paste home — and in the user's
+    /// Documents folder while the pane has no folder yet.
+    pub fn save_as_folder(&self, document: &Document) -> Option<PathBuf> {
+        let path = document.key.borrow().path().map(Path::to_path_buf);
+        save_as_folder_for(path.as_deref(), self.browser.root(), documents_folder().as_deref())
+    }
+
+    /// A path came back from the Save as dialog (E-11/E-12).
+    ///
+    /// Nothing is written until a worker has probed the path: choosing a file
+    /// another tab already shows must merge that view or stop, never leave two
+    /// documents for one file.
+    pub fn save_as_chosen(&mut self, doc: DocumentId, path: PathBuf, after: AfterSave) {
+        if self.editor.after_save.contains_key(&doc) || self.editor.save_as.pending.contains_key(&doc) {
+            self.notice(lmdv_i18n::t!("msg.saveInProgress"));
+            return;
+        }
+        let Some(document) = self.shared.docs().get(doc) else { return };
+        // The document's own file cannot collide with itself: no probe needed.
+        if document.key.borrow().path() == Some(path.as_path()) {
+            self.start_save(doc, path, None, true, after);
+            return;
+        }
+        let generation = self.editor.save_as.probes.begin(doc);
+        self.editor.save_as.pending.insert(doc, PendingSaveAs { path: path.clone(), after });
+        let mailbox = self.save_as_mailbox();
+        self.shared.jobs().probe(mailbox, doc, path, generation);
+    }
+
+    /// The private mailbox the Save as probes answer on.
+    fn save_as_mailbox(&mut self) -> Arc<WorkerMailbox> {
+        let waker = self.window_waker();
+        if let Some(mailbox) = &self.editor.save_as.mailbox {
+            // The host installs its waker after the window is built, so a
+            // mailbox built before that would keep the quiet one: attach again.
+            mailbox.attach(waker);
+            return Arc::clone(mailbox);
+        }
+        let mailbox = Arc::new(WorkerMailbox::new(self.id()));
+        mailbox.attach(waker);
+        self.editor.save_as.mailbox = Some(Arc::clone(&mailbox));
+        mailbox
+    }
+
+    /// Consumes the path probes' answers (E-12).
+    fn poll_save_as_probes(&mut self) -> bool {
+        let Some(mailbox) = self.editor.save_as.mailbox.clone() else { return false };
+        let mut changed = false;
+        for msg in mailbox.drain() {
+            if let JobMsg::Probed { doc, generation, result, .. } = msg {
+                changed |= self.finish_save_as_probe(doc, generation, result);
+            }
+        }
+        changed
+    }
+
+    /// Decides a Save as once its probe answered: save, merge a clean duplicate
+    /// view, or refuse (E-12).
+    fn finish_save_as_probe(&mut self, doc: DocumentId, generation: u64, result: Result<FileMeta, ReadError>) -> bool {
+        if !self.editor.save_as.probes.finish(doc, generation) {
+            return false;
+        }
+        let Some(pending) = self.editor.save_as.pending.remove(&doc) else { return false };
+        // The tab went away while the probe ran: nothing may be written.
+        if self.shared.docs().get(doc).is_none() {
+            return false;
+        }
+        let current_path =
+            self.shared.docs().get(doc).and_then(|document| document.key.borrow().path().map(Path::to_path_buf));
+        if current_path.as_deref() == Some(pending.path.as_path()) {
+            self.start_save(doc, pending.path, None, true, pending.after);
+            return true;
+        }
+        let duplicate = {
+            let docs = self.shared.docs();
+            // The identity covers symlinks, hard links and another spelling;
+            // the exact path catches a document that is still loading.
+            let by_identity = match &result {
+                Ok(meta) => docs.find_identity(meta),
+                Err(_) => None,
+            };
+            by_identity.or_else(|| docs.find_path(&pending.path)).map(|other| other.id).filter(|id| *id != doc)
+        };
+        let Some(other) = duplicate else {
+            self.start_save(doc, pending.path, None, true, pending.after);
+            return true;
+        };
+        let (dirty, elsewhere) = {
+            let docs = self.shared.docs();
+            docs.get(other).map_or((false, false), |document| (document.is_dirty(), !self.is_last_view(&document)))
+        };
+        let name = title_for_path(&pending.path);
+        if dirty {
+            self.notice(lmdv_i18n::t!("msg.saveAsOpenDirty", "name" => name));
+            self.abandon_quit();
+            self.abandon_close();
+            return true;
+        }
+        if elsewhere {
+            // E-12: a clean duplicate in another window is released, so this
+            // save can take the file over. Only when no window can be asked
+            // (it closed between the probe and now) does the warning remain.
+            if self.release_elsewhere(other) {
+                self.start_save(doc, pending.path, None, true, pending.after);
+                return true;
+            }
+            self.notice(lmdv_i18n::t!("msg.saveAsOpenElsewhere", "name" => name));
+            self.abandon_quit();
+            self.abandon_close();
+            return true;
+        }
+        // Clean and only here: release the duplicate's tab, then write; one
+        // document for the file remains and it is this one.
+        let tabs: Vec<TabId> =
+            self.tabs.iter().filter(|tab| tab.document_id() == Some(other)).map(|tab| tab.id).collect();
+        for tab in tabs {
+            self.release_duplicate_view(tab);
+        }
+        self.start_save(doc, pending.path, None, true, pending.after);
+        true
+    }
+
+    /// Closes a clean duplicate tab after a Save as merged its file (E-12) or
+    /// a load merged two spellings of one file (OI-005).
+    ///
+    /// The tab is not a reopen place: the document it showed is still open, as
+    /// the document that just took its file over.
+    pub(crate) fn release_duplicate_view(&mut self, tab: TabId) {
+        let stale_draft = {
+            let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else { return };
+            let Some(document) = self.tabs[index].document().cloned() else { return };
+            (self.tabs[index].view.draft_written && !document.is_dirty() && self.is_last_view(&document))
+                .then(|| draft_key(&document))
+                .flatten()
+        };
+        if let Some(key) = stale_draft {
+            self.shared.queue_store(StorePatch::RemoveDraft(key));
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+            tab.view.dirty = false;
+            tab.view.draft_written = false;
+            tab.view.draft_pending = false;
+        }
+        self.close_tab_without_history(tab);
+    }
+
+    /// Asks the windows showing `doc` to close their clean views (E-12).
+    ///
+    /// The release is a same-thread message: the other window closes its views
+    /// on its next poll. The write may start now; when it lands, this document
+    /// is the file's one view. False when no live window can be asked, which
+    /// keeps the warning as the fallback.
+    fn release_elsewhere(&self, doc: DocumentId) -> bool {
+        let targets = self.shared.windows_showing(doc, self.id());
+        let mut delivered = false;
+        for id in targets {
+            delivered |= self.shared.post_window(id, UiMsg::ReleaseDocument { doc });
+        }
+        delivered
+    }
+
+    /// Closes this window's clean views of `doc` after another window's Save
+    /// as takes the file over (E-12).
+    ///
+    /// A dirty buffer is never released: the other window's save then cannot
+    /// be undone, but this window keeps its text and its draft, and the
+    /// ordinary disk-change prompt decides what happens next.
+    pub(crate) fn release_clean_views(&mut self, doc: DocumentId) -> bool {
+        let Some(document) = self.shared.docs().get(doc) else { return false };
+        let dirty = document.is_dirty();
+        drop(document);
+        if dirty {
+            return false;
+        }
+        let tabs: Vec<TabId> =
+            self.tabs.iter().filter(|tab| tab.document_id() == Some(doc)).map(|tab| tab.id).collect();
+        if tabs.is_empty() {
+            return false;
+        }
+        for tab in tabs {
+            self.release_duplicate_view(tab);
+        }
+        // The released document may have been rekeyed away already; collect it
+        // now, while no local `Rc` keeps it alive.
+        self.shared.docs_mut().collect_unused();
+        true
     }
 
     /// Starts a save job. `expected` is the last known metadata; `None`
@@ -797,6 +1033,13 @@ impl WindowState {
             Ok(outcome) => {
                 let old_path = document.key.borrow().path().map(Path::to_path_buf);
                 let old_key = draft_key(&document);
+                // E-11: pasted text's Back/Forward places are keyed `pasted:<id>`
+                // (nav's `place_key`), not by the draft key; read it before the
+                // rekey turns the document into a file.
+                let old_place = match &*document.key.borrow() {
+                    DocumentKey::Untitled(paste) => Some(format!("{}{}", crate::nav::PASTED_PREFIX, paste.0)),
+                    DocumentKey::File(_) | DocumentKey::Start => None,
+                };
                 let new_path = outcome.path.clone();
                 // The text actually written, not whatever the buffer holds if
                 // the user typed again while the job ran.
@@ -806,11 +1049,20 @@ impl WindowState {
                     self.shared.docs_mut().rekey(doc, DocumentKey::File(new_path.clone()));
                     *document.title.borrow_mut() = title_for_path(&new_path);
                     self.shared.watch_path(&new_path);
-                    if let Some(old) = &old_path {
-                        self.shared.unwatch_path(old);
-                        self.shared.rename_position(old, &new_path);
-                        self.shared.rename_recent(old, &new_path);
-                        self.rename_history_paths(old, &new_path);
+                    match &old_path {
+                        Some(old) => {
+                            self.shared.unwatch_path(old);
+                            self.shared.rename_position(old, &new_path);
+                            self.shared.rename_recent(old, &new_path);
+                            self.rename_history_paths(old, &new_path);
+                        }
+                        None => {
+                            // E-11: pasted text's Back/Forward places name the
+                            // new file from here on.
+                            if let Some(old_place) = old_place.as_deref() {
+                                self.rename_history_keys(old_place, &new_path);
+                            }
+                        }
                     }
                 }
                 document.set_saved(outcome.meta, hash, new_path.clone());
@@ -921,7 +1173,7 @@ impl WindowState {
     }
 
     /// Leaves edit mode for `doc`, active or behind.
-    fn leave_editor_for(&mut self, doc: DocumentId) {
+    pub(crate) fn leave_editor_for(&mut self, doc: DocumentId) {
         let Some(index) = self.tabs.iter().position(|tab| tab.document_id() == Some(doc)) else { return };
         if index == self.active {
             self.leave_editor(&mut Tx::default());
@@ -1080,7 +1332,7 @@ impl WindowState {
 
     /// Fills the preview debounce and draft timers, and consumes watcher events.
     pub(crate) fn poll_editor(&mut self, now: f64, tx: &mut Tx) -> bool {
-        let mut changed = false;
+        let mut changed = self.poll_save_as_probes();
         if let Some(until) = self.editor.saved_flash_until {
             if now >= until {
                 self.editor.saved_flash_until = None;
@@ -1679,6 +1931,17 @@ impl WindowState {
         }
     }
 
+    /// Renames this window's Back/Forward places from one key to another.
+    ///
+    /// File places are keyed by path; pasted text's are keyed `pasted:<id>`, so
+    /// a Save as passes that key rather than a path (E-11).
+    fn rename_history_keys(&mut self, from: &str, to: &Path) {
+        let to = to.to_string_lossy();
+        for tab in &mut self.tabs {
+            tab.view.nav.rename_path(from, &to);
+        }
+    }
+
     /// The draft key of a document: its path, or `pasted:<id>` (E-16/E-39).
     pub fn draft_key_of(document: &Document) -> Option<String> {
         draft_key(document)
@@ -1758,6 +2021,31 @@ pub(crate) fn change_range(old: &str, new: &str) -> (usize, usize, usize) {
         new_end += 1;
     }
     (start, old_end, new_end)
+}
+
+/// The folder a Save as starts in (E-11).
+///
+/// A file saves beside itself. Pasted text has no folder of its own: it starts
+/// in the file browser's folder — the paste home — and in the user's Documents
+/// folder while the pane has no folder yet.
+pub fn save_as_folder_for(
+    document_path: Option<&Path>,
+    pane_root: Option<&Path>,
+    documents: Option<&Path>,
+) -> Option<PathBuf> {
+    match document_path {
+        Some(path) => path.parent().map(Path::to_path_buf),
+        None => pane_root.or(documents).map(Path::to_path_buf),
+    }
+}
+
+/// The Documents folder Save as falls back to for pasted text (E-11).
+///
+/// `lmdv-io` resolves the XDG roots but exposes no documents folder yet, so the
+/// plain home spelling stands in; a `dirs::document_dir()` helper there would
+/// follow a localized `user-dirs.dirs` instead (reported as an io follow-up).
+fn documents_folder() -> Option<PathBuf> {
+    lmdv_io::documents_dir()
 }
 
 /// A filesystem-safe default name for Save as (E-11).

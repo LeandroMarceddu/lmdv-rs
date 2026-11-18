@@ -510,6 +510,19 @@ impl WindowState {
             let message = lmdv_i18n::t!("msg.settingsSaveFailed", "err" => error);
             state.notice(message);
         }
+        // OI-007/OI-012: a portable root that fell back to XDG and every state
+        // file that was quarantined or left read-only are startup facts; the
+        // first window says them once.
+        let startup = state.shared.take_startup_notices();
+        if !startup.is_empty() {
+            match state.ui.notice.as_mut() {
+                Some(existing) => {
+                    existing.text.push(' ');
+                    existing.text.push_str(&startup.join(" "));
+                }
+                None => state.notice(startup.join(" ")),
+            }
+        }
         let _ = state.publish_session();
         state
     }
@@ -1262,6 +1275,12 @@ impl WindowState {
         }
         changed |= self.reap_transfers();
         changed |= self.pump_timers(now);
+        // OI-073: the document watcher's setup error is not a per-frame fact;
+        // show it once, like the file browser's watch failure.
+        if let Some(error) = self.shared.take_watch_error() {
+            self.notice(lmdv_i18n::t!("msg.watchFailed", "err" => error));
+            changed = true;
+        }
         changed |= self.poll_editor(now, tx);
         changed |= self.continue_close_batch();
         changed |= self.poll_share(now, tx);
@@ -1330,9 +1349,31 @@ impl WindowState {
                 match result {
                     Ok(loaded) => {
                         let path = loaded.path;
+                        let meta = loaded.meta;
                         *document.title.borrow_mut() = title_for_path(&path);
                         *document.buf.borrow_mut() = loaded.buffer;
                         *document.status.borrow_mut() = DocStatus::Ready;
+                        // OI-005: the same file reached through a symlink, a
+                        // hard link or another spelling must not stay two
+                        // documents. The load's canonical path and its
+                        // `(dev, ino)` are the file's identity; a live document
+                        // that owns either is the one view, and this tab joins
+                        // it instead of inserting a second one.
+                        if let Some(survivor) = self.merge_loaded_document(doc, &path, meta) {
+                            self.note_large_document(survivor, meta.len);
+                            self.sync_editor_titles();
+                            self.refresh_titles();
+                            self.refresh_find_hits();
+                            self.drive_parse();
+                            self.sync_outline();
+                            self.apply_pending_scroll(tx);
+                            // A Back/Forward move that opened this document is
+                            // on screen now: it commits (O-13). A merged move
+                            // already points at the survivor's tab.
+                            self.finish_travel(survivor, true, None, tx);
+                            tx.instant();
+                            return true;
+                        }
                         if matches!(*document.key.borrow(), DocumentKey::File(_)) {
                             let current_path = document.key.borrow().path().map(Path::to_path_buf);
                             if current_path.as_deref() != Some(path.as_path()) {
@@ -1348,8 +1389,11 @@ impl WindowState {
                                 }
                             }
                         }
-                        document.set_saved(loaded.meta, document.hash(), path.clone());
+                        document.set_saved(meta, document.hash(), path.clone());
                         self.shared.docs_mut().insert_ready(document.clone());
+                        // OI-010: above 8 MiB the reader says so once and the
+                        // document only ever opens in viewer mode on its own.
+                        self.note_large_document(doc, meta.len);
                         if !self.restored_docs.remove(&doc) {
                             self.shared.record_recent(path.clone(), unix_millis());
                         }
@@ -1401,6 +1445,11 @@ impl WindowState {
                         let name = document.title.borrow().clone();
                         if !travel {
                             self.notice(lmdv_i18n::t!("msg.openFailed", "name" => name, "err" => error));
+                            // OI-073: a deleted or unreadable file can still
+                            // have a crash draft. Offer it here — the buffer is
+                            // empty, so Restore keeps the text and Save again
+                            // can recreate the file.
+                            self.request_draft_check(doc);
                         }
                         self.finish_travel(doc, false, Some(&error), tx);
                         true
@@ -1446,6 +1495,182 @@ impl WindowState {
                 }
             }
         }
+    }
+
+    /// Joins a completed load to another live document for the same file
+    /// (OI-005).
+    ///
+    /// The canonical path and the file's `(dev, ino)` identity are the same
+    /// file; a load that reaches a document already registered under either is
+    /// not a second document. The already-loaded document wins so its buffer
+    /// and any edits survive; a loading duplicate has nothing to keep, so the
+    /// completed read wins instead. Returns the surviving document.
+    fn merge_loaded_document(&mut self, doc: DocumentId, path: &Path, meta: lmdv_core::FileMeta) -> Option<DocumentId> {
+        let other = {
+            let docs = self.shared.docs();
+            docs.find_identity(&meta).or_else(|| docs.find_path(path))
+        }?;
+        if other.id == doc {
+            return None;
+        }
+        let other_ready = matches!(*other.status.borrow(), DocStatus::Ready);
+        let (survivor, absorbed) = if other_ready { (other.id, doc) } else { (doc, other.id) };
+
+        // A survivor that is this completion still needs its canonical key,
+        // saved base and identity; the duplicate's checks ran first, above.
+        if survivor == doc {
+            let document = self.shared.docs().get(doc)?;
+            let old_path = document.key.borrow().path().map(Path::to_path_buf);
+            if old_path.as_deref() != Some(path) {
+                self.shared.docs_mut().rekey(doc, DocumentKey::File(path.to_path_buf()));
+                if let Some(old) = &old_path {
+                    self.shared.watch_path(path);
+                    self.shared.unwatch_path(old);
+                    self.shared.rename_position(old, path);
+                    self.shared.rename_recent(old, path);
+                    self.rename_history_paths(old, path);
+                }
+            }
+            document.set_saved(meta, document.hash(), path.to_path_buf());
+            self.shared.docs_mut().insert_ready(document);
+        }
+
+        self.remap_document_tabs(absorbed, survivor);
+        // One document per file: the absorbed id leaves the registry, and its
+        // model, load bookkeeping and restored-tab marker go with it. A tab
+        // that still holds the `Rc` (another window, until its message lands)
+        // keeps it alive harmlessly.
+        self.parse_inflight.remove(&absorbed);
+        self.shared.forget_parsed(absorbed);
+        self.shared.docs_mut().remove(absorbed);
+        let was_restored = self.restored_docs.remove(&absorbed);
+        let survivor_restored = self.restored_docs.remove(&survivor);
+        if !was_restored && !survivor_restored {
+            self.shared.record_recent(path.to_path_buf(), unix_millis());
+        }
+        self.broadcast_merge(absorbed, survivor);
+        Some(survivor)
+    }
+
+    /// Points this window's views of `from` at `to` (OI-005).
+    ///
+    /// One tab per document per window (T-11): while the survivor already has
+    /// a tab here, the duplicate view closes and the survivor comes forward.
+    /// Otherwise the loading tab itself becomes the survivor's view, keeping
+    /// its strip place, anchor and history.
+    fn remap_document_tabs(&mut self, from: DocumentId, to: DocumentId) -> bool {
+        let Some(survivor) = self.shared.docs().get(to) else { return false };
+        let from_tabs: Vec<TabId> =
+            self.tabs.iter().filter(|tab| tab.document_id() == Some(from)).map(|tab| tab.id).collect();
+        if from_tabs.is_empty() {
+            return false;
+        }
+        if let Some(index) = self.index_of_document(to) {
+            let survivor_tab = self.tabs[index].id;
+            if let Some(pending) = self.navigation.pending.as_mut()
+                && pending.tab.is_some_and(|tab| from_tabs.contains(&tab))
+            {
+                // The travel's tab is this duplicate view: the survivor's tab
+                // is the place now, and its completion commits the move.
+                pending.tab = Some(survivor_tab);
+                pending.doc = Some(to);
+            }
+            for tab in from_tabs {
+                self.release_duplicate_view(tab);
+            }
+            let _ = self.activate_tab(survivor_tab);
+            return true;
+        }
+        if let Some(pending) = self.navigation.pending.as_mut()
+            && pending.doc == Some(from)
+        {
+            // The same tab now shows the survivor; the move still commits.
+            pending.doc = Some(to);
+        }
+        // A tab that entered edit mode while the load completed elsewhere
+        // holds a lease on the absorbed document; leave that session before
+        // the tab shows the survivor.
+        if self.tabs.iter().any(|tab| tab.document_id() == Some(from) && tab.view.mode == Mode::Editor) {
+            self.leave_editor_for(from);
+        }
+        let new_path = survivor.key.borrow().path().map(Path::to_path_buf);
+        for tab_id in from_tabs {
+            let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else { continue };
+            let absorbed = self.tabs[index].document().cloned();
+            let old_path = absorbed.as_ref().and_then(|doc| doc.key.borrow().path().map(Path::to_path_buf));
+            if let (Some(old), Some(new)) = (old_path.as_deref(), new_path.as_deref())
+                && old != new
+            {
+                let old_key = old.to_string_lossy().into_owned();
+                let new_key = new.to_string_lossy();
+                self.tabs[index].view.nav.rename_path(&old_key, &new_key);
+            }
+            self.tabs[index].source = TabSource::Document(survivor.clone());
+            self.tabs[index].view.reader = None;
+            self.tabs[index].view.reader_revision = None;
+            self.tabs[index].view.reader_error = None;
+            self.tabs[index].view.dirty = survivor.is_dirty();
+            self.tabs[index].view.disk_changed = false;
+            self.tabs[index].refresh_title();
+            if let Some(cached) = self.shared.latest_parsed(to)
+                && let Ok(model) = cached.result
+            {
+                self.tabs[index].view.reader = Some(model);
+                self.tabs[index].view.reader_revision = Some(cached.revision);
+                self.tabs[index].view.reader_error = None;
+            }
+            if let Some(absorbed) = absorbed {
+                let last_view = !self.tabs.iter().any(|tab| tab.document_id() == Some(absorbed.id));
+                if last_view {
+                    absorbed.subscribers.borrow_mut().remove(&self.id);
+                    if absorbed.subscribers.borrow().is_empty() {
+                        self.shared.forget_parsed(absorbed.id);
+                    }
+                }
+            }
+            survivor.subscribers.borrow_mut().insert(self.id);
+            if old_path != new_path {
+                if let Some(old_path) = old_path {
+                    self.shared.unwatch_path(&old_path);
+                }
+                if let Some(new_path) = &new_path {
+                    self.shared.watch_path(new_path);
+                }
+            }
+        }
+        true
+    }
+
+    /// Tells every other window to point its views of `from` at `to`.
+    fn broadcast_merge(&self, from: DocumentId, to: DocumentId) {
+        let ids: Vec<WindowId> =
+            self.shared.windows().iter().map(|entry| entry.id).filter(|id| *id != self.id).collect();
+        for id in ids {
+            let _ = self.shared.try_post_window(id, UiMsg::DocumentMerged { from, to });
+        }
+    }
+
+    /// Says once that `doc` is a large document and keeps editing explicit
+    /// (OI-010).
+    ///
+    /// A restored edit mode is dropped before the first poll applies it: a
+    /// document above the threshold only opens in the reader on its own, and
+    /// `Ctrl+E` remains the explicit way in.
+    fn note_large_document(&mut self, doc: DocumentId, len: u64) {
+        if !lmdv_io::is_large_document(len) {
+            return;
+        }
+        let tabs: Vec<TabId> =
+            self.tabs.iter().filter(|tab| tab.document_id() == Some(doc)).map(|tab| tab.id).collect();
+        for tab in tabs {
+            self.pending_editor_tabs.remove(&tab);
+        }
+        if !self.shared.mark_large_warned(doc) {
+            return;
+        }
+        let name = self.shared.docs().get(doc).map(|document| document.title.borrow().clone()).unwrap_or_default();
+        let mib = lmdv_io::LARGE_DOC_BYTES.div_ceil(1024 * 1024);
+        self.notice(lmdv_i18n::t!("msg.largeDocument", "name" => name, "mib" => mib));
     }
 
     /// Routes one forwarded launch on the router window.
@@ -1499,6 +1724,8 @@ impl WindowState {
             }
             UiMsg::FocusWindow(_) => false,
             UiMsg::Transfer(msg) => self.handle_transfer(msg),
+            UiMsg::ReleaseDocument { doc } => self.release_clean_views(doc),
+            UiMsg::DocumentMerged { from, to } => self.remap_document_tabs(from, to),
             UiMsg::CloseWindow(_) => false,
         }
     }
@@ -2128,5 +2355,162 @@ mod tests {
         drop(doc);
         shared.docs_mut().collect_unused();
         assert!(shared.docs().is_empty(), "the last view collected the document");
+    }
+
+    /// Polls until `done`, like the editor tests: real loads run on workers.
+    fn poll_until(state: &mut WindowState, what: &str, mut done: impl FnMut(&WindowState) -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut tx = Tx::default();
+        while !done(state) {
+            assert!(std::time::Instant::now() < deadline, "{what} never happened");
+            state.poll(0.0, &mut tx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn loaded_active(state: &WindowState) -> Option<Rc<Document>> {
+        let doc = state.active_tab().and_then(Tab::document).cloned()?;
+        let ready = matches!(*doc.status.borrow(), DocStatus::Ready);
+        ready.then_some(doc)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_open_merges_into_the_one_document_and_keeps_its_edits() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "# Real\n").unwrap();
+        let alias = temp.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let mut state = window(&temp);
+
+        state.open_path(real.clone());
+        poll_until(&mut state, "the real file", |state| loaded_active(state).is_some());
+        let survivor = loaded_active(&state).expect("the real document");
+        // Unsaved text is never replaced by the other spelling's disk read.
+        survivor.apply(0..1, "X");
+        assert!(survivor.is_dirty());
+
+        state.open_path(alias.clone());
+        poll_until(&mut state, "the alias merge", |state| {
+            state.tabs().len() == 1 && state.active_document_id() == Some(survivor.id)
+        });
+
+        assert_eq!(state.shared().docs().len(), 1, "one document for the file");
+        let shown = state.active_tab().and_then(Tab::document).cloned().expect("the survivor tab");
+        assert!(Rc::ptr_eq(&shown, &survivor));
+        assert!(shown.text().text().starts_with('X'), "the edited buffer survived the merge");
+        assert!(shown.is_dirty());
+        let canonical = std::fs::canonicalize(&alias).unwrap();
+        assert_eq!(state.shared().docs().find_path(&canonical).map(|doc| doc.id), Some(survivor.id));
+        assert!(state.shared().docs().find_path(&alias).is_none(), "the alias spelling is not a document");
+        assert_eq!(state.shared().watch_refcount(&canonical), 1, "the merged view keeps one watch");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_loads_in_flight_still_end_with_one_document() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "# Real\n").unwrap();
+        let alias = temp.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let shared = test_support::shared(&temp);
+        let mut first = WindowState::new(shared.clone());
+        let mut second = WindowState::new(shared.clone());
+
+        // Neither load has completed when the second open starts: whichever
+        // completion lands second must still leave one document.
+        first.open_path(real);
+        second.open_path(alias);
+        poll_until(&mut first, "the first load", |state| loaded_active(state).is_some());
+        let first_doc = loaded_active(&first).expect("the first document");
+        poll_until(&mut second, "the second load", |state| {
+            state.active_tab().and_then(Tab::document).is_some_and(|doc| Rc::ptr_eq(doc, &first_doc))
+        });
+
+        assert_eq!(shared.docs().len(), 1, "both spellings are one document");
+        let second_doc = second.active_tab().and_then(Tab::document).cloned().expect("the second view");
+        assert!(Rc::ptr_eq(&first_doc, &second_doc));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_third_window_showing_the_same_spelling_joins_the_survivor() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "# Real\n").unwrap();
+        let alias = temp.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let shared = test_support::shared(&temp);
+        let mut first = WindowState::new(shared.clone());
+        let mut second = WindowState::new(shared.clone());
+        let mut third = WindowState::new(shared.clone());
+
+        first.open_path(real.clone());
+        poll_until(&mut first, "the first window's load", |state| loaded_active(state).is_some());
+        let survivor = loaded_active(&first).expect("the real document");
+
+        // Two windows load the alias spelling: one document, two loads in
+        // flight. The first completion merges it away; the other window learns
+        // from the merge message instead of keeping a second document.
+        second.open_path(alias.clone());
+        third.open_path(alias.clone());
+        poll_until(&mut second, "the second window's merge", |state| state.active_document_id() == Some(survivor.id));
+        poll_until(&mut third, "the third window's merge", |state| state.active_document_id() == Some(survivor.id));
+        assert_eq!(shared.docs().len(), 1);
+        assert!(Rc::ptr_eq(third.active_tab().and_then(Tab::document).unwrap(), &survivor));
+        assert_eq!(survivor.subscribers.borrow().len(), 3, "all three windows show the survivor");
+    }
+
+    #[test]
+    fn a_large_document_warns_once_and_keeps_editing_explicit() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let path = PathBuf::from("/tmp/lmdv-app-test/large.md");
+        let doc = shared.docs_mut().insert_loading(DocumentKey::File(path.clone()), "large.md".into());
+        let tab = state.attach_document(doc.clone());
+        let generation = state.tracker_begin(doc.id);
+        // A restored edit mode waits for this first poll; the size drops it.
+        state.pending_editor_tabs.insert(tab);
+        state.worker().post(JobMsg::Loaded {
+            job: 1,
+            doc: doc.id,
+            generation,
+            result: Ok(lmdv_io::LoadedFile {
+                path: path.clone(),
+                buffer: SourceBuffer::new("# Large\n"),
+                meta: lmdv_core::FileMeta { len: lmdv_io::LARGE_DOC_BYTES + 1, ..lmdv_core::FileMeta::default() },
+            }),
+        });
+        let mut tx = Tx::default();
+        state.poll(0.0, &mut tx);
+
+        assert!(!state.pending_editor_tabs.contains(&tab), "a large document does not restore edit mode");
+        assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Viewer));
+        let notice = state.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default();
+        assert!(notice.contains("MiB"), "the warning names the size: {notice}");
+        assert!(notice.contains("large.md"), "the warning names the file: {notice}");
+
+        state.poll(NOTICE_SECONDS + 1.0, &mut tx);
+        assert!(state.ui.notice.is_none(), "the size is warned about once");
+    }
+
+    #[test]
+    fn a_watcher_setup_error_is_a_single_notice() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        shared.record_watch_error("inotify watches exhausted");
+
+        let mut tx = Tx::default();
+        state.poll(0.0, &mut tx);
+        let notice = state.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default();
+        assert!(notice.contains("inotify watches exhausted"), "{notice}");
+
+        state.dismiss_notice();
+        state.poll(0.1, &mut tx);
+        assert!(state.ui.notice.is_none(), "OI-073: the watcher failure is not repeated");
     }
 }

@@ -14,11 +14,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lmdv_core::{DocumentId, DocumentKey, DocumentRegistry, PasteId, Prefs, ScrollAnchor, WindowId};
 use lmdv_io::instance::{InstanceServer, LaunchRequest};
 use lmdv_io::store::{
-    PositionTable, RECENTS_MAX, Recent, SessionSnapshot, StoreHandle, StorePatch, UiPrefs, WindowSession,
-    load_positions, load_prefs, load_recents, load_ui,
+    PositionTable, RECENTS_MAX, Recent, SessionSnapshot, StateFile, StoreHandle, StoreIssue, StorePatch, UiPrefs,
+    WindowSession, load_positions_reported, load_prefs_reported, load_recents_reported, load_ui_reported,
 };
 use lmdv_io::watch::{DocWatcher, FileEvent};
-use lmdv_io::{AppDirs, Launch};
+use lmdv_io::{AppDirs, DirsIssue, Launch};
 use lmdv_md::MdDoc;
 use rune::{Waker, WindowPlacement};
 
@@ -104,6 +104,24 @@ pub struct AppShared {
     watch_inbox: Arc<FileEventInbox>,
     /// Documents whose draft has already been looked at (E-17 once per doc).
     draft_checked: RefCell<BTreeSet<DocumentId>>,
+    /// Startup fallbacks and ignored state files; the first window shows them.
+    startup: RefCell<StartupWarnings>,
+    /// The document watcher's setup error is shown once, not every frame (OI-073).
+    watch_error_shown: Cell<bool>,
+    /// Documents whose large-document warning has already been shown (OI-010).
+    large_warned: RefCell<BTreeSet<DocumentId>>,
+}
+
+/// What startup found wrong with the resolved folders and the state files.
+///
+/// Both kinds are reported once by the process's first window: a directory
+/// fallback and a quarantined or protected state file are facts about the
+/// launch, not about each window.
+#[derive(Default)]
+struct StartupWarnings {
+    dirs: Vec<DirsIssue>,
+    store: Vec<StoreIssue>,
+    shown: bool,
 }
 
 impl AppShared {
@@ -114,22 +132,34 @@ impl AppShared {
     /// cannot be created degrades the app to a session without persistence; it
     /// never fails startup.
     pub fn start(dirs: AppDirs) -> Rc<Self> {
-        let prefs = load_prefs(&dirs);
-        let recents = load_recents(&dirs);
-        let positions = load_positions(&dirs);
-        let ui = load_ui(&dirs);
-        let (store, store_error) = match StoreHandle::start(dirs.clone()) {
+        Self::start_reported(dirs, Vec::new())
+    }
+
+    /// [`Self::start`] with the folder-resolution issues the launch saw.
+    ///
+    /// The reported loaders keep a future-schema or foreign-app state file on
+    /// disk: the writer starts with those files read-only, and the first
+    /// window shows one notice for every fallback or ignored file (OI-007,
+    /// OI-012).
+    pub fn start_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>) -> Rc<Self> {
+        let prefs = load_prefs_reported(&dirs);
+        let recents = load_recents_reported(&dirs);
+        let positions = load_positions_reported(&dirs);
+        let ui = load_ui_reported(&dirs);
+        let store_issues: Vec<StoreIssue> =
+            [prefs.issue, recents.issue, positions.issue, ui.issue].into_iter().flatten().collect();
+        let (store, store_error) = match StoreHandle::start_with(dirs.clone(), &store_issues) {
             Ok(store) => (Some(store), None),
             Err(error) => (None, Some(format!("settings cannot be saved: {error}"))),
         };
         Rc::new(Self {
             dirs,
-            prefs: RefCell::new(prefs),
-            ui: RefCell::new(ui),
+            prefs: RefCell::new(prefs.value),
+            ui: RefCell::new(ui.value),
             docs: RefCell::new(DocumentRegistry::new()),
             windows: RefCell::new(WindowRegistry::new()),
-            recents: RefCell::new(recents),
-            positions: RefCell::new(positions),
+            recents: RefCell::new(recents.value),
+            positions: RefCell::new(positions.value),
             parse: RefCell::new(ParseCache::default()),
             store,
             store_error,
@@ -156,6 +186,9 @@ impl AppShared {
             watch_counts: RefCell::new(BTreeMap::new()),
             watch_inbox: Arc::new(FileEventInbox::default()),
             draft_checked: RefCell::new(BTreeSet::new()),
+            startup: RefCell::new(StartupWarnings { dirs: dirs_issues, store: store_issues, shown: false }),
+            watch_error_shown: Cell::new(false),
+            large_warned: RefCell::new(BTreeSet::new()),
         })
     }
 
@@ -432,6 +465,63 @@ impl AppShared {
         self.store_error.as_deref()
     }
 
+    /// Keeps a state file that a late load found unreadable (the session).
+    ///
+    /// Must be called before the first patch of that file; the writer then
+    /// never overwrites a newer version's or another application's file
+    /// (OI-007).
+    pub fn protect_store_files(&self, issues: &[StoreIssue]) {
+        if let Some(store) = &self.store {
+            store.protect_files(issues);
+        }
+    }
+
+    /// Records a state issue found after [`Self::start`], for the startup
+    /// notice and the writer's protection.
+    pub fn note_store_issue(&self, issue: StoreIssue) {
+        let mut startup = self.startup.borrow_mut();
+        if !startup.store.contains(&issue) {
+            startup.store.push(issue);
+        }
+    }
+
+    /// The startup warnings, as localized sentences, for the first window
+    /// that asks. Every later window gets an empty list.
+    ///
+    /// A portable root that fell back to XDG and every state file that was
+    /// quarantined or left read-only are reported here, once (OI-007/OI-012).
+    pub fn take_startup_notices(&self) -> Vec<String> {
+        let mut startup = self.startup.borrow_mut();
+        if startup.shown {
+            return Vec::new();
+        }
+        startup.shown = true;
+        let mut parts = Vec::with_capacity(startup.dirs.len() + startup.store.len());
+        for issue in &startup.dirs {
+            parts.push(dirs_issue_notice(issue));
+        }
+        for issue in &startup.store {
+            parts.push(store_issue_notice(issue));
+        }
+        parts
+    }
+
+    /// Whether this process has not warned about `doc`'s size yet (OI-010).
+    pub fn mark_large_warned(&self, doc: DocumentId) -> bool {
+        self.large_warned.borrow_mut().insert(doc)
+    }
+
+    /// Every live window except `except` that publishes `doc`, for the E-12
+    /// release of a clean duplicate view.
+    pub fn windows_showing(&self, doc: DocumentId, except: WindowId) -> Vec<WindowId> {
+        self.windows
+            .borrow()
+            .iter()
+            .filter(|entry| entry.id != except && entry.has_document(doc))
+            .map(|entry| entry.id)
+            .collect()
+    }
+
     /// The shared job hub.
     pub fn jobs(&self) -> &JobHub {
         &self.jobs
@@ -567,6 +657,23 @@ impl AppShared {
         self.watch_error.lock().unwrap_or_else(|error| error.into_inner()).clone()
     }
 
+    /// The watcher setup error, once per process (OI-073).
+    ///
+    /// The error is recorded on the watcher thread, so the first frame that
+    /// drains mailboxes may not see it yet; every later frame asks again, and
+    /// only the first one that finds it shows the notice.
+    pub fn take_watch_error(&self) -> Option<String> {
+        let error = self.watch_error()?;
+        (!self.watch_error_shown.replace(true)).then_some(error)
+    }
+
+    /// Records a watcher failure for the notice, for tests that do not start
+    /// a real watcher thread.
+    #[cfg(test)]
+    pub(crate) fn record_watch_error(&self, error: &str) {
+        *self.watch_error.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error.to_owned());
+    }
+
     fn ensure_watcher(&self) {
         if self.watcher.borrow().is_some() || self.watch_error().is_some() {
             return;
@@ -585,6 +692,8 @@ impl AppShared {
             && let Err(error) = watcher.set_files(files)
         {
             *self.watch_error.lock().unwrap_or_else(|error| error.into_inner()) = Some(error.to_string());
+            // The next frame reports it (OI-073), even if nothing else changes.
+            self.wake();
         }
     }
 
@@ -1076,17 +1185,22 @@ impl WatcherService {
     fn start(inbox: Arc<FileEventInbox>, error: Arc<Mutex<Option<String>>>) -> Option<Self> {
         let (files, requests) = channel::<Vec<PathBuf>>();
         let thread_error = error.clone();
+        let failed_wake = Arc::clone(&inbox);
         let spawned = thread::Builder::new().name("lmdv-watch".to_owned()).spawn(move || {
             let mut watcher = match DocWatcher::new(move |event| inbox.push(event)) {
                 Ok(watcher) => watcher,
                 Err(failure) => {
                     *thread_error.lock().unwrap_or_else(|error| error.into_inner()) = Some(failure.to_string());
+                    // The failure is not a file event: wake the UI so the
+                    // next poll can show its one notice (OI-073).
+                    failed_wake.wake();
                     return;
                 }
             };
             while let Ok(paths) = requests.recv() {
                 if let Err(failure) = watcher.set_files(&paths) {
                     *thread_error.lock().unwrap_or_else(|error| error.into_inner()) = Some(failure.to_string());
+                    failed_wake.wake();
                 }
             }
         });
@@ -1140,6 +1254,15 @@ impl FileEventInbox {
     pub fn set_waker(&self, waker: Waker) {
         *self.waker.lock().unwrap_or_else(|error| error.into_inner()) = Some(waker);
     }
+
+    /// Wakes the UI for a condition that is not a file event, such as the
+    /// watcher failing to start (OI-073).
+    pub fn wake(&self) {
+        let waker = self.waker.lock().unwrap_or_else(|error| error.into_inner()).clone();
+        if let Some(waker) = waker {
+            waker();
+        }
+    }
 }
 
 /// A same-thread message to one window.
@@ -1158,6 +1281,12 @@ pub enum UiMsg {
     PrefsChanged,
     /// The tab-transfer protocol (`Hover`/`Adopt`/`Adopted`/`Returned`).
     Transfer(TransferMsg),
+    /// Close this window's clean views of a document that another window is
+    /// about to take over with Save as (E-12).
+    ReleaseDocument { doc: DocumentId },
+    /// Point this window's views of `from` at `to`, the one document for a
+    /// file another window's load completed (OI-005).
+    DocumentMerged { from: DocumentId, to: DocumentId },
     /// Focus the window (P4).
     FocusWindow(WindowId),
     /// Ask the window to close (P4).
@@ -1223,6 +1352,38 @@ pub fn unix_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+/// The localized sentence for a folder-resolution fallback (OI-012).
+fn dirs_issue_notice(issue: &DirsIssue) -> String {
+    match issue {
+        DirsIssue::PortableUnavailable { root, reason } => {
+            lmdv_i18n::t!("msg.portableUnavailable", "root" => root.display(), "err" => reason)
+        }
+    }
+}
+
+/// The localized sentence for a state file that was ignored or quarantined
+/// (OI-007).
+fn store_issue_notice(issue: &StoreIssue) -> String {
+    let file = state_file_name(issue.file());
+    match issue {
+        StoreIssue::FutureSchema { .. } => lmdv_i18n::t!("msg.stateNewer", "file" => file),
+        StoreIssue::ForeignApp { .. } => lmdv_i18n::t!("msg.stateForeign", "file" => file),
+        StoreIssue::Oversized { .. } => lmdv_i18n::t!("msg.stateOversized", "file" => file),
+        StoreIssue::Corrupt { .. } => lmdv_i18n::t!("msg.stateCorrupt", "file" => file),
+    }
+}
+
+/// The file name a state issue names in the notice.
+fn state_file_name(file: StateFile) -> &'static str {
+    match file {
+        StateFile::Prefs => "prefs.json",
+        StateFile::Recents => "recents.json",
+        StateFile::Positions => "positions.json",
+        StateFile::Ui => "ui.json",
+        StateFile::Session => "session.json",
+    }
 }
 
 #[cfg(test)]
@@ -1387,5 +1548,58 @@ mod tests {
         assert!(matches!(&drained[0], UiMsg::Open(path) if path == &PathBuf::from("/tmp/a.md")));
         assert!(matches!(&drained[1], UiMsg::ActivateDocument(doc) if *doc == DocumentId(3)));
         assert!(inbox.is_empty());
+    }
+
+    #[test]
+    fn the_portable_fallback_is_a_startup_notice_shown_once() {
+        let temp = TempDir::new().unwrap();
+        let issue = DirsIssue::PortableUnavailable {
+            root: PathBuf::from("/media/usb/lmdv-data"),
+            reason: "read-only file system".to_owned(),
+        };
+        let shared = AppShared::start_reported(test_support::dirs(&temp), vec![issue]);
+
+        let notices = shared.take_startup_notices();
+        assert_eq!(notices.len(), 1);
+        assert!(notices[0].contains("/media/usb/lmdv-data"), "{}", notices[0]);
+        assert!(notices[0].contains("read-only file system"), "{}", notices[0]);
+        assert!(shared.take_startup_notices().is_empty(), "only the first window is told");
+    }
+
+    #[test]
+    fn a_future_schema_state_file_is_reported_and_never_overwritten() {
+        let temp = TempDir::new().unwrap();
+        let dirs = test_support::dirs(&temp);
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        let future = r#"{"schema": 99, "app": "lmdv", "data": {"theme": "dark"}}"#;
+        std::fs::write(dirs.prefs_path(), future).unwrap();
+
+        let shared = AppShared::start(dirs);
+        let notices = shared.take_startup_notices();
+        assert!(
+            notices.iter().any(|notice| notice.contains("prefs.json") && notice.contains("newer version")),
+            "the ignored file is named: {notices:?}"
+        );
+
+        // A settings change must not replace a file this version cannot read.
+        let mut prefs = shared.prefs().clone();
+        prefs.print_break_h1 = true;
+        assert!(shared.set_prefs(prefs));
+        assert!(shared.flush_store(Duration::from_secs(2)));
+        assert_eq!(
+            std::fs::read_to_string(shared.dirs().prefs_path()).unwrap(),
+            future,
+            "the newer version's file is untouched"
+        );
+    }
+
+    #[test]
+    fn the_watcher_setup_error_is_shown_once() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        assert!(shared.take_watch_error().is_none());
+        shared.record_watch_error("inotify watches exhausted");
+        assert_eq!(shared.take_watch_error().as_deref(), Some("inotify watches exhausted"));
+        assert!(shared.take_watch_error().is_none(), "OI-073: not every frame");
     }
 }
