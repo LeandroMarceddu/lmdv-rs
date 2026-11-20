@@ -1422,6 +1422,12 @@ pub enum UiMsg {
     /// Point this window's views of `from` at `to`, the one document for a
     /// file another window's load completed (OI-005).
     DocumentMerged { from: DocumentId, to: DocumentId },
+    /// A merge adopted a newer disk read into `doc`, or found the disk newer
+    /// while its buffer is dirty (`disk_changed`) (OI-172).
+    DocumentRefreshed { doc: DocumentId, disk_changed: bool },
+    /// Another window's Save as gave `doc` a new path (OI-173): this window's
+    /// Back/Forward places and tab titles follow it.
+    DocumentRenamed { doc: DocumentId, from: PathBuf, to: PathBuf },
     /// Focus the window (P4).
     FocusWindow(WindowId),
     /// Ask the window to close (P4).

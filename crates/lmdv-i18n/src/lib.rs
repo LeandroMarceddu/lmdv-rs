@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(ids, EXPECTED_LOCALES);
         assert!(locales().iter().all(|locale| !locale.rtl()));
         assert_eq!(locale_info().id(), "en", "English is the source and starts current");
-        assert_eq!(KEYS.len(), 617);
+        assert_eq!(KEYS.len(), 621);
         assert_eq!(
             PLURALS,
             ["editor.blocks", "editor.lines", "rel.days", "rel.hours", "rel.minutes"],

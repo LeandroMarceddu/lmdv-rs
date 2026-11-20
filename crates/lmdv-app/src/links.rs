@@ -38,6 +38,8 @@ pub enum LinkTarget {
     Details(String),
     /// A media placeholder's external open.
     Media(String),
+    /// An inline (text-span) picture, by block key and object index.
+    InlineImage { block: String, index: usize },
     /// `http`, `https` or `mailto`.
     External(String),
     /// A local path from a relative or absolute destination.
@@ -107,6 +109,12 @@ impl WindowState {
         if let Some(src) = dest.strip_prefix("media:") {
             return LinkTarget::Media(src.to_owned());
         }
+        if let Some(spec) = dest.strip_prefix("image:")
+            && let Some((block, index)) = spec.rsplit_once(':')
+            && let Ok(index) = index.parse::<usize>()
+        {
+            return LinkTarget::InlineImage { block: block.to_owned(), index };
+        }
         if let Some((scheme, _)) = dest.split_once(':') {
             let scheme = scheme.to_ascii_lowercase();
             if matches!(scheme.as_str(), "http" | "https" | "mailto") {
@@ -150,6 +158,7 @@ impl WindowState {
                 Some(path) => self.open_external(&path),
                 None => self.notice(lmdv_i18n::t!("link.openFailed", "name" => src)),
             },
+            LinkTarget::InlineImage { block, index } => self.open_inline_media(&block, index, tx),
             LinkTarget::External(url) => {
                 if let Err(error) = tx.open_url(&url) {
                     self.notice(lmdv_i18n::t!("msg.openFailed", "name" => url, "err" => error));
@@ -315,6 +324,7 @@ mod tests {
             LinkTarget::External("https://example.test/a".to_owned())
         );
         assert_eq!(state.classify_link("media:./clip.mp4"), LinkTarget::Media("./clip.mp4".to_owned()));
+        assert_eq!(state.classify_link("image:b3:1"), LinkTarget::InlineImage { block: "b3".to_owned(), index: 1 });
         assert!(matches!(state.classify_link("javascript:alert(1)"), LinkTarget::Refused(_)));
         assert!(matches!(state.classify_link("file:///etc/passwd"), LinkTarget::Refused(_)));
         assert!(matches!(state.classify_link("//host/share/a.md"), LinkTarget::Refused(_)));

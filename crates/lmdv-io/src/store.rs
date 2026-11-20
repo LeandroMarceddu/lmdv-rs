@@ -1246,12 +1246,106 @@ pub fn load_draft(dirs: &AppDirs, key: &str) -> Option<Draft> {
 
 /// Loads one draft by key and reports a future-schema, foreign, oversized or
 /// corrupt file.
+///
+/// The key is the document's own spelling. When it is an absolute file path
+/// and nothing is stored under it, the same file's canonical spelling is
+/// tried: a document opened through a symlink is keyed by the canonical path
+/// once it loads, so its draft lives there even after the file (and the link
+/// target) is gone (OI-171). A draft found that way is re-keyed to the
+/// requested spelling, so the caller's prompt, dismissal and save clean it up
+/// like any other.
 pub fn load_draft_reported(dirs: &AppDirs, key: &str) -> LoadedDraft {
+    let loaded = read_draft(dirs, key);
+    if loaded.value.is_some() || loaded.issue.is_some() {
+        return loaded;
+    }
+    for alias in draft_keys(Path::new(key)).into_iter().skip(1) {
+        let found = read_draft(dirs, &alias);
+        if found.issue.is_some() {
+            return found;
+        }
+        if let Some(draft) = found.value {
+            adopt_draft(dirs, &alias, key, &draft);
+            return LoadedDraft { value: Some(draft), issue: None };
+        }
+    }
+    loaded
+}
+
+fn read_draft(dirs: &AppDirs, key: &str) -> LoadedDraft {
     let path = draft_path(dirs, key);
     match read_draft_file(&path) {
         DraftFileRead::Data(record) if record.key == key => LoadedDraft { value: Some(record.draft), issue: None },
         DraftFileRead::Data(_) | DraftFileRead::Absent => LoadedDraft { value: None, issue: None },
         other => LoadedDraft { value: None, issue: draft_issue(&path, other) },
+    }
+}
+
+/// The keys a document path's draft may be stored under, most specific first
+/// (OI-171).
+///
+/// The first entry is the spelling as given; a second appears when the path is
+/// absolute and resolves to another spelling. The path itself is canonicalized
+/// when it exists; a deleted file cannot be, so its nearest existing ancestor
+/// is resolved and the missing tail re-attached (`/link/note.md` still yields
+/// `/real/note.md` while `/link` is a symlink to `/real`). `pasted:<id>` and
+/// relative keys have no alias.
+pub fn draft_keys(path: &Path) -> Vec<String> {
+    let mut keys = vec![path.to_string_lossy().into_owned()];
+    if let Some(canonical) = canonical_draft_spelling(path) {
+        let key = canonical.to_string_lossy().into_owned();
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    keys
+}
+
+fn canonical_draft_spelling(path: &Path) -> Option<PathBuf> {
+    canonical_draft_spelling_from(path, 0)
+}
+
+fn canonical_draft_spelling_from(path: &Path, depth: u8) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    if let Ok(canonical) = fs::canonicalize(path) {
+        return Some(canonical);
+    }
+    // A link whose target is gone cannot be canonicalized, but the link itself
+    // still names where the file was: follow it by hand, resolving a relative
+    // target against the canonical parent so the result matches the key the
+    // file had while it existed.
+    if depth < 8
+        && fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+        && let Ok(target) = fs::read_link(path)
+    {
+        let parent = path.parent()?;
+        let base = fs::canonicalize(parent).unwrap_or_else(|_| parent.to_path_buf());
+        let target = if target.is_absolute() { target } else { base.join(target) };
+        return canonical_draft_spelling_from(&target, depth + 1);
+    }
+    // The file itself is gone or unreadable. Resolve the deepest ancestor that
+    // still exists and re-attach the names below it.
+    let mut missing: Vec<std::ffi::OsString> = Vec::new();
+    let mut ancestor = path;
+    loop {
+        missing.push(ancestor.file_name()?.to_os_string());
+        ancestor = ancestor.parent()?;
+        if let Ok(mut canonical) = fs::canonicalize(ancestor) {
+            for name in missing.iter().rev() {
+                canonical.push(name);
+            }
+            return Some(canonical);
+        }
+    }
+}
+
+/// Moves a draft found under the same file's canonical spelling to the
+/// spelling the document uses (OI-171), so one key governs it from here on.
+fn adopt_draft(dirs: &AppDirs, from: &str, to: &str, draft: &Draft) {
+    if write_draft(dirs, to, draft).is_ok() {
+        let _ = fs::remove_file(draft_path(dirs, from));
     }
 }
 
@@ -1591,6 +1685,50 @@ mod tests {
         assert!(handle.flush(Duration::from_secs(2)));
         assert!(load_draft(&dirs, key).is_none());
         assert!(load_drafts(&dirs).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deleted_file_behind_a_symlink_finds_its_canonical_draft() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let folder = temp.path().join("real");
+        fs::create_dir(&folder).unwrap();
+        let real = folder.join("note.md");
+        fs::write(&real, "old\n").unwrap();
+        let alias = temp.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canonical = fs::canonicalize(&real).unwrap();
+        let canonical_key = canonical.to_string_lossy().into_owned();
+        let alias_key = alias.to_string_lossy().into_owned();
+        assert_ne!(canonical_key, alias_key, "the test needs two spellings");
+
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Draft { key: canonical_key.clone(), draft: Draft::new("edited\n", "old\n", 7) });
+        assert!(handle.flush(Duration::from_secs(2)));
+        drop(handle);
+
+        // The file is deleted; the symlink stays but no longer resolves.
+        fs::remove_file(&real).unwrap();
+        assert!(fs::canonicalize(&alias).is_err(), "the link is broken");
+
+        let loaded = load_draft_reported(&dirs, &alias_key);
+        assert_eq!(loaded.value.map(|draft| draft.text), Some("edited\n".to_owned()));
+        assert_eq!(loaded.issue, None, "the canonical draft is valid");
+        assert!(load_draft(&dirs, &canonical_key).is_none(), "it moved to the spelling the document uses");
+        assert_eq!(load_draft(&dirs, &alias_key).map(|draft| draft.text), Some("edited\n".to_owned()));
+
+        // The direct path keeps working with its own key first.
+        let direct = temp.path().join("direct.md");
+        fs::write(&direct, "x\n").unwrap();
+        let direct_key = direct.to_string_lossy().into_owned();
+        let direct_keys = draft_keys(&direct);
+        assert_eq!(direct_keys.first().map(String::as_str), Some(direct_key.as_str()));
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Draft { key: direct_key.clone(), draft: Draft::new("y\n", "x\n", 8) });
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(load_draft(&dirs, &direct_key).map(|draft| draft.text), Some("y\n".to_owned()));
+        assert_eq!(draft_keys(Path::new("pasted:3")), vec!["pasted:3".to_owned()]);
     }
 
     #[test]

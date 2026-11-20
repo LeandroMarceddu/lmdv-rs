@@ -1121,6 +1121,9 @@ impl WindowState {
                             self.shared.rename_position(old, &new_path);
                             self.shared.rename_recent(old, &new_path);
                             self.rename_history_paths(old, &new_path);
+                            // OI-173: another window may show the same document
+                            // and still name the old spelling in its places.
+                            self.broadcast_document_rename(doc, old, &new_path);
                         }
                         None => {
                             // E-11: pasted text's Back/Forward places name the
@@ -2242,6 +2245,21 @@ impl WindowState {
         let to = to.to_string_lossy();
         for tab in &mut self.tabs {
             tab.view.nav.rename_path(from, &to);
+        }
+    }
+
+    /// Tells the other windows that a Save as moved `doc` to a new path
+    /// (OI-173), so their Back/Forward places and tab titles follow it.
+    ///
+    /// Positions and recents live on [`crate::shared::AppShared`] and were
+    /// renamed once by the saving window; a watch is process-wide too.
+    fn broadcast_document_rename(&self, doc: DocumentId, from: &Path, to: &Path) {
+        let ids: Vec<lmdv_core::WindowId> =
+            self.shared.windows().iter().map(|entry| entry.id).filter(|id| *id != self.id()).collect();
+        for id in ids {
+            let _ = self
+                .shared
+                .try_post_window(id, UiMsg::DocumentRenamed { doc, from: from.to_path_buf(), to: to.to_path_buf() });
         }
     }
 

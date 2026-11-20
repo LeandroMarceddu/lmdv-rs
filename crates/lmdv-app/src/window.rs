@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use lmdv_core::{
-    DocStatus, Document, DocumentId, DocumentKey, FindState, LEFT_WIDTH_DEFAULT, LEFT_WIDTH_MAX, NavHistory,
+    DocStatus, Document, DocumentId, DocumentKey, FileMeta, FindState, LEFT_WIDTH_DEFAULT, LEFT_WIDTH_MAX, NavHistory,
     RIGHT_WIDTH_DEFAULT, RIGHT_WIDTH_MAX, ScrollAnchor, SourceBuffer, TabId, WindowId,
 };
 use lmdv_io::Launch;
@@ -1363,7 +1363,14 @@ impl WindowState {
                         // that owns either is the one view, and this tab joins
                         // it instead of inserting a second one.
                         if let Some(survivor) = self.merge_loaded_document(doc, &path, meta) {
-                            self.note_large_document(survivor, meta.len);
+                            // The survivor's own base may be the one that won;
+                            // its length is what the size warning describes.
+                            let len = self
+                                .shared
+                                .docs()
+                                .get(survivor)
+                                .map_or(meta.len, |document| document.saved.borrow().meta.len);
+                            self.note_large_document(survivor, len);
                             self.sync_editor_titles();
                             self.refresh_titles();
                             self.refresh_find_hits();
@@ -1378,19 +1385,7 @@ impl WindowState {
                             return true;
                         }
                         if matches!(*document.key.borrow(), DocumentKey::File(_)) {
-                            let current_path = document.key.borrow().path().map(Path::to_path_buf);
-                            if current_path.as_deref() != Some(path.as_path()) {
-                                self.shared.docs_mut().rekey(doc, DocumentKey::File(path.clone()));
-                                if let Some(old) = &current_path {
-                                    // The watcher counted the lexical path; move
-                                    // the follow to the canonical one.
-                                    self.shared.watch_path(&path);
-                                    self.shared.unwatch_path(old);
-                                    self.shared.rename_position(old, &path);
-                                    self.shared.rename_recent(old, &path);
-                                    self.rename_history_paths(old, &path);
-                                }
-                            }
+                            self.adopt_load_path(doc, &path);
                         }
                         document.set_saved(meta, document.hash(), path.clone());
                         self.shared.docs_mut().insert_ready(document.clone());
@@ -1403,31 +1398,7 @@ impl WindowState {
                         // A reload may reset the buffer revision to zero; forget
                         // the old model so the parse job cannot look current.
                         self.shared.forget_parsed(doc);
-                        let text = document.text().text().to_owned();
-                        let eol = document.text().eol();
-                        let revision = document.revision();
-                        for tab in self.tabs.iter_mut().filter(|tab| tab.document_id() == Some(doc)) {
-                            tab.view.reader_revision = None;
-                            tab.view.reader_error = None;
-                            tab.view.dirty = false;
-                            tab.view.disk_changed = false;
-                            tab.view.edit_base = Some(text.clone());
-                            if let Some(editor) = tab.view.editor.as_mut() {
-                                // A reload keeps the session's layout: block mode
-                                // never flips mid-session, whatever the new size.
-                                let was_block = editor.block_mode_active();
-                                let caret = editor.selection().start.min(text.len());
-                                editor.set_text(&text);
-                                if was_block {
-                                    editor.enable_block_mode();
-                                    editor.set_selection(caret..caret);
-                                }
-                                crate::block_ui::prime_editor_focus(editor);
-                                editor.set_eol(eol);
-                                editor.set_doc_revision(revision);
-                                editor.set_base_revision(revision);
-                            }
-                        }
+                        self.reset_views_after_load(doc);
                         self.sync_editor_titles();
                         self.request_draft_check(doc);
                         self.refresh_titles();
@@ -1517,25 +1488,38 @@ impl WindowState {
             return None;
         }
         let other_ready = matches!(*other.status.borrow(), DocStatus::Ready);
+        // OI-172: an in-place replacement leaves the ready document holding
+        // the older buffer. The completion is the fresher read when its
+        // modification time (or, at the same time, its length) moved on.
+        let completion_newer = other_ready && completion_supersedes(meta, other.saved.borrow().meta);
         let (survivor, absorbed) = if other_ready { (other.id, doc) } else { (doc, other.id) };
+        let mut completion_applied = false;
+        let mut disk_newer = false;
 
         // A survivor that is this completion still needs its canonical key,
         // saved base and identity; the duplicate's checks ran first, above.
         if survivor == doc {
-            let document = self.shared.docs().get(doc)?;
-            let old_path = document.key.borrow().path().map(Path::to_path_buf);
-            if old_path.as_deref() != Some(path) {
-                self.shared.docs_mut().rekey(doc, DocumentKey::File(path.to_path_buf()));
-                if let Some(old) = &old_path {
-                    self.shared.watch_path(path);
-                    self.shared.unwatch_path(old);
-                    self.shared.rename_position(old, path);
-                    self.shared.rename_recent(old, path);
-                    self.rename_history_paths(old, path);
+            self.adopt_load_path(doc, path);
+            if let Some(document) = self.shared.docs().get(doc) {
+                document.set_saved(meta, document.hash(), path.to_path_buf());
+                self.shared.docs_mut().insert_ready(document);
+            }
+        } else if completion_newer {
+            let completion = self.shared.docs().get(doc);
+            if let Some(completion) = completion {
+                if other.is_dirty() {
+                    // Keep the unsaved edits and let the disk-changed prompt
+                    // decide, exactly like a watcher `Changed` (E-10/E-15).
+                    disk_newer = true;
+                } else {
+                    self.apply_newer_completion(&other, &completion, path, meta);
+                    self.adopt_load_path(survivor, path);
+                    self.shared.docs_mut().insert_ready(other.clone());
+                    // The cached model belongs to the replaced text.
+                    self.shared.forget_parsed(survivor);
+                    completion_applied = true;
                 }
             }
-            document.set_saved(meta, document.hash(), path.to_path_buf());
-            self.shared.docs_mut().insert_ready(document);
         }
 
         self.remap_document_tabs(absorbed, survivor);
@@ -1552,7 +1536,156 @@ impl WindowState {
             self.shared.record_recent(path.to_path_buf(), unix_millis());
         }
         self.broadcast_merge(absorbed, survivor);
+        if completion_applied {
+            self.refresh_document_views(survivor, false);
+            self.broadcast_document_refresh(survivor, false);
+        } else if disk_newer {
+            self.refresh_document_views(survivor, true);
+            self.broadcast_document_refresh(survivor, true);
+        }
         Some(survivor)
+    }
+
+    /// Points `doc` at the canonical spelling a completed load resolved
+    /// (OI-005), moving its watch, place, recent entry and history with it.
+    ///
+    /// The watcher followed the lexical path the tab was opened with; every
+    /// stored key follows the file to its canonical name.
+    fn adopt_load_path(&mut self, doc: DocumentId, path: &Path) {
+        let Some(document) = self.shared.docs().get(doc) else { return };
+        let old_path = document.key.borrow().path().map(Path::to_path_buf);
+        if old_path.as_deref() == Some(path) {
+            return;
+        }
+        self.shared.docs_mut().rekey(doc, DocumentKey::File(path.to_path_buf()));
+        if let Some(old) = &old_path {
+            self.shared.watch_path(path);
+            self.shared.unwatch_path(old);
+            self.shared.rename_position(old, path);
+            self.shared.rename_recent(old, path);
+            self.rename_history_paths(old, path);
+        }
+    }
+
+    /// Resets every view of `doc` to the document's current text after a load
+    /// (E-10) or a merge that adopted a newer disk read (OI-172).
+    ///
+    /// The editor session keeps its layout and caret; only the text and the
+    /// revision baseline change. The last good model stays on screen until the
+    /// parse for the new revision lands.
+    fn reset_views_after_load(&mut self, doc: DocumentId) {
+        let Some(document) = self.shared.docs().get(doc) else { return };
+        let text = document.text().text().to_owned();
+        let eol = document.text().eol();
+        let revision = document.revision();
+        for tab in self.tabs.iter_mut().filter(|tab| tab.document_id() == Some(doc)) {
+            tab.view.reader_revision = None;
+            tab.view.reader_error = None;
+            tab.view.dirty = false;
+            tab.view.disk_changed = false;
+            tab.view.edit_base = Some(text.clone());
+            if let Some(editor) = tab.view.editor.as_mut() {
+                // A reload keeps the session's layout: block mode never flips
+                // mid-session, whatever the new size.
+                let was_block = editor.block_mode_active();
+                let caret = editor.selection().start.min(text.len());
+                editor.set_text(&text);
+                if was_block {
+                    editor.enable_block_mode();
+                    editor.set_selection(caret..caret);
+                }
+                crate::block_ui::prime_editor_focus(editor);
+                editor.set_eol(eol);
+                editor.set_doc_revision(revision);
+                editor.set_base_revision(revision);
+            }
+        }
+    }
+
+    /// Applies a newer read of the same file to this window's views of `doc`
+    /// (OI-172), or marks them disk-changed when the buffer keeps its edits.
+    fn refresh_document_views(&mut self, doc: DocumentId, disk_changed: bool) -> bool {
+        let Some(document) = self.shared.docs().get(doc) else { return false };
+        if disk_changed {
+            let mut marked = false;
+            for tab in self.tabs.iter_mut().filter(|tab| tab.document_id() == Some(doc)) {
+                marked |= !tab.view.disk_changed;
+                tab.view.disk_changed = true;
+            }
+            if marked && self.editor.prompt.is_none() {
+                self.flush_all_drafts();
+                self.editor.prompt = Some(crate::editor::Prompt::DiskChanged { doc });
+            }
+            return marked;
+        }
+        // A user typed between the merge and this message: the unsaved buffer
+        // wins, exactly as it did in the merging window.
+        if document.is_dirty() {
+            return false;
+        }
+        drop(document);
+        if !self.tabs.iter().any(|tab| tab.document_id() == Some(doc)) {
+            return false;
+        }
+        self.reset_views_after_load(doc);
+        self.sync_editor_titles();
+        self.refresh_titles();
+        self.refresh_find_hits();
+        self.drive_parse();
+        self.sync_outline();
+        true
+    }
+
+    /// Makes another window's Save as reach this window's Back/Forward places
+    /// and tab titles (OI-173).
+    ///
+    /// Positions and recents are process-wide and the saving window already
+    /// moved them; watches are process-wide too. Only the per-tab places and
+    /// the cached title are this window's own state.
+    fn apply_document_rename(&mut self, doc: DocumentId, from: &Path, to: &Path) -> bool {
+        let old_key = from.to_string_lossy();
+        let new_key = to.to_string_lossy();
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            let holds_old =
+                tab.view.nav.back.iter().chain(tab.view.nav.forward.iter()).any(|place| place.path.as_str() == old_key);
+            if holds_old {
+                tab.view.nav.rename_path(&old_key, &new_key);
+                changed = true;
+            }
+        }
+        for tab in self.tabs.iter_mut().filter(|tab| tab.document_id() == Some(doc)) {
+            let before = tab.title();
+            tab.refresh_title();
+            changed |= tab.title() != before;
+        }
+        changed
+    }
+
+    /// Tells every other window that `doc` adopted a newer disk read, or that
+    /// its dirty buffer now sits under changed content (OI-172).
+    fn broadcast_document_refresh(&self, doc: DocumentId, disk_changed: bool) {
+        let ids: Vec<WindowId> =
+            self.shared.windows().iter().map(|entry| entry.id).filter(|id| *id != self.id).collect();
+        for id in ids {
+            let _ = self.shared.try_post_window(id, UiMsg::DocumentRefreshed { doc, disk_changed });
+        }
+    }
+
+    /// Replaces a ready document's buffer with a newer read of the same file
+    /// (OI-172). The survivor keeps its id, tabs, lease and reading position.
+    fn apply_newer_completion(&mut self, survivor: &Document, completion: &Document, path: &Path, meta: FileMeta) {
+        let (text, eol, bom) = {
+            let buffer = completion.text();
+            (buffer.text().to_owned(), buffer.eol(), buffer.had_bom())
+        };
+        if survivor.text().text() != text {
+            survivor.replace_all(&text, eol);
+            survivor.buf.borrow_mut().set_had_bom(bom);
+        }
+        *survivor.title.borrow_mut() = title_for_path(path);
+        *survivor.status.borrow_mut() = DocStatus::Ready;
+        survivor.set_saved(meta, survivor.hash(), path.to_path_buf());
     }
 
     /// Points this window's views of `from` at `to` (OI-005).
@@ -1729,6 +1862,8 @@ impl WindowState {
             UiMsg::Transfer(msg) => self.handle_transfer(msg),
             UiMsg::ReleaseDocument { doc } => self.release_clean_views(doc),
             UiMsg::DocumentMerged { from, to } => self.remap_document_tabs(from, to),
+            UiMsg::DocumentRefreshed { doc, disk_changed } => self.refresh_document_views(doc, disk_changed),
+            UiMsg::DocumentRenamed { doc, from, to } => self.apply_document_rename(doc, &from, &to),
             UiMsg::CloseWindow(_) => false,
         }
     }
@@ -1977,6 +2112,19 @@ pub fn title_for_path(path: &Path) -> String {
         .map(|name| name.to_string_lossy().into_owned())
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Whether a completed read describes newer content than a document's saved
+/// base (OI-172).
+///
+/// The modification time decides. When both sides report the same time, a
+/// different length still means the disk changed; identical metadata means the
+/// two reads are the same content and the ready document keeps its buffer.
+fn completion_supersedes(completion: FileMeta, saved: FileMeta) -> bool {
+    if completion.mtime_ns != saved.mtime_ns {
+        return completion.mtime_ns > saved.mtime_ns;
+    }
+    completion.len != saved.len
 }
 
 #[cfg(test)]
@@ -2408,6 +2556,72 @@ mod tests {
         assert_eq!(state.shared().docs().find_path(&canonical).map(|doc| doc.id), Some(survivor.id));
         assert!(state.shared().docs().find_path(&alias).is_none(), "the alias spelling is not a document");
         assert_eq!(state.shared().watch_refcount(&canonical), 1, "the merged view keeps one watch");
+    }
+
+    /// Replaces `path` with new content through an atomic rename, the way a
+    /// save in another editor does: a new inode and a fresh modification time.
+    fn replace_file(path: &Path, text: &str) {
+        let staged = path.with_extension("staged");
+        std::fs::write(&staged, text).unwrap();
+        std::fs::rename(&staged, path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_in_place_replacement_reaches_the_ready_document_through_the_link() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "old\n").unwrap();
+        let alias = temp.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let mut state = window(&temp);
+
+        state.open_path(real.clone());
+        poll_until(&mut state, "the real file", |state| loaded_active(state).is_some());
+        let survivor = loaded_active(&state).expect("the real document");
+        replace_file(&real, "new text\n");
+
+        // OI-172: the alias load reads the new file; the ready document held
+        // the older buffer, but the completion is newer and the buffer clean.
+        state.open_path(alias);
+        poll_until(&mut state, "the replacement merge", |state| {
+            state.tabs().len() == 1 && state.active_document_id() == Some(survivor.id)
+        });
+        assert_eq!(survivor.text().text(), "new text\n", "the newer read replaced the stale buffer");
+        assert!(!survivor.is_dirty(), "the adopted text is the saved base");
+        assert_eq!(survivor.saved.borrow().meta.len, "new text\n".len() as u64);
+        assert_eq!(state.shared().docs().len(), 1);
+        assert!(
+            state.active_tab().and_then(|tab| tab.view.reader_revision).is_none(),
+            "the stale model is dropped so the new text is parsed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dirty_buffer_keeps_its_edits_and_asks_about_the_newer_disk_copy() {
+        let temp = TempDir::new().unwrap();
+        let real = temp.path().join("real.md");
+        std::fs::write(&real, "old\n").unwrap();
+        let alias = temp.path().join("alias.md");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let mut state = window(&temp);
+
+        state.open_path(real.clone());
+        poll_until(&mut state, "the real file", |state| loaded_active(state).is_some());
+        let survivor = loaded_active(&state).expect("the real document");
+        survivor.apply(0..1, "X");
+        assert!(survivor.is_dirty());
+        replace_file(&real, "new text\n");
+
+        state.open_path(alias);
+        poll_until(&mut state, "the dirty merge's disk question", |state| {
+            matches!(state.prompt(), Some(crate::editor::Prompt::DiskChanged { .. }))
+        });
+        assert_eq!(survivor.text().text(), "Xld\n", "the unsaved edit survived the merge");
+        assert!(survivor.is_dirty());
+        assert_eq!(std::fs::read_to_string(&real).unwrap(), "new text\n", "nothing was written");
+        assert!(state.active_tab().is_some_and(|tab| tab.view.disk_changed), "the tab says the disk moved under it");
     }
 
     #[cfg(unix)]

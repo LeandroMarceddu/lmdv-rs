@@ -56,6 +56,21 @@ pub use pdf::{PdfFont, PdfOptions, PdfPage, export_pdf};
 pub use rich::{RichOptions, export_rich_fragment, export_rich_html};
 pub use tsv::table_tsv;
 
+/// Re-encodes a raster picture (PNG, JPEG, GIF, WebP or BMP) as PNG.
+///
+/// The preview's copy/save actions need PNG bytes; the app has no image
+/// decoder of its own, and this crate already reads pictures for the exporters.
+/// Call it on a worker. `None` when the bytes do not decode.
+pub fn raster_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(image.as_raw(), image.width(), image.height(), image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(png)
+}
+
 /// Writes `doc` as one standalone, self-contained HTML file.
 ///
 /// This is `ExportDoc::from_md(...)?` followed by `to_html()`; use the two steps

@@ -21,19 +21,39 @@
 //! 1.25, and a resize re-fits `Fit` and `Width` while leaving a custom zoom
 //! alone.
 //!
-//! Not implemented here: the copy/save menu and PNG rasterization (V-08/V-09)
-//! and the original's pointer-hint avoidance around floating bars (V-02); the
-//! hint is anchored inside the media's own corner instead.
+//! V-08 adds the copy/save menu above the zoom bar: a picture's PNG bytes are
+//! read on a worker as soon as the preview opens, **Copy as image** (2×) and
+//! **Copy as large image** (4×) put them on the clipboard, and **Save as PNG…**
+//! asks for a destination and writes atomically through `lmdv-io` on a worker.
+//! A raster is copied at its natural pixel size, as V-09 asks; the two entries
+//! differ only for vector content. Saving or copying a diagram as PNG needs a
+//! scene rasterizer, and SVG needs a serializer, so diagrams keep the zoom-only
+//! preview for now (OI-140). A picture that is not PNG is refused with a notice:
+//! `lmdv-app` has no decoder to re-encode it.
+//!
+//! The hover hint (V-02) is a child of the drawn media itself, so it sits at the
+//! media's top-right corner rather than the column's, and the article's clip
+//! hides it as soon as that corner leaves the pane. The floating find, notice
+//! and section bars are drawn above the article, so a hint they cover is not
+//! visible either.
+//!
+//! Inline (text-span) pictures are materialised from the model for the block
+//! menu's **Open preview**; opening one by clicking the picture itself needs the
+//! renderer to mark the picture's span as a link (see the P6-L follow-up).
 
-use std::cell::Cell;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use lmdv_core::{Document, DocumentId, DocumentKey, SourceBuffer, TabId};
 use lmdv_render::{MediaKind, MediaRef, MediaWire, RenderOptions, RenderWires};
-use rune::{Cursor, Cx, Drag, El, Key, KeyEvent, LiveRegion, Phase, Tx, WheelEvent, col, el, row, text};
+use rune::{
+    ClipboardContent, ClipboardImage, Cursor, Cx, Drag, El, FileDialogOptions, Key, KeyEvent, LiveRegion, Phase, Tx,
+    Waker, WheelEvent, el, row, text,
+};
 use rune_kit::image_zoom::math::{clamp_axis, detail_scale};
-use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Placement};
 
 use crate::icons;
 use crate::images::{ImageCacheState, WindowImages};
@@ -58,8 +78,19 @@ pub const LIGHTBOX_ZOOM_IN: &str = "lightbox-zoom-in";
 pub const LIGHTBOX_FIT: &str = "lightbox-fit";
 /// Fit the window's width.
 pub const LIGHTBOX_WIDTH: &str = "lightbox-width";
-/// Natural size.
+/// Natural size around the current centre.
 pub const LIGHTBOX_ACTUAL: &str = "lightbox-actual";
+/// The copy/save button in the title bar (V-08).
+pub const LIGHTBOX_COPY: &str = "lightbox-copy";
+/// The copy/save menu's surface and rows.
+pub const LIGHTBOX_MENU: &str = "lightbox-menu";
+/// The PNG header every saveable picture starts with.
+const PNG_SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+/// The decode hint for a picture whose natural size is not known yet (an
+/// inline picture): SVG sources rasterize at this size; rasters keep their own.
+const INLINE_DECODE_POINTS: f32 = 2048.0;
+/// The scripted save directory for headless runs, like `LMDV_EXPORT_DIR`.
+const SAVE_SEAM: &str = "LMDV_LIGHTBOX_DIR";
 
 /// Breathing room around the stage, in points.
 pub const MARGIN: f32 = 40.0;
@@ -125,6 +156,32 @@ pub struct Lightbox {
     drag: Option<ViewportDrag>,
     dragged: bool,
     backdrop_dragged: bool,
+    /// Whether the copy/save menu is open (V-08).
+    menu_open: Cell<bool>,
+    /// The picture's PNG bytes, read on a worker when the preview opens.
+    png: Arc<Mutex<PngState>>,
+    /// The running Save as PNG… write, if any.
+    save: RefCell<Option<ImageSave>>,
+}
+
+/// A picture's PNG file, as the worker read it (V-08/V-09).
+#[derive(Clone, Debug)]
+enum PngState {
+    /// The worker is still reading the file.
+    Loading,
+    /// The file's bytes, ready to copy or write.
+    Ready(Arc<[u8]>),
+    /// Why the picture can't be copied or saved.
+    Unavailable(String),
+}
+
+/// One Save as PNG… write on a worker.
+#[derive(Debug)]
+struct ImageSave {
+    /// The destination, for the success notice.
+    path: PathBuf,
+    /// The worker's answer, filled once and drained by `poll_lightbox`.
+    outcome: Arc<Mutex<Option<Result<(), String>>>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -169,7 +226,72 @@ impl Lightbox {
             drag: None,
             dragged: false,
             backdrop_dragged: false,
+            menu_open: Cell::new(false),
+            png: Arc::new(Mutex::new(PngState::Loading)),
+            save: RefCell::new(None),
         }
+    }
+
+    /// Whether the copy/save menu is open (V-08).
+    pub fn menu_open(&self) -> bool {
+        self.menu_open.get()
+    }
+
+    /// Opens the copy/save menu; the copy button owns it.
+    pub(crate) fn open_menu(&self) {
+        self.menu_open.set(true);
+    }
+
+    /// Closes the copy/save menu; focus returns to the copy button.
+    pub(crate) fn close_menu(&self) {
+        self.menu_open.set(false);
+    }
+
+    /// The picture's PNG file state (V-08/V-09).
+    fn png(&self) -> PngState {
+        self.png.lock().map(|state| state.clone()).unwrap_or_else(|poison| poison.into_inner().clone())
+    }
+
+    /// Whether the PNG bytes are ready to copy or save.
+    pub fn png_ready(&self) -> bool {
+        matches!(self.png(), PngState::Ready(_))
+    }
+
+    /// Why the picture cannot be copied or saved, once the worker said so.
+    pub fn png_unavailable(&self) -> Option<String> {
+        match self.png() {
+            PngState::Unavailable(reason) => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// Reads the picture's file on a worker, so Copy and Save never touch a
+    /// frame (ADR-017). Only a PNG can be handed to the clipboard or written
+    /// again: `lmdv-app` has no decoder to re-encode another format.
+    fn load_png(&self, root: PathBuf, source: String, waker: Waker) {
+        let slot = self.png.clone();
+        let spawned = rune::task::spawn("lmdv-image-png", move || {
+            let state = read_png(&root, &source);
+            if let Ok(mut slot) = slot.lock() {
+                *slot = state;
+            }
+            waker();
+        });
+        if spawned.is_err()
+            && let Ok(mut slot) = self.png.lock()
+        {
+            *slot = PngState::Unavailable(lmdv_i18n::t!("msg.imageUnavailable").to_owned());
+        }
+    }
+
+    /// The Save as PNG… answer once it lands, so `poll_lightbox` can report it.
+    fn take_save_outcome(&self) -> Option<Result<PathBuf, String>> {
+        let mut save = self.save.borrow_mut();
+        let job = save.as_ref()?;
+        let answer = job.outcome.lock().ok().and_then(|mut outcome| outcome.take())?;
+        let path = job.path.clone();
+        *save = None;
+        Some(answer.map(|()| path))
     }
 
     /// The active view.
@@ -410,6 +532,160 @@ fn image_name(source: &str) -> String {
         .unwrap_or_else(|| lmdv_i18n::t!("zoom.image").to_owned())
 }
 
+/// The default name for a saved preview: the picture's stem with `.png`.
+fn png_file_name(media: &MediaRef) -> String {
+    if media.kind == MediaKind::Diagram {
+        return format!("{}.png", lmdv_i18n::t!("zoom.diagram").to_lowercase());
+    }
+    let name = image_name(&media.source);
+    let stem =
+        name.strip_suffix(".png").unwrap_or_else(|| name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem));
+    format!("{stem}.png")
+}
+
+/// Reads a picture's file for the copy/save menu (V-08/V-09), on a worker.
+///
+/// Only a PNG can be passed on unchanged: this crate has no decoder to turn
+/// another raster format into PNG. A network, `data:` or refused path answers
+/// [`PngState::Unavailable`] rather than touching the filesystem.
+fn read_png(root: &Path, source: &str) -> PngState {
+    let unavailable = || PngState::Unavailable(lmdv_i18n::t!("msg.imageUnavailable").to_owned());
+    let src = source.split('#').next().unwrap_or(source).trim();
+    if src.is_empty() || !is_local_asset(src) {
+        return unavailable();
+    }
+    let policy = lmdv_io::PathPolicy::new(root);
+    let Ok((_, bytes)) = policy.read_asset(Path::new(src)) else {
+        return unavailable();
+    };
+    if bytes.starts_with(PNG_SIGNATURE) {
+        return PngState::Ready(Arc::from(bytes));
+    }
+    // V-08/V-09: other rasters are converted on the worker.
+    match lmdv_export::raster_to_png(&bytes) {
+        Some(png) => PngState::Ready(Arc::from(png)),
+        None => unavailable(),
+    }
+}
+
+/// Whether an image source names a local path rather than a URL, a device or a
+/// UNC share (the same rule as the image resolver, OI-009).
+fn is_local_asset(src: &str) -> bool {
+    if src.starts_with("//") || src.starts_with(r"\\") {
+        return false;
+    }
+    if let Some((scheme, _)) = src.split_once(':') {
+        let looks_like_scheme = !scheme.is_empty()
+            && scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'));
+        if looks_like_scheme {
+            return false;
+        }
+    }
+    true
+}
+
+/// Writes PNG bytes atomically on a worker; the parent must exist and may not
+/// be a network or device path (X-15's rule for the exports).
+fn write_png_atomically(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    lmdv_io::path_policy::reject_network_or_device(path).map_err(|error| error.to_string())?;
+    let target = lmdv_io::atomic::canonical_target(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    lmdv_io::atomic::write_atomic(&target, bytes).map_err(|error| format!("{}: {error}", target.display()))
+}
+
+/// The scripted/test seam for the preview's save dialog: `LMDV_LIGHTBOX_DIR`.
+/// A headless script cannot answer a dialog, so the save writes
+/// `<dir>/<default name>` when this variable is set.
+fn save_seam_dir() -> Option<PathBuf> {
+    std::env::var_os(SAVE_SEAM).map(PathBuf::from).filter(|dir| !dir.as_os_str().is_empty())
+}
+
+/// Every inline (text-span) picture in the active model, in reading order.
+///
+/// The renderer draws a picture inside a paragraph as a text-span image, not an
+/// element, so it has no `MediaRef` of its own. The app materialises one from
+/// the model for the block menu (and, with the renderer follow-up, for a click
+/// on the picture); `index` is the picture object's place in its inline run,
+/// the same index the renderer's `image:` link carries.
+pub(crate) fn inline_media_refs(state: &WindowState) -> Vec<MediaRef> {
+    let Some(model) = state.active_tab().and_then(|tab| tab.view.reader.clone()) else { return Vec::new() };
+    let mut found = Vec::new();
+    for (block_index, block) in model.blocks.iter().enumerate() {
+        let key = model.block_key(block_index).map(str::to_owned).unwrap_or_else(|| format!("b{block_index}"));
+        let span = model.block_spans.get(block_index);
+        let mut pictures = Vec::new();
+        collect_inline_pictures(block, &mut pictures);
+        for (index, source, alt) in pictures {
+            found.push(MediaRef {
+                block: key.clone(),
+                index,
+                kind: MediaKind::Image,
+                source,
+                alt,
+                width: 0.0,
+                height: 0.0,
+                line: span.map_or(0, |span| span.line),
+                end_line: span.map_or(1, |span| span.end_line),
+            });
+        }
+    }
+    found
+}
+
+/// The inline pictures one block draws, including nested lists, quotes and
+/// table cells; the index is the picture object's place in its own inline run.
+fn collect_inline_pictures(block: &lmdv_md::Block, out: &mut Vec<(usize, String, String)>) {
+    match block {
+        lmdv_md::Block::Para(inline) | lmdv_md::Block::Heading { inline, .. } => inline_pictures(inline, out),
+        lmdv_md::Block::Quote { blocks, .. } => {
+            for block in blocks {
+                collect_inline_pictures(block, out);
+            }
+        }
+        lmdv_md::Block::List { items, .. } => {
+            for item in items {
+                for block in item {
+                    collect_inline_pictures(block, out);
+                }
+            }
+        }
+        lmdv_md::Block::Table(table) => {
+            for inline in table.head.iter().chain(table.rows.iter().flatten()) {
+                inline_pictures(inline, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The `<img>` objects of one inline run, in source order; the index is the
+/// object's place in [`lmdv_md::Inline::objects`], the destination the
+/// renderer's inline-picture link carries.
+fn inline_pictures(inline: &lmdv_md::Inline, out: &mut Vec<(usize, String, String)>) {
+    use lmdv_md::InlineObjectKind;
+    for (index, object) in inline.objects.iter().enumerate() {
+        let node = match &object.kind {
+            InlineObjectKind::Image => object.html.as_ref(),
+            InlineObjectKind::Picture => object.html.as_ref().and_then(picture_fallback),
+            _ => None,
+        };
+        let Some(node) = node else { continue };
+        let Some(src) = node.attr("src").map(str::trim).filter(|src| !src.is_empty()) else { continue };
+        out.push((index, src.to_owned(), node.attr("alt").unwrap_or_default().to_owned()));
+    }
+}
+
+/// The `<img>` a `<picture>` falls back to.
+fn picture_fallback(node: &lmdv_md::HtmlNode) -> Option<&lmdv_md::HtmlNode> {
+    node.children
+        .iter()
+        .filter_map(|child| match child {
+            lmdv_md::HtmlChild::Node(node) => Some(node),
+            lmdv_md::HtmlChild::Text(_) => None,
+        })
+        .find(|node| node.attr("src").is_some())
+}
+
 impl WindowState {
     /// One media handler per frame: the article's images and diagrams become
     /// focusable buttons that open this window's preview (V-01).
@@ -433,17 +709,55 @@ impl WindowState {
 
     /// The media a top-level block draws, for the block context menu's
     /// “Open preview” item (V-01).
+    ///
+    /// A block image or diagram is the renderer's own reference. A paragraph
+    /// that holds an inline (text-span) picture has no `MediaRef` from the
+    /// renderer yet, so the first picture in the block is materialised from the
+    /// model: the same preview opens, with the same zoom, pan and menu.
     pub(crate) fn media_for_block(&self, block: &str) -> Option<MediaRef> {
+        self.block_media(block).or_else(|| self.inline_media_first(block))
+    }
+
+    /// The renderer's own reference for a block image or diagram.
+    fn block_media(&self, block: &str) -> Option<MediaRef> {
         media_refs(self).into_iter().find(|media| media.block == block)
+    }
+
+    /// The first inline picture a block draws, for the block menu.
+    fn inline_media_first(&self, block: &str) -> Option<MediaRef> {
+        inline_media_refs(self).into_iter().find(|media| media.block == block)
+    }
+
+    /// The inline picture at `index` in `block`, materialised from the model.
+    fn inline_media(&self, block: &str, index: usize) -> Option<MediaRef> {
+        inline_media_refs(self).into_iter().find(|media| media.block == block && media.index == index)
     }
 
     /// Opens the preview for the media a top-level block draws.
     pub(crate) fn open_media_block(&mut self, block: &str, tx: &mut Tx) {
-        let Some(media) = self.media_for_block(block) else { return };
         let Some(tab) = self.active_tab() else { return };
         let (tab_id, Some(doc)) = (tab.id, tab.document_id()) else { return };
         let revision = tab.view.reader.as_ref().map_or(0, |model| model.revision);
-        self.open_media(tab_id, doc, revision, media, tx);
+        if let Some(media) = self.block_media(block) {
+            self.open_media(tab_id, doc, revision, media, tx);
+        } else if let Some(media) = self.inline_media_first(block) {
+            // The block element, not a media button, is where focus returns:
+            // the picture itself lives inside the paragraph's text.
+            self.open_inline_media(block, media.index, tx);
+        }
+    }
+
+    /// Opens the inline picture `index` in `block` (V-01 for a text-span image).
+    ///
+    /// The block menu reaches this preview through [`Self::media_for_block`].
+    /// A future renderer follow-up marks the picture's span as an `image:` link
+    /// when the media wire is set; this is the handler behind that destination.
+    pub(crate) fn open_inline_media(&mut self, block: &str, index: usize, tx: &mut Tx) {
+        let Some(media) = self.inline_media(block, index) else { return };
+        let Some(tab) = self.active_tab() else { return };
+        let (tab_id, Some(doc)) = (tab.id, tab.document_id()) else { return };
+        let revision = tab.view.reader.as_ref().map_or(0, |model| model.revision);
+        self.open_media_as(tab_id, doc, revision, media, block.to_owned(), tx);
     }
 
     /// Opens the preview for `media` in `tab`, if that tab still shows the
@@ -452,6 +766,21 @@ impl WindowState {
     /// A picture the path policy refuses or the decoder failed does not open
     /// (V-01); a pending decode opens and draws once its pixels land.
     pub(crate) fn open_media(&mut self, tab: TabId, doc: DocumentId, revision: u64, media: MediaRef, tx: &mut Tx) {
+        let opener = format!("media-{}", media.block);
+        self.open_media_as(tab, doc, revision, media, opener, tx);
+    }
+
+    /// [`Self::open_media`] with the element focus returns to when the preview
+    /// closes (a block image's own button, or an inline picture's paragraph).
+    fn open_media_as(
+        &mut self,
+        tab: TabId,
+        doc: DocumentId,
+        revision: u64,
+        media: MediaRef,
+        opener: String,
+        tx: &mut Tx,
+    ) {
         if self.lightbox.is_some() {
             return;
         }
@@ -462,19 +791,22 @@ impl WindowState {
         {
             return;
         }
+        let mut root = None;
         let image = match media.kind {
             MediaKind::Image => {
                 let Some(document) = active.document().cloned() else { return };
-                let Some(root) = self.document_root(&document) else { return };
+                let Some(folder) = self.document_root(&document) else { return };
+                let size = if media.width >= 2.0 { media.width.max(1.0) } else { INLINE_DECODE_POINTS };
                 let cache = self
                     .image_cell()
                     .get_or_init(|| ImageCacheState::new(self.window_waker(), self.shared.is_headless()));
-                let Some(image) = cache.resolve(&root, &media.source, media.width.max(1.0), 2.0) else {
+                let Some(image) = cache.resolve(&folder, &media.source, size, 2.0) else {
                     return;
                 };
                 if image.error().is_some() {
                     return;
                 }
+                root = Some(folder);
                 Some(image)
             }
             MediaKind::Diagram => {
@@ -484,8 +816,11 @@ impl WindowState {
                 None
             }
         };
-        let opener = format!("media-{}", media.block);
-        self.lightbox = Some(Lightbox::new(tab, doc, revision, media, image, opener));
+        let lightbox = Lightbox::new(tab, doc, revision, media, image, opener);
+        if let Some(root) = root {
+            lightbox.load_png(root, lightbox.media.source.clone(), self.window_waker());
+        }
+        self.lightbox = Some(lightbox);
         tx.focus(LIGHTBOX_VIEWPORT, false);
     }
 
@@ -498,6 +833,11 @@ impl WindowState {
     /// `Esc`. All other app shortcuts are swallowed while it is modal.
     pub(crate) fn lightbox_key(&mut self, event: &KeyEvent, _: &mut Tx) -> bool {
         if event.key == Key::Escape {
+            // V-08: Escape closes the copy menu first, then the preview.
+            if self.lightbox.as_ref().is_some_and(Lightbox::menu_open) {
+                self.close_lightbox_menu();
+                return true;
+            }
             self.close_lightbox();
             return true;
         }
@@ -570,9 +910,120 @@ impl WindowState {
         true
     }
 
+    /// Opens the copy/save menu (V-08).
+    pub(crate) fn open_lightbox_menu(&mut self) {
+        if let Some(lightbox) = self.lightbox.as_ref() {
+            lightbox.open_menu();
+        }
+    }
+
+    /// Closes the copy/save menu; the preview stays open and the copy button
+    /// takes focus back.
+    pub(crate) fn close_lightbox_menu(&mut self) {
+        if let Some(lightbox) = self.lightbox.as_ref() {
+            lightbox.close_menu();
+        }
+    }
+
+    /// **Copy as image** (2×) and **Copy as large image** (4×): one PNG of the
+    /// previewed picture on the clipboard (V-08/V-09).
+    ///
+    /// A raster is copied at its natural pixel size either way, as the original
+    /// does; `scale` is the vector rasterization factor the diagrams will use
+    /// once they can be rasterized. The bytes were read when the preview opened,
+    /// so this handler only writes the clipboard.
+    pub(crate) fn copy_lightbox_png(&mut self, _scale: u32, tx: &mut Tx) {
+        let Some(lightbox) = self.lightbox.as_ref() else { return };
+        match lightbox.png() {
+            PngState::Ready(bytes) => {
+                let Some(image) = ClipboardImage::from_png(bytes) else {
+                    self.notice(lmdv_i18n::t!("msg.imageUnavailable"));
+                    return;
+                };
+                tx.copy_rich(ClipboardContent::new("").with_image(image));
+                self.notice(lmdv_i18n::t!("msg.imageCopied"));
+            }
+            PngState::Loading => self.notice(lmdv_i18n::t!("msg.imagePreparing")),
+            PngState::Unavailable(reason) => self.notice(reason),
+        }
+    }
+
+    /// **Save as PNG…**: asks for a destination, then writes the picture on a
+    /// worker (V-08). The default name is the picture's stem plus `.png`; a
+    /// headless script saves into `LMDV_LIGHTBOX_DIR` without a dialog.
+    pub(crate) fn request_lightbox_save(&mut self, tx: &mut Tx) {
+        let Some(lightbox) = self.lightbox.as_ref() else { return };
+        let name = png_file_name(&lightbox.media);
+        if self.shared().is_headless()
+            && let Some(dir) = save_seam_dir()
+        {
+            self.start_lightbox_save(dir.join(name));
+            return;
+        }
+        let directory = self
+            .active_tab()
+            .and_then(|tab| tab.document().cloned())
+            .and_then(|document| document.key.borrow().path().and_then(Path::parent).map(Path::to_path_buf));
+        let options = FileDialogOptions {
+            title: lmdv_i18n::t!("zoom.savePng").to_owned(),
+            directory,
+            file_name: Some(name),
+            ..FileDialogOptions::default()
+        }
+        .filter(lmdv_i18n::t!("filter.png"), &["png"]);
+        tx.save_file(options, |state: &mut WindowState, result, _| match result {
+            Ok(Some(path)) => state.start_lightbox_save(path),
+            Ok(None) => {}
+            Err(error) => state.notice(lmdv_i18n::t!("msg.saveFailed", "err" => error)),
+        });
+    }
+
+    /// Writes the previewed picture's PNG bytes to `path` on a worker; the
+    /// result reaches `poll_lightbox` through the lightbox's save slot.
+    pub(crate) fn start_lightbox_save(&mut self, path: PathBuf) {
+        let Some(lightbox) = self.lightbox.as_ref() else { return };
+        let bytes = match lightbox.png() {
+            PngState::Ready(bytes) => bytes,
+            PngState::Loading => {
+                self.notice(lmdv_i18n::t!("msg.imagePreparing"));
+                return;
+            }
+            PngState::Unavailable(reason) => {
+                self.notice(reason);
+                return;
+            }
+        };
+        let outcome = Arc::new(Mutex::new(None));
+        let worker_outcome = outcome.clone();
+        let worker_path = path.clone();
+        let waker = self.window_waker();
+        let spawned = rune::task::spawn("lmdv-image-save", move || {
+            let result = write_png_atomically(&worker_path, &bytes);
+            if let Ok(mut slot) = worker_outcome.lock() {
+                *slot = Some(result);
+            }
+            waker();
+        });
+        let outcome = if spawned.is_ok() {
+            outcome
+        } else {
+            Arc::new(Mutex::new(Some(Err("the save worker could not start".to_owned()))))
+        };
+        lightbox.save.replace(Some(ImageSave { path, outcome }));
+    }
+
     /// Closes a preview whose tab, document, revision or picture no longer
-    /// matches; also called after an image decode fails.
+    /// matches; also called after an image decode fails. A finished Save as
+    /// PNG… is reported here, since it lands outside a handler.
     pub(crate) fn poll_lightbox(&mut self) -> bool {
+        let mut changed = false;
+        if let Some(result) = self.lightbox.as_ref().and_then(Lightbox::take_save_outcome) {
+            match result {
+                Ok(path) => self.notice(lmdv_i18n::t!("msg.imageSaved", "name" => path.display().to_string())),
+                Err(error) => self.notice(lmdv_i18n::t!("msg.saveFailed", "err" => error)),
+            }
+            changed = true;
+        }
         let stale = self.lightbox.as_ref().is_some_and(|lightbox| {
             self.active_tab().is_none_or(|tab| {
                 tab.id != lightbox.tab
@@ -582,12 +1033,17 @@ impl WindowState {
         });
         if stale {
             self.lightbox = None;
+            changed = true;
         }
-        stale
+        changed
     }
 }
 
 /// Wraps one drawn media element in the open handler and hover hint.
+///
+/// The hint is a child of the media itself, so it sits at the picture's or
+/// diagram's top-right corner rather than the article column's, and the pane's
+/// clip hides it as soon as that corner scrolls out (V-02).
 fn media_button(element: El, media: &MediaRef, tab: TabId, doc: DocumentId, revision: u64, kit: &Kit) -> El {
     let open_label = match media.kind {
         MediaKind::Image => {
@@ -602,26 +1058,9 @@ fn media_button(element: El, media: &MediaRef, tab: TabId, doc: DocumentId, revi
     };
     let key = format!("media-{}", media.block);
     let hint_key = format!("media-hint-{}", media.block);
-    let wrap_key = format!("media-box-{}", media.block);
     let press_media = media.clone();
     let key_media = media.clone();
     let hint_media = media.clone();
-    let main = element
-        .key(key)
-        .role("button")
-        .label(open_label)
-        .focusable(true)
-        .cursor(Cursor::Pointer)
-        .on_press_tx(move |state: &mut WindowState, tx: &mut Tx| {
-            state.open_media(tab, doc, revision, press_media.clone(), tx);
-        })
-        .on_key(move |state: &mut WindowState, event: &KeyEvent, tx: &mut Tx| {
-            let activate = event.key == Key::Enter || matches!(&event.key, Key::Text(value) if value == " ");
-            if activate {
-                state.open_media(tab, doc, revision, key_media.clone(), tx);
-            }
-            activate
-        });
     let hint = IconButton::new(&icons::EXPAND)
         .variant(IconButtonVariant::GhostMuted)
         .control_size(ControlSize::Small)
@@ -634,12 +1073,24 @@ fn media_button(element: El, media: &MediaRef, tab: TabId, doc: DocumentId, revi
         .key(hint_key)
         .focusable(false)
         .a11y_hidden();
-    col()
-        .key(wrap_key)
-        .items_start()
+    element
+        .key(key)
+        .role("button")
+        .label(open_label)
+        .focusable(true)
+        .cursor(Cursor::Pointer)
         .hover_group()
-        .child(main)
-        .child(hint.pin(None, Some(8.0), Some(8.0), None).group_opacity(0.0, 1.0))
+        .child(hint.pin(None, Some(6.0), Some(6.0), None).group_opacity(0.0, 1.0))
+        .on_press_tx(move |state: &mut WindowState, tx: &mut Tx| {
+            state.open_media(tab, doc, revision, press_media.clone(), tx);
+        })
+        .on_key(move |state: &mut WindowState, event: &KeyEvent, tx: &mut Tx| {
+            let activate = event.key == Key::Enter || matches!(&event.key, Key::Text(value) if value == " ");
+            if activate {
+                state.open_media(tab, doc, revision, key_media.clone(), tx);
+            }
+            activate
+        })
 }
 
 /// The preview's modal layer, over the whole window.
@@ -745,7 +1196,8 @@ pub(crate) fn overlay(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, 
         .on_press(|state: &mut WindowState| state.close_lightbox())
         .build(kit)
         .key(LIGHTBOX_CLOSE);
-    let title_bar = row()
+    let (copy, mut menu_layer) = copy_menu(lightbox, kit);
+    let mut title_bar = row()
         .key("lightbox-title")
         .pin(Some(16.0), Some(12.0), Some(16.0), None)
         .h(40.0)
@@ -769,8 +1221,11 @@ pub(crate) fn overlay(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, 
                 .font(kit.ty.small)
                 .color(kit.c.text_muted)
                 .truncate(),
-        )
-        .child(close);
+        );
+    if let Some(copy) = copy {
+        title_bar = title_bar.child(copy);
+    }
+    let title_bar = title_bar.child(close);
 
     let bar = zoom_bar(lightbox, kit);
     let bottom =
@@ -792,6 +1247,60 @@ pub(crate) fn overlay(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, 
         .child(title_bar)
         .child(bottom);
     layer.push(root);
+    // The menu mounts above the dialog: its scrim and surface sit after the
+    // preview, so the rows take the pointer and Escape before the preview does.
+    layer.append(&mut menu_layer);
+}
+
+/// The title bar's copy/save button and its menu (V-08).
+///
+/// A diagram is left without the menu until it can be rasterized: it has no
+/// PNG and its SVG needs a serializer (OI-140). A picture always gets the menu;
+/// its rows report the reason when the file is not a PNG.
+fn copy_menu(lightbox: &Lightbox, kit: &Kit) -> (Option<El>, Vec<El>) {
+    if lightbox.media.kind != MediaKind::Image {
+        return (None, Vec::new());
+    }
+    let button = IconButton::new(kit.glyph.copy)
+        .variant(IconButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .expanded(lightbox.menu_open())
+        .label(lmdv_i18n::t!("zoom.copy"))
+        .help(lmdv_i18n::t!("zoom.copy"))
+        .on_press_tx(|state: &mut WindowState, _: &mut Tx| state.open_lightbox_menu())
+        .build(kit)
+        .key(LIGHTBOX_COPY);
+    let mut menu = Menu::new(LIGHTBOX_MENU)
+        .trigger(button)
+        .open(lightbox.menu_open())
+        .min_width(280.0)
+        .placement(Placement::BottomEnd)
+        .on_close(|state: &mut WindowState| state.close_lightbox_menu());
+    menu = menu.item(
+        MenuItem::new(lmdv_i18n::t!("zoom.copyPng")).description(lmdv_i18n::t!("zoom.copyPngHint")).on_select_tx(
+            |state: &mut WindowState, tx: &mut Tx| {
+                state.close_lightbox_menu();
+                state.copy_lightbox_png(2, tx);
+            },
+        ),
+    );
+    menu = menu.item(
+        MenuItem::new(lmdv_i18n::t!("zoom.copyPng4")).description(lmdv_i18n::t!("zoom.copyPng4Hint")).on_select_tx(
+            |state: &mut WindowState, tx: &mut Tx| {
+                state.close_lightbox_menu();
+                state.copy_lightbox_png(4, tx);
+            },
+        ),
+    );
+    menu = menu.separator().item(MenuItem::new(lmdv_i18n::t!("zoom.savePng")).on_select_tx(
+        |state: &mut WindowState, tx: &mut Tx| {
+            state.close_lightbox_menu();
+            state.request_lightbox_save(tx);
+        },
+    ));
+    let mut layer = Vec::new();
+    let trigger = menu.build(kit, &mut layer);
+    (Some(trigger), layer)
 }
 
 /// `−`, the live level, `+`, then Fit / Width / 100%.
@@ -997,6 +1506,10 @@ flowchart LR
     B -->|error| D[Notice]
     C --> E[Preview]
 ```
+
+A picture written inside a sentence ![Inline landscape](./img/test.png) opens
+the same preview from the block's context menu while the renderer's click
+wiring is still a follow-up.
 "#;
 
 /// The preview's dim scrim.

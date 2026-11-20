@@ -83,6 +83,8 @@ struct Rep {
     uncopied: Vec<Range<usize>>,
     /// A link over the whole replacement.
     link: Option<String>,
+    /// The picture object's place in `Inline::objects`, for the preview link.
+    picture: Option<usize>,
     /// Filled while composing: the replacement's position in the drawn text.
     new_start: usize,
     new_end: usize,
@@ -94,6 +96,8 @@ struct Built {
     spans: Vec<Span>,
     strikes: Vec<Range<usize>>,
     links: Vec<(Range<usize>, String, Option<String>)>,
+    /// Pressable inline pictures: drawn bytes, `image:{block}:{object}`, alt.
+    picture_links: Vec<(Range<usize>, String, String)>,
     uncopied: Vec<Range<usize>>,
     /// Paint-only highlights in drawn bytes: the range, its kind and the index
     /// of the caller's [`crate::Highlight`] it came from.
@@ -120,6 +124,11 @@ impl<'a> Renderer<'a> {
                 link = link.help(title);
             }
             e = e.link(link);
+        }
+        // V-01 for a text-span picture: the picture itself is the preview button.
+        for (range, dest, label) in built.picture_links {
+            has_links = true;
+            e = e.link(Link::new(range, dest).role("button").label(label));
         }
         if !built.highlights.is_empty() {
             e = self.painted(e, built.highlights);
@@ -170,6 +179,7 @@ impl<'a> Renderer<'a> {
                 muted: false,
                 uncopied: Vec::new(),
                 link: None,
+                picture: None,
                 new_start: 0,
                 new_end: 0,
             };
@@ -205,7 +215,7 @@ impl<'a> Renderer<'a> {
             }
             reps.push(rep);
         }
-        for object in &inline.objects {
+        for (object_index, object) in inline.objects.iter().enumerate() {
             if matches!(object.kind, InlineObjectKind::LineBreak) {
                 continue; // text already holds its newline.
             }
@@ -220,6 +230,7 @@ impl<'a> Renderer<'a> {
                 muted: false,
                 uncopied: Vec::new(),
                 link: None,
+                picture: Some(object_index),
                 new_start: 0,
                 new_end: 0,
             };
@@ -377,11 +388,22 @@ impl<'a> Renderer<'a> {
         }
 
         let mut uncopied = Vec::new();
+        let mut picture_links: Vec<(Range<usize>, String, String)> = Vec::new();
+        let pictures_pressable = self.opts.wires.link.is_some();
+        let block_index = self.nested_block();
+        let block_key = self.doc.block_key(block_index).map(str::to_owned).unwrap_or_else(|| format!("b{block_index}"));
         for rep in &reps {
             if let Some(offset) = rep.placeholder {
                 let start = rep.new_start + offset;
                 if let Some(image) = &rep.image {
                     spans.push(Span::new(start, start + 3).image(image.clone()));
+                    if pictures_pressable && let Some(object) = rep.picture {
+                        picture_links.push((
+                            start..start + 3,
+                            format!("image:{block_key}:{object}"),
+                            image.label.as_deref().unwrap_or_default().to_owned(),
+                        ));
+                    }
                 } else {
                     uncopied.push(start..start + 3);
                 }
@@ -411,11 +433,12 @@ impl<'a> Renderer<'a> {
         spans.retain(|span| (span.start as usize) < (span.end as usize) && (span.end as usize) <= len);
         strikes.retain(|range| range.start < range.end && range.end <= len);
         links.retain(|(range, _, _)| range.start < range.end && range.end <= len);
+        picture_links.retain(|(range, _, _)| range.start < range.end && range.end <= len);
         uncopied.retain(|range| range.start <= range.end && range.end <= len);
         // Highlight work is skipped entirely unless the app asked for it.
         let highlights =
             if self.opts.highlights.is_empty() { Vec::new() } else { self.inline_highlights(inline, &reps, &text) };
-        Built { text, spans, strikes, links, uncopied, highlights }
+        Built { text, spans, strikes, links, picture_links, uncopied, highlights }
     }
 
     /// The source span a formula replaced: its delimiters and its TeX.

@@ -526,6 +526,20 @@ fn a_link_wire_is_invoked_for_each_linked_text() {
 }
 
 #[test]
+fn an_inline_picture_is_a_preview_link_when_the_link_wire_is_set() {
+    let calls = Rc::new(Cell::new(0));
+    let scene = Scene::new("Before ![Alt](./pic.png) after\n").links(calls).images();
+    let tree = scene.render();
+    let link = tree
+        .elements
+        .iter()
+        .find(|element| element.key.as_deref().is_some_and(|key| key.starts_with("image:")))
+        .expect("the drawn picture is a preview link");
+    assert_eq!(link.key.as_deref(), Some("image:b0:0"), "block key and object index");
+    assert_eq!(link.label.as_deref(), Some("Alt"), "the link is named by the alt text");
+}
+
+#[test]
 fn an_open_html_details_card_shows_its_body() {
     let scene = Scene::new("<details><summary>More</summary>Hidden body</details>\n").details(true);
     let tree = scene.render();
@@ -1334,7 +1348,9 @@ fn the_media_wire_sees_images_and_diagrams_and_changes_no_tree() {
     assert_eq!(diagram.index, 1);
     assert!(diagram.source.contains("flowchart LR"), "the diagram carries its Mermaid source");
     assert_eq!(diagram.alt, "");
-    assert!(diagram.width > 0.0 && diagram.height > 0.0, "the drawing is measured: {diagram:?}");
+    // OI-140: the app re-measures at the window width when the preview opens,
+    // so the renderer does not lay the diagram out a second time.
+    assert_eq!((diagram.width, diagram.height), (0.0, 0.0), "no second layout: {diagram:?}");
     assert_eq!((diagram.line, diagram.end_line), (2, 6));
 
     let marker: MediaWire = Rc::new(|element, _| rune::col().key("media-chrome").child(element));

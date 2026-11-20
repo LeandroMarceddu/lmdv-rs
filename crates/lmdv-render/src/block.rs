@@ -414,10 +414,9 @@ impl<'a> Renderer<'a> {
                 // the article draws stays exactly `rune_kit`'s, so a wire that
                 // returns its element leaves the tree unchanged.
                 let Some(wire) = &self.opts.wires.media else { return holder };
-                let Some(drawing) = rune_kit::mermaid::drawing(source, self.opts.style, self.opts.width) else {
-                    return holder;
-                };
-                let reference = self.media_ref(MediaKind::Diagram, source, "", drawing.size[0], drawing.size[1]);
+                // The app re-measures at the window's width when the preview
+                // opens; measuring here too laid the diagram out twice.
+                let reference = self.media_ref(MediaKind::Diagram, source, "", 0.0, 0.0);
                 wire(holder, &reference)
             }
             None => holder.child(

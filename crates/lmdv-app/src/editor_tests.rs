@@ -493,6 +493,67 @@ fn a_dirty_document_another_window_still_shows_closes_this_view_without_a_questi
     assert_eq!(doc.lease_holder(), None, "the closed view released its lease");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_deleted_file_behind_a_symlink_offers_its_canonical_draft() {
+    let temp = TempDir::new().unwrap();
+    let folder = temp.path().join("real");
+    std::fs::create_dir(&folder).unwrap();
+    let real = folder.join("note.md");
+    std::fs::write(&real, "disk\n").unwrap();
+    let alias = temp.path().join("alias.md");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let dirs = test_support::dirs(&temp);
+    let canonical = std::fs::canonicalize(&real).unwrap();
+
+    {
+        let shared = crate::shared::AppShared::start(dirs.clone());
+        let mut state = WindowState::new(shared.clone());
+        // Opening the link makes the canonical path the document's key; the
+        // draft is therefore stored under the canonical spelling.
+        open_loaded(&mut state, &alias);
+        let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+        assert_eq!(*doc.key.borrow(), lmdv_core::DocumentKey::File(canonical.clone()));
+        enter_editor(&mut state);
+        type_text(&mut state, "draft ");
+        state.flush_active_draft();
+        flush_store(&state);
+    }
+    assert!(
+        lmdv_io::store::load_draft(&dirs, &canonical.to_string_lossy()).is_some(),
+        "the draft lives under the canonical key"
+    );
+
+    // The target is deleted: the link stays but no longer resolves, and a new
+    // open can only spell the lexical path. Resolving it needs I/O, so the
+    // draft job does it (OI-171).
+    std::fs::remove_file(&real).unwrap();
+    assert!(std::fs::canonicalize(&alias).is_err(), "the link is broken");
+
+    let shared = crate::shared::AppShared::start(dirs.clone());
+    let mut state = WindowState::new(shared);
+    state.open_path(alias.clone());
+    poll_until(&mut state, "the broken link's draft offer", |state| {
+        matches!(state.prompt(), Some(Prompt::Draft { .. }))
+    });
+    let offered = match state.prompt() {
+        Some(Prompt::Draft { draft, .. }) => draft.text.clone(),
+        _ => unreachable!(),
+    };
+    assert_eq!(offered, "draft disk\n", "the canonical draft was found through the lexical spelling");
+
+    let mut tx = Tx::default();
+    state.prompt_primary(&mut tx);
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    assert_eq!(doc.text().text(), "draft disk\n");
+    assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor));
+    assert_eq!(
+        lmdv_io::store::load_draft(&dirs, &canonical.to_string_lossy()),
+        None,
+        "the draft moved to the key this document will save and discard under"
+    );
+}
+
 #[test]
 fn closing_one_view_of_a_shared_dirty_document_keeps_its_draft() {
     let temp = TempDir::new().unwrap();
@@ -1392,6 +1453,78 @@ fn save_as_releases_a_clean_file_open_in_another_window() {
     assert!(shared.docs().get(existing).is_none(), "the released document left the registry");
     assert_eq!(shared.docs().len(), 1, "one document for the file");
     assert_eq!(shared.docs().find_path(&written).map(|doc| doc.id), Some(pasted.id));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_other_windows_editor_follows_an_adopted_disk_read() {
+    let temp = TempDir::new().unwrap();
+    let real = temp.path().join("real.md");
+    std::fs::write(&real, "old\n").unwrap();
+    let alias = temp.path().join("alias.md");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let (_shared, mut first, mut second) = two_windows(&temp);
+    open_loaded(&mut first, &real);
+    let doc = first.active_tab().and_then(Tab::document).cloned().expect("document");
+    enter_editor(&mut first);
+    let second_tab = second.attach_document(doc.clone());
+    poll_once(&mut second);
+
+    // Another editor replaces the file while the first window holds a clean
+    // edit session; the alias load is the fresher read (OI-172).
+    let staged = temp.path().join("staged.md");
+    std::fs::write(&staged, "new text\n").unwrap();
+    std::fs::rename(&staged, &real).unwrap();
+    second.open_path(alias);
+    poll_until(&mut second, "the second window's merge", |state| state.active_document_id() == Some(doc.id));
+
+    // The merge happened in the second window; the first learns from the
+    // broadcast and its editor field follows the adopted text.
+    poll_until(&mut first, "the first window's refresh", |state| {
+        state.tabs.iter().any(|tab| tab.view.editor.as_ref().is_some_and(|editor| editor.text() == "new text\n"))
+    });
+    let editor_tab = first.active_tab().expect("the editor tab");
+    assert_eq!(editor_tab.document_id(), Some(doc.id));
+    assert!(!editor_tab.view.dirty, "the adopted text is the saved base");
+    assert_eq!(doc.text().text(), "new text\n");
+    assert_eq!(second.active_document_id(), Some(doc.id));
+    assert!(second.tab(second_tab).is_some(), "the second window keeps its view");
+}
+
+#[test]
+fn save_as_moves_the_other_windows_places_and_titles() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("shared.md");
+    std::fs::write(&path, "text\n").unwrap();
+    let (_shared, mut first, mut second) = two_windows(&temp);
+    open_loaded(&mut first, &path);
+    let doc = first.active_tab().and_then(Tab::document).cloned().expect("document");
+    let second_tab = second.attach_document(doc.clone());
+    let old_key = doc.key.borrow().path().map(|path| path.to_string_lossy().into_owned()).expect("a file key");
+    if let Some(tab) = second.tabs.iter_mut().find(|tab| tab.id == second_tab) {
+        tab.view.nav.record(lmdv_core::Place::new(old_key.clone(), ScrollAnchor::default()));
+    }
+    poll_once(&mut first);
+    poll_once(&mut second);
+
+    let chosen = temp.path().join("renamed.md");
+    first.save_as_chosen(doc.id, chosen.clone(), crate::editor::AfterSave::Dismiss);
+    wait_for_save_as(&mut first);
+    let written = std::fs::canonicalize(&chosen).unwrap();
+    let written_key = written.to_string_lossy().into_owned();
+    assert_eq!(*doc.key.borrow(), lmdv_core::DocumentKey::File(written.clone()));
+
+    // OI-173: the saving window already renamed its own places; the other
+    // window follows the broadcast on its next poll.
+    poll_once(&mut second);
+    let tab = second.tab(second_tab).expect("the second view stays");
+    assert_eq!(
+        tab.view.nav.back.first().map(|place| place.path.as_str()),
+        Some(written_key.as_str()),
+        "the Back place follows the save-as rename"
+    );
+    assert_eq!(tab.full_title(), "renamed.md", "the strip title follows too");
+    assert_eq!(tab.tooltip(), written.to_string_lossy(), "and the tooltip names the new file");
 }
 
 #[test]
