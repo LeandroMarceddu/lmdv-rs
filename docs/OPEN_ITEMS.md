@@ -82,7 +82,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-064 | P3-01 editor | Typing/block-mode performance not measured (SP-03) | P7-B `typing_bench`: 64 KiB single-field p95 0.031 ms; 1 MiB block p95 0.166 ms; undo depth finding; 64 KiB threshold kept | P7 | fixed |
 
 | OI-065 | P5-01 export | HTML export drops video/audio `<track>` subtitles | Same gap as OI-046; revisit with a media backend | P5/P6 | accepted-gap |
-| OI-066 | P5-01 export | HTML, DOCX and PDF export math is a 2× PNG with TeX in `alt`/`descr`/PDF `/Alt`; no MathML (rich copy, X-02) or OMML (DOCX, X-08) | Add MathML to the HTML/rich-copy serializer and OMML to DOCX; PNG is the fallback | P5-04/P6 | open |
+| OI-066 | P5-01 export | HTML, DOCX and PDF export math is a 2× PNG with TeX in `alt`/`descr`/PDF `/Alt`; no MathML | **Accepted substitute (user, 2026-11-13):** formulas stay 2× PNG with the TeX alt text. MathML for rich copy, DOCX OMML and searchable/selectable math remain gaps; revisit only with a math serializer that adds real value. | P5 | accepted-gap |
 | OI-067 | P5-01 export | Callout default titles, TOC label and footnote labels are English; no catalog keys | P6-01b added 10 keys to all six catalogs; reader and HTML/DOCX/PDF use them | P6 | fixed |
 | OI-068 | P5-01 export | Export performance is not benchmarked; a large document re-renders every formula and picture into the asset table | Ignored `share_tests::large_export_benchmark` on a 140 KB, 800-section, 50-formula document: HTML 302 ms / 699 KB, DOCX 359 ms / 391 KB, PDF 4.81 s / 1.87 MB (debug, cold fonts). Ceilings are generous so only a regression fails; run it with `--ignored --nocapture`. | P7 | fixed |
 | OI-069 | P5-01 export | The app has no Share menu, export job or `lmdv-export` dependency yet | P5-04a wired the Share menu, HTML/DOCX/PDF jobs, save dialogs, flash/notices and Print | P5 | fixed |
@@ -256,9 +256,9 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above.
 
-- **Open (53):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 066, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 141, 153, 155, 161, 163, 165, 166, 174, 175, 176, 181, 182, 183
+- **Open (52):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 141, 153, 155, 161, 163, 165, 166, 174, 175, 176, 181, 182, 183
 - **Scheduled (4):** OI-003, 023, 027, 050
-- **Accepted (25):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 070, 072, 107, 108, 131, 133, 134, 136, 139, 150, 154, 157, 177, 179
+- **Accepted (26):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 150, 154, 157, 177, 179
 - **Fixed (101):** kept for history.
 
 P3, P4 (with substitutes) and P5 are closed; P6 polish and P7 audit remain. Accepted gaps are re-checked at the next gate.
