@@ -1,13 +1,19 @@
-//! The OOXML package: a deterministic, uncompressed ZIP container and the
-//! fixed parts that do not depend on the document ([`[Content_Types].xml`],
-//! the package relationships, Word settings and the extended properties).
+//! The OOXML package: a deterministic ZIP container and the fixed parts that
+//! do not depend on the document ([`[Content_Types].xml`], the package
+//! relationships, Word settings and the extended properties).
 //!
 //! The archive is written by hand instead of through a zip crate so that the
-//! bytes depend only on the document: every entry is stored (method 0) and
-//! carries the fixed 1980-01-01 DOS timestamp, and the entry order is the
-//! order of [`zip`]. A stored entry is legal OPC (the package format even
-//! recommends storing some parts) and needs no compression library, so an
-//! in-memory package cannot fail to write.
+//! bytes depend only on the document: every entry carries the fixed 1980-01-01
+//! DOS timestamp and the entry order is the order of [`zip`]. XML parts are
+//! deflated with a fixed compression level; pictures stay stored because they
+//! are already compressed. Deflating can only make an entry fail to shrink, in
+//! which case it is stored, so an in-memory package cannot fail to write.
+//!
+//! OI-079: this replaced the initial stored-only archive; the package is valid
+//! OPC either way, but the XML parts deflate by 60–90% in a typical document.
+
+use std::borrow::Cow;
+use std::io::Write as _;
 
 /// One part of the package.
 pub(crate) struct Part {
@@ -28,53 +34,63 @@ impl Part {
 const DOS_TIME: u16 = 0;
 /// The DOS date field: 1980-01-01, the earliest representable zip date.
 const DOS_DATE: u16 = 0x0021;
-/// The zip "version needed" / "version made by" value for stored entries.
+/// The zip "version needed" / "version made by" value for stored and deflated
+/// entries (both are ZIP 2.0).
 const VERSION: u16 = 20;
 /// The general-purpose flag: file names are UTF-8.
 const UTF8_FLAG: u16 = 0x0800;
 /// The stored compression method.
 const STORED: u16 = 0;
+/// The deflate compression method.
+const DEFLATED: u16 = 8;
+/// The fixed deflate level. It is part of the byte-for-byte output contract.
+const DEFLATE_LEVEL: u32 = 6;
 const LOCAL_HEADER: u32 = 0x0403_4b50;
 const CENTRAL_HEADER: u32 = 0x0201_4b50;
 const END_OF_CENTRAL: u32 = 0x0605_4b50;
 
-/// Writes `parts` as one deterministic stored-only ZIP archive.
+/// Writes `parts` as one deterministic ZIP archive.
 ///
-/// The package is bounded by the 4 GiB ZIP32 limit; a larger archive cannot be
-/// produced by the exporter, so sizes and offsets are clamped instead of
-/// panicking in the unreachable case.
+/// XML and relationship parts are deflated; media bytes are stored. A part
+/// whose deflated form is not smaller is stored too, so the method never
+/// changes the content. The package is bounded by the 4 GiB ZIP32 limit; a
+/// larger archive cannot be produced by the exporter, so sizes and offsets are
+/// clamped instead of panicking in the unreachable case.
 pub(crate) fn zip(parts: &[Part]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for part in parts {
         let name = part.name.as_bytes();
         let crc = crc32(&part.bytes);
+        let data = compressed(&part.name, &part.bytes);
+        let method = if matches!(data, Cow::Owned(_)) { DEFLATED } else { STORED };
         let size = clamp_u32(part.bytes.len());
+        let packed = clamp_u32(data.len());
         let offset = clamp_u32(out.len());
 
         push_u32(&mut out, LOCAL_HEADER);
         push_u16(&mut out, VERSION);
         push_u16(&mut out, UTF8_FLAG);
-        push_u16(&mut out, STORED);
+        push_u16(&mut out, method);
         push_u16(&mut out, DOS_TIME);
         push_u16(&mut out, DOS_DATE);
         push_u32(&mut out, crc);
-        push_u32(&mut out, size);
+        push_u32(&mut out, packed);
         push_u32(&mut out, size);
         push_u16(&mut out, clamp_u16(name.len()));
         push_u16(&mut out, 0);
         out.extend_from_slice(name);
-        out.extend_from_slice(&part.bytes);
+        out.extend_from_slice(&data);
 
         push_u32(&mut central, CENTRAL_HEADER);
         push_u16(&mut central, VERSION);
         push_u16(&mut central, VERSION);
         push_u16(&mut central, UTF8_FLAG);
-        push_u16(&mut central, STORED);
+        push_u16(&mut central, method);
         push_u16(&mut central, DOS_TIME);
         push_u16(&mut central, DOS_DATE);
         push_u32(&mut central, crc);
-        push_u32(&mut central, size);
+        push_u32(&mut central, packed);
         push_u32(&mut central, size);
         push_u16(&mut central, clamp_u16(name.len()));
         push_u16(&mut central, 0);
@@ -114,6 +130,27 @@ fn clamp_u16(value: usize) -> u16 {
 
 fn clamp_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// The bytes an entry stores: a deflated XML/relationship part when that is
+/// smaller, else the part unchanged.
+fn compressed<'a>(name: &str, bytes: &'a [u8]) -> Cow<'a, [u8]> {
+    let text_part = name.ends_with(".xml") || name.ends_with(".rels");
+    if !text_part || bytes.is_empty() {
+        return Cow::Borrowed(bytes);
+    }
+    match deflate(bytes) {
+        Some(packed) if packed.len() < bytes.len() => Cow::Owned(packed),
+        _ => Cow::Borrowed(bytes),
+    }
+}
+
+/// A raw deflate stream at [`DEFLATE_LEVEL`]. `None` when the encoder fails;
+/// the entry is then stored, so a package is still written.
+fn deflate(bytes: &[u8]) -> Option<Vec<u8>> {
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(DEFLATE_LEVEL));
+    encoder.write_all(bytes).ok()?;
+    encoder.finish().ok()
 }
 
 /// The standard CRC-32 used by ZIP (IEEE 802.3, reflected, polynomial
@@ -177,18 +214,23 @@ pub(crate) fn root_rels() -> String {
         .to_owned()
 }
 
-/// `word/settings.xml`: default tab stop, compatibility mode and zoom.
-pub(crate) fn settings() -> String {
-    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
-     <w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n\
-     <w:zoom w:percent=\"100\"/>\n\
-     <w:defaultTabStop w:val=\"720\"/>\n\
-     <w:characterSpacingControl w:val=\"doNotCompress\"/>\n\
-     <w:compat>\n\
-     <w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"15\"/>\n\
-     </w:compat>\n\
-     </w:settings>\n"
-        .to_owned()
+/// `word/settings.xml`: default tab stop, compatibility mode, zoom and, when
+/// the body has a table-of-contents field, the open-time field update that
+/// turns its cached entries into a page-numbered TOC.
+pub(crate) fn settings(update_fields: bool) -> String {
+    let update = if update_fields { "<w:updateFields w:val=\"true\"/>\n" } else { "" };
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <w:settings xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\n\
+         <w:zoom w:percent=\"100\"/>\n\
+         <w:defaultTabStop w:val=\"720\"/>\n\
+         <w:characterSpacingControl w:val=\"doNotCompress\"/>\n\
+         {update}\
+         <w:compat>\n\
+         <w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"15\"/>\n\
+         </w:compat>\n\
+         </w:settings>\n"
+    )
 }
 
 /// `docProps/app.xml`: the application name, no links or security flags.

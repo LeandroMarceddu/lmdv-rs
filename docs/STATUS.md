@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch and P6 batch 5 (reader highlights/tables, pane behaviors, palette, draft diagnostics) are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0/v0.5.5 releases are complete. Remaining: OI-104 (PDF papercuts, held), OI-165 (help links, blocked), panes/export extras and the P7 audit. P0–P5 and P6-01 complete.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5 (reader highlights/tables, panes, palette, drafts), the lightbox/tab-menu/overflow batches and the P5 export extras are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0/v0.5.5 releases are complete. Remaining: OI-104 (PDF papercuts, held), OI-165 (help links, blocked), panes/export extras and the P7 audit. P0–P5 and P6-01 complete.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -417,15 +417,24 @@
 - OI-169/170: draft diagnostics and protection in `lmdv-io` plus the app wiring; portable roots are checked for write access before selection.
 - Four Rune patches; 617 i18n keys; full gate and patch proof tests green. New follow-ups: OI-178 (inotify overflow), OI-179 (pane grip arrows, accepted substitute).
 
-## Next up
+## P5 extras — DOCX and PDF — complete
 
-P6 wave 2 is queued.
+- OI-076: SVG assets (including Mermaid scene SVGs) rasterize to PNG during DOCX media registration with resvg/usvg — 2× intrinsic size, 4096 px cap, bundled fonts, file/URL references refused. AVIF still falls back to alt text (OI-183: no decoder in the tree).
+- OI-078: a real Word `TOC` field with a dirty begin, hyperlinked cached entries and `w:updateFields`, plus `TOCHeading`/`TOC1`–`TOC6` styles. The cached result has no page numbers; Word computes them on update.
+- OI-079: XML and `.rels` deflate at level 6; `test-features.docx` 95,541 → 52,617 bytes and `commonmark-math.docx` 118,800 → 68,429, still byte-identical across processes.
+- OI-080: quoted lists use `QuoteListParagraph` with the muted run colour.
+- OI-088: PDF/UA-1 validated by Typst, localized title fallback and alt text for images/formulas; short code and tables keep together with a page-boundary regression, long tokens keep U+200B. Long blocks still split (inherent), and CI has no veraPDF.
+- OI-103/105/068 (app): exports flush and parse the exact snapshot; the exporting tab is pinned against switch/reorder/close/transfer; an ignored large-document benchmark records HTML 302 ms / DOCX 359 ms / PDF 4.81 s on a 140 KB document.
+- Dependencies: `resvg` and `flate2` were already compiled in the Typst graph; no new package entered `Cargo.lock`.
+- Full gate green after the batch. Open export items: OI-104 (held), OI-106 (needs the rune-mermaid serializer, OI-181), OI-183 (AVIF decoder).
+
+## Next up
 
 **Next when work resumes:**
 
-1. P6 wave 2: lightbox (OI-140), 8 px rule/menu (OI-151), SAFE app follow-ups (OI-171–173), spellcheck suggestions (OI-174), then the decisions OI-141/161/163/166/175.
-2. P5 extras: MathML/OMML, DOCX TOC field/compression/SVG, PDF page splits, Mermaid raster, export benchmark; OI-104 stays held.
-3. P7 audit and packaging hardening (OI-153, OI-155).
+1. The six P6 substitute decisions (OI-141/161/163/166/174/175) await the user's answer; OI-165 (links), OI-181/182 (serializer, pinch/inline hint) stay open.
+2. P7 audit and packaging hardening: OI-153 (LICENSE, rDNS id, installer icon, signing), OI-155 (Windows runtime), then the 342-row parity audit.
+3. OI-104 and OI-106 when unheld/unblocked.
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

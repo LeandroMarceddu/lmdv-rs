@@ -12,8 +12,15 @@ lmdv-i18n = { path = "../lmdv-i18n" }
 # Presentation-only syntax tokenizer (no Rune runtime, renderer or webview).
 rune-highlights = { path = "../../vendor/rune/crates/rune-highlights" }
 base64 = "0.22"
+# OI-079: deflate the XML parts of the DOCX package. Pure Rust (miniz_oxide)
+# and already compiled for the PDF pipeline through krilla-svg.
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
 percent-encoding = "2"
+# OI-076: rasterize SVG pictures for DOCX, which has no SVG `a:blip` without a
+# PNG fallback. Already compiled for the PDF pipeline through krilla-svg; text
+# uses the bundled faces below, never the system font database.
+resvg = { version = "0.47", default-features = false, features = ["text", "raster-images"] }
 thiserror = "2"
 # PDF export: a real typesetter with a page model (ADR-015, SP-02). No network
 # at runtime; fonts and files come from the caller through a World.
@@ -27,4 +34,6 @@ typst-assets = { version = "0.15.1", features = ["fonts"] }
 [dev-dependencies]
 # Reading the generated DOCX package and parsing its XML in the tests.
 roxmltree = "0.21"
-zip = { version = "2.4", default-features = false }
+# The independent reader needs deflate support; the implicit `flate2` feature
+# enables zip's optional decoder without pulling a second backend (OI-079).
+zip = { version = "2.4", default-features = false, features = ["deflate-flate2", "flate2"] }

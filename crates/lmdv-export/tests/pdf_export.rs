@@ -85,6 +85,16 @@ fn pdfinfo(path: &Path) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// The XMP metadata packet `pdfinfo -meta` prints (PDF/UA identification).
+fn pdf_metadata(path: &Path) -> Option<String> {
+    if !have("pdfinfo") {
+        return None;
+    }
+    let output = Command::new("pdfinfo").arg("-meta").arg(path).output().expect("pdfinfo runs");
+    assert!(output.status.success(), "pdfinfo -meta failed: {}", String::from_utf8_lossy(&output.stderr));
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 fn page_count(path: &Path) -> Option<usize> {
     let info = pdfinfo(path)?;
     info.lines().find_map(|line| line.strip_prefix("Pages:")).and_then(|value| value.trim().parse().ok())
@@ -204,6 +214,115 @@ fn test_features_pdf_is_a4_with_header_footer_and_article_text() {
     if let Some(qdf) = qdf(&path) {
         assert!(qdf.contains("/S /URI"), "external links should be PDF link annotations");
         assert!(qdf.contains("/URI (https://www.anthropic.com)"), "the external link destination is missing");
+    }
+}
+
+#[test]
+fn the_pdf_declares_pdf_ua_conformance() {
+    let bytes = pdf("# Accessible\n\nThe body text.\n", &PdfOptions::default());
+    let path = write_temp("lmdv-oi088-pdf-ua.pdf", &bytes);
+    assert_valid_pdf(&bytes, &path);
+
+    if let Some(info) = pdfinfo(&path) {
+        let tagged =
+            info.lines().find(|line| line.starts_with("Tagged:")).is_some_and(|line| line.trim_end().ends_with("yes"));
+        assert!(tagged, "the PDF is not tagged:\n{info}");
+        assert!(info.lines().any(|line| line.starts_with("Title:") && line["Title:".len()..].trim() != ""), "{info}");
+    }
+    if let Some(metadata) = pdf_metadata(&path) {
+        assert!(metadata.contains("pdfuaid:part>1"), "missing PDF/UA identification:\n{metadata}");
+        assert!(metadata.contains("<dc:language>"), "missing the document language:\n{metadata}");
+    }
+    if let Some(qdf) = qdf(&path) {
+        assert!(
+            qdf.contains("/Lang (en)") || qdf.contains("/Lang(en)"),
+            "missing the document language in the PDF catalog"
+        );
+        for marker in ["/MarkInfo", "/StructTreeRoot", "/DisplayDocTitle"] {
+            assert!(qdf.contains(marker), "missing {marker} in the PDF structure");
+        }
+    }
+}
+
+#[test]
+fn an_untitled_document_still_has_a_metadata_title() {
+    let bytes = export_pdf(&ExportDoc::default(), &PdfOptions::default()).expect("an empty document prints");
+    let path = write_temp("lmdv-oi088-untitled.pdf", &bytes);
+    assert_valid_pdf(&bytes, &path);
+    if let Some(info) = pdfinfo(&path) {
+        // PDF/UA requires a title; the localized “Untitled” label stands in.
+        assert!(
+            info.lines().any(|line| line.starts_with("Title:") && line["Title:".len()..].trim() == "Untitled"),
+            "{info}"
+        );
+    }
+}
+
+#[test]
+fn a_picture_without_alt_text_still_exports_a_pdf_ua_document() {
+    let markdown = "![](./no-alt.png)\n\nInline ![](./inline.png) too.\n";
+    let bytes = pdf_with(markdown, &ExportOptions::default(), &PdfOptions::default(), &TestAssets::with_png());
+    let path = write_temp("lmdv-oi088-empty-alt.pdf", &bytes);
+    assert_valid_pdf(&bytes, &path);
+    if let Some(metadata) = pdf_metadata(&path) {
+        assert!(metadata.contains("pdfuaid:part>1"), "the PDF is not PDF/UA:\n{metadata}");
+    }
+}
+
+/// A resolver that serves one SVG picture, for the vector-picture path.
+struct SvgAssets;
+
+impl AssetResolver for SvgAssets {
+    fn image(&self, _src: &str, _alt: &str) -> Option<ExportedAsset> {
+        let svg = r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="24">
+            <rect width="48" height="24" fill="#0969da"/></svg>"##;
+        Some(ExportedAsset::new("image/svg+xml", svg.as_bytes().to_vec()))
+    }
+
+    fn diagram(&self, _source: &str) -> Option<ExportedAsset> {
+        self.image("", "")
+    }
+}
+
+#[test]
+fn an_svg_picture_is_an_image_in_a_pdf_ua_document() {
+    let bytes = pdf_with("![A blue box](./art.svg)\n", &ExportOptions::default(), &PdfOptions::default(), &SvgAssets);
+    let path = write_temp("lmdv-oi088-svg.pdf", &bytes);
+    assert_valid_pdf(&bytes, &path);
+    if let Some(metadata) = pdf_metadata(&path) {
+        assert!(metadata.contains("pdfuaid:part>1"), "the PDF is not PDF/UA:\n{metadata}");
+    }
+}
+
+#[test]
+fn short_code_blocks_and_tables_are_not_split_across_pages() {
+    let code: String = (1..=8).map(|line| format!("code{line:02}\n")).collect();
+    let table = "| HeadA | HeadB |\n|---|---|\n| RowA | RowB |\n| RowC | RowD |\n";
+    for paragraphs in [28, 29, 30, 33, 34, 35, 36] {
+        let filler: String = (1..=paragraphs)
+            .map(|index| format!("Filler paragraph {index} has enough words to take up some room on the page."))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let markdown = format!("{filler}\n\n```text\n{code}```\n\n{table}");
+        let bytes = pdf(&markdown, &PdfOptions::default());
+        let path = write_temp(&format!("lmdv-oi088-keep-{paragraphs}.pdf"), &bytes);
+        assert_valid_pdf(&bytes, &path);
+        let Some(pages) = bbox_pages(&path) else { return };
+        let page_of = |text: &str| {
+            pages
+                .iter()
+                .position(|page| page.iter().any(|word| word.text == text))
+                .unwrap_or_else(|| panic!("{text} is missing from the PDF"))
+        };
+        let code_page = page_of("code01");
+        for line in 2..=8 {
+            assert_eq!(
+                page_of(&format!("code{line:02}")),
+                code_page,
+                "the code block split after {paragraphs} paragraphs"
+            );
+        }
+        assert_eq!(page_of("HeadA"), page_of("RowD"), "the table split across pages after {paragraphs} paragraphs");
     }
 }
 

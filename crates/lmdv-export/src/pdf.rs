@@ -2,10 +2,20 @@
 //!
 //! The same [`ExportDoc`] the HTML and DOCX writers consume is turned into a
 //! Typst source document and compiled in-process; the output is a tagged,
-//! font-subset A4 PDF with a page model, running header/footer, repeated table
-//! headers, real page breaks and embedded PNG formulas. A table wider than the
-//! paper is measured at layout time and scaled down like the print stylesheet's
-//! CSS zoom, with the original 0.3 floor and a break-anywhere fallback (X-12).
+//! PDF/UA-1, font-subset A4 PDF with a page model, running header/footer,
+//! repeated table headers, real page breaks and embedded PNG formulas. A table
+//! wider than the paper is measured at layout time and scaled down like the
+//! print stylesheet's CSS zoom, with the original 0.3 floor and a break-anywhere
+//! fallback (X-12). Short code blocks and short tables are kept together on one
+//! page; longer ones may split at a line or row boundary (OI-088).
+//!
+//! PDF/UA-1 conformance is declared through Typst's standards option: the
+//! document carries a language, a title (the localized “Untitled” fallback when
+//! the model has none), a structure tree with tags, alt text on every picture
+//! and formula, and the `pdfuaid:part` XMP entry. Typst validates the document
+//! while writing, so a structure regression fails the export instead of
+//! producing an untagged file.
+//!
 //! No webview, no external binary, no network.
 //!
 //! Raw HTML from the allowed subset keeps its structure: tables (with
@@ -74,6 +84,9 @@ const FALLBACK_BODY: &str = "Libertinus Serif";
 const FALLBACK_CODE: &str = "DejaVu Sans Mono";
 /// The Typst string used for the table zebra stripe.
 const WHITE: &str = "#ffffff";
+/// The localized title of a document the model left untitled. PDF/UA requires
+/// a non-empty document title.
+const UNTITLED: lmdv_i18n::Key = lmdv_i18n::key("tab.untitled");
 
 /// Page geometry in millimetres.
 ///
@@ -232,12 +245,19 @@ pub fn export_pdf(doc: &ExportDoc, opts: &PdfOptions) -> Result<Vec<u8>, ExportE
         ExportError::Pdf(format!("the typesetter rejected the document: {}", diagnostics(&errors)))
     })?;
 
+    // OI-088: declare PDF/UA-1 conformance. The structure tree, language, title
+    // and image descriptions are already written; `standards` makes Typst
+    // validate them and emit the matching XMP metadata. The document title is
+    // required by PDF/UA, so an untitled hand-built model falls back to the
+    // localized “Untitled” label before typesetting.
+    let standards = typst_pdf::PdfStandards::new(&[typst_pdf::PdfStandard::Ua_1])
+        .map_err(|error| ExportError::Pdf(format!("PDF/UA cannot be requested: {}", error.message())))?;
     let pdf_options = typst_pdf::PdfOptions {
         ident: Smart::Auto,
         creator: Smart::Custom(Some("lmdv".to_owned())),
         timestamp: None,
         page_ranges: None,
-        standards: typst_pdf::PdfStandards::default(),
+        standards,
         tagged: true,
         pretty: false,
     };
@@ -504,11 +524,17 @@ impl Writer<'_> {
         let lang = language(&self.doc.lang);
 
         let header = header_text(self.doc, self.opts);
+        let title = if self.doc.title.trim().is_empty() {
+            let locale = lmdv_i18n::negotiate(std::iter::once(self.doc.lang.as_str()));
+            lmdv_i18n::text_in(locale, UNTITLED).to_owned()
+        } else {
+            self.doc.title.clone()
+        };
         let _ = writeln!(
             self.out,
             "#let lmdv-footer = context align(center, text(size: 8pt, fill: rgb(\"{MUTED}\"), counter(page).display(\"1 / 1\", both: true)))"
         );
-        let _ = writeln!(self.out, "#set document(title: {}, date: none)", string(&self.doc.title));
+        let _ = writeln!(self.out, "#set document(title: {}, date: none)", string(&title));
         let _ = write!(
             self.out,
             "#set page(paper: \"a4\", width: {}mm, height: {}mm, margin: (top: {}mm, right: {}mm, bottom: {}mm, left: {}mm), footer: lmdv-footer",
@@ -646,6 +672,9 @@ impl Writer<'_> {
                 if text.is_empty() {
                     return;
                 }
+                // A short block is kept on one page; a long one may split so a
+                // listing taller than the paper still prints (OI-088).
+                let keep = if short_code(text) { ", breakable: false" } else { "" };
                 let text = soft_wrap_code(text);
                 let raw = match lang.as_deref().filter(|lang| !lang.is_empty()) {
                     Some(lang) => format!("raw({}, block: true, lang: {})", string(&text), string(lang)),
@@ -653,7 +682,7 @@ impl Writer<'_> {
                 };
                 let _ = writeln!(
                     self.out,
-                    "#block(width: 100%, fill: rgb(\"{SURFACE}\"), stroke: 0.5pt + rgb(\"{BORDER}\"), inset: 8pt, radius: 3pt, above: 8pt, below: 8pt)[\n#{raw}\n]"
+                    "#block(width: 100%, fill: rgb(\"{SURFACE}\"), stroke: 0.5pt + rgb(\"{BORDER}\"), inset: 8pt, radius: 3pt, above: 8pt, below: 8pt{keep})[\n#{raw}\n]"
                 );
                 self.out.push('\n');
             }
@@ -708,7 +737,10 @@ impl Writer<'_> {
             self.missing_image(image);
             return;
         };
-        let Some(expression) = self.image_expression(id, &image.alt, false) else {
+        // PDF/UA requires alt text on every picture, so an empty alt falls back
+        // to the source or the localized image label.
+        let alt = image_fallback(image, &self.document_labels.image);
+        let Some(expression) = self.image_expression(id, &alt, false) else {
             self.missing_image(image);
             return;
         };
@@ -782,11 +814,12 @@ impl Writer<'_> {
                 self.with_link(link, body)
             }
             ExportRun::Image { image, link } => {
+                let alt = image_fallback(image, &self.document_labels.image);
                 let body = match image.asset {
-                    Some(id) => self.image_expression(id, &image.alt, true).unwrap_or_else(|| {
-                        format!("text({})", string(&image_fallback(image, &self.document_labels.image)))
-                    }),
-                    None => format!("text({})", string(&image_fallback(image, &self.document_labels.image))),
+                    Some(id) => {
+                        self.image_expression(id, &alt, true).unwrap_or_else(|| format!("text({})", string(&alt)))
+                    }
+                    None => format!("text({})", string(&alt)),
                 };
                 self.with_link(link, body)
             }
@@ -951,10 +984,55 @@ impl Writer<'_> {
             return "none".to_owned();
         }
         let available = self.table_available_pt();
-        if self.table_fits_without_fitting(table, columns, available) {
-            return self.plain_table_expression(table, columns);
+        let plain = self.table_fits_without_fitting(table, columns, available);
+        let expression = if plain {
+            self.plain_table_expression(table, columns)
+        } else {
+            self.fitted_table_expression(table, columns, available)
+        };
+        // A short ordinary table stays on one page instead of being split at a
+        // row boundary (OI-088). A tall or fitted one keeps Typst's row-wise
+        // breaking, with the header row repeated: the fitting pass scales the
+        // type, so its height estimate would no longer be conservative.
+        if plain && self.short_table(table) { format!("block(breakable: false, {expression})") } else { expression }
+    }
+
+    /// Whether a table is estimated to fit on one page, so keeping it together
+    /// cannot overflow the paper. `breakable: false` on a table taller than a
+    /// page would silently run into the margin, which is worse than splitting.
+    fn short_table(&self, table: &crate::model::ExportTable) -> bool {
+        if table.rows.len() > MAX_KEPT_TABLE_ROWS {
+            return false;
         }
-        self.fitted_table_expression(table, columns, available)
+        let columns = table.head.len().max(table.rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
+        // A picture's height is not in the character count, so a table with an
+        // embedded picture is never assumed to fit.
+        if table
+            .head
+            .iter()
+            .chain(table.rows.iter().flatten())
+            .any(|cell| cell.iter().any(|run| matches!(run, ExportRun::Image { image, .. } if image.asset.is_some())))
+        {
+            return false;
+        }
+        let cell_width = self.table_available_pt() / columns as f32;
+        // Body glyphs average a little over half an em; the estimate is
+        // deliberately generous, so a table that only just fits is allowed to
+        // split instead of overflowing.
+        let chars_per_line = (cell_width / (self.opts.body_size_pt * 0.55)).max(8.0);
+        let line_height = self.opts.body_size_pt * 1.7;
+        let mut height = 0.0f32;
+        for row in std::iter::once(&table.head).chain(table.rows.iter()) {
+            let mut lines = 1.0f32;
+            for cell in row {
+                let characters = cell_characters(cell) as f32;
+                lines = lines.max((characters / chars_per_line).ceil().max(1.0));
+            }
+            height += lines * line_height + 10.0;
+        }
+        let page = self.opts.page;
+        let content_height = (page.height_mm - page.top_mm - page.bottom_mm).max(1.0) * 72.0 / 25.4;
+        height <= content_height * 0.8
     }
 
     /// The unchanged table: auto columns, Typst's own wrapping and header
@@ -1256,6 +1334,40 @@ fn soft_wrap_code(text: &str) -> String {
     soft_wrap_code_at(text, 70)
 }
 
+/// The most visual lines a code block may have and still be kept on one page.
+/// The estimate uses 70 characters per line, the same conservative width
+/// [`soft_wrap_code`] breaks at; an under-estimate only costs a page break, an
+/// over-estimate could overflow the paper.
+const MAX_KEPT_CODE_LINES: usize = 24;
+
+/// Whether a code block is short enough to keep together on one page.
+fn short_code(text: &str) -> bool {
+    let mut visual_lines = 0usize;
+    for line in text.lines() {
+        visual_lines += line.chars().count().div_ceil(70).max(1);
+        if visual_lines > MAX_KEPT_CODE_LINES {
+            return false;
+        }
+    }
+    visual_lines > 0
+}
+
+/// The most body rows a table may have and still be kept on one page.
+const MAX_KEPT_TABLE_ROWS: usize = 12;
+
+/// The text a cell contributes to the kept-table height estimate.
+fn cell_characters(runs: &[ExportRun]) -> usize {
+    runs.iter()
+        .map(|run| match run {
+            ExportRun::Text { text, .. } => text.chars().count(),
+            ExportRun::Math { tex, .. } => tex.chars().count(),
+            ExportRun::Image { image, .. } => image.alt.chars().count(),
+            ExportRun::Html(node) => node.text().chars().count(),
+            ExportRun::Break | ExportRun::FootnoteRef { .. } => 0,
+        })
+        .sum()
+}
+
 /// [`soft_wrap_code`] with an explicit break interval, in characters.
 ///
 /// A fitted table below its scale floor uses one character, so a token can
@@ -1286,9 +1398,9 @@ fn checkbox(checked: bool) -> String {
 }
 
 fn image_fallback(image: &ExportImage, image_label: &str) -> String {
-    if !image.alt.is_empty() {
+    if !image.alt.trim().is_empty() {
         image.alt.clone()
-    } else if !image.src.is_empty() {
+    } else if !image.src.trim().is_empty() {
         image.src.clone()
     } else {
         image_label.to_owned()
@@ -1480,10 +1592,12 @@ impl Writer<'_> {
 
     fn html_image(&self, node: &HtmlNode) -> String {
         let alt = node.attr("alt").unwrap_or_default();
-        if let Some(id) = node.attr("src").and_then(asset_id)
-            && let Some(expression) = self.image_expression(id, alt, true)
-        {
-            return expression;
+        if let Some(id) = node.attr("src").and_then(asset_id) {
+            // PDF/UA needs a description even when the HTML alt is empty.
+            let description = if alt.trim().is_empty() { self.document_labels.image.as_str() } else { alt };
+            if let Some(expression) = self.image_expression(id, description, true) {
+                return expression;
+            }
         }
         if alt.is_empty() { String::new() } else { format!("text({})", string(alt)) }
     }
@@ -2329,9 +2443,27 @@ mod tests {
     #[test]
     fn narrow_tables_keep_the_plain_expression() {
         let source = source("| A | B |\n| --- | --- |\n| 1 | 2 |\n");
-        assert!(source.contains("#table(columns: 2,"), "the ordinary table changed shape:\n{source}");
+        assert!(source.contains("table(columns: 2,"), "the ordinary table changed shape:\n{source}");
         assert!(!source.contains("calc.clamp"), "an ordinary table must not be measured:\n{source}");
         assert!(!source.contains("show regex"), "an ordinary table must not install break rules:\n{source}");
+    }
+
+    #[test]
+    fn short_blocks_are_kept_on_one_page_and_tall_ones_may_split() {
+        let short_code = source("```rust\nfn main() {}\n```\n");
+        assert!(short_code.contains("below: 8pt, breakable: false)["), "{short_code}");
+
+        let tall_code = format!("```text\n{}```\n", "line of code\n".repeat(40));
+        let tall_code = source(&tall_code);
+        assert!(!tall_code.contains("breakable: false)["), "{tall_code}");
+
+        let short_table = source("| A | B |\n| --- | --- |\n| 1 | 2 |\n");
+        assert!(short_table.contains("block(breakable: false, table(columns: 2,"), "{short_table}");
+
+        let rows: String = (0..20).map(|index| format!("| {index} | {index} |\n")).collect();
+        let tall_table = source(&format!("| A | B |\n| --- | --- |\n{rows}"));
+        assert!(tall_table.contains("table(columns: 2,"), "{tall_table}");
+        assert!(!tall_table.contains("block(breakable: false, table"), "{tall_table}");
     }
 
     #[test]
@@ -2406,7 +2538,7 @@ mod tests {
             "<tbody><tr><td>Alpha row</td><td>Twenty two</td><td>Thirty three</td></tr></tbody>\n",
             "</table>\n",
         ));
-        assert!(source.contains("#table(columns: 3,"), "the raw table should use the shared builder:\n{source}");
+        assert!(source.contains("table(columns: 3,"), "the raw table should use the shared builder:\n{source}");
         assert!(source.contains("align: (left, center, right)"), "cell alignment was lost:\n{source}");
         assert!(source.contains("table.header("), "the raw header should repeat:\n{source}");
         assert!(source.contains("strong(text(\"Item name\"))"), "header emphasis is missing:\n{source}");

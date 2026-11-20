@@ -94,11 +94,11 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-074 | P3-02 app | Dirty caches are per-window until the P4 shared-registry sync | P4-01 publishes dirty ids/titles in the registry; other windows are not woken and tab dots stay per-window | P4 | open |
 | OI-075 | P3-02 app | Scroll sync is caret→preview only; no interpolated bidirectional sync (E-07) | P3-04c2 one-way editor→preview with interpolation, caret reveal, sticky-header cover, entry settling; manual preview scroll stays free | P3 | fixed |
 
-| OI-076 | P5-02 DOCX | SVG/AVIF assets are not embedded (alt text / Mermaid source fallback) | Rasterize or add an SVG+PNG fallback in the export job | P5 | open |
+| OI-076 | P5-02 DOCX | SVG/AVIF assets are not embedded (alt text / Mermaid source fallback) | SVG is rasterized to PNG during media registration with resvg/usvg (2× size, 4096 px cap, bundled fonts, file/URL references refused), so images and diagrams embed as `word/media/imageN.png`. AVIF still falls back to alt text because decoding needs a C/pure-Rust AV1 decoder (OI-183). | P5 | fixed |
 | OI-077 | P5-02 DOCX | Footnotes are superscript numbers plus a plain end list; no `word/footnotes.xml` or working backlink | P6-X real footnotes part, content type/rels, styles, first-reference bookmarks and backlinks; repeated refs share ids | P6 | fixed |
-| OI-078 | P5-02 DOCX | TOC is a linked heading list, not a Word `TOC` field | Optional field-based TOC later | P6 | open |
-| OI-079 | P5-02 DOCX | DOCX package is uncompressed (stored ZIP); valid/deterministic but larger | Revisit if export size matters; deflate needs a fallible path | P7 | open |
-| OI-080 | P5-02 DOCX | Quoted list runs inside a block quote keep the body color (paragraph-mark color gap) | Minor style polish | P6 | open |
+| OI-078 | P5-02 DOCX | TOC is a linked heading list, not a Word `TOC` field | A real `TOC \o "1-6" \h \z \u` field: dirty `fldChar` begin, instruction, separator, cached hyperlinked entries, end, plus `TOCHeading`/`TOC1`–`TOC6` styles, dot-leader tabs and `w:updateFields`. The cached result has no page numbers (the DOCX writer has no page model); Word fills them on update. | P6 | fixed |
+| OI-079 | P5-02 DOCX | DOCX package is uncompressed (stored ZIP); valid/deterministic but larger | XML and `.rels` parts deflate at a fixed level 6 (flate2/miniz_oxide), pictures stay stored. `test-features.docx` 95,541 → 52,617 bytes, `commonmark-math.docx` 118,800 → 68,429; cross-process output is byte-identical. | P7 | fixed |
+| OI-080 | P5-02 DOCX | Quoted list runs inside a block quote keep the body color (paragraph-mark color gap) | A quoted list uses `QuoteListParagraph` (based on `ListParagraph`) whose run properties carry the muted `59636E`; runs inherit it and the paragraph mark keeps its muted colour. | P6 | fixed |
 
 | OI-081 | P3-03 app | Find match scrolling approximates wrapped lines by the 20 pt line height | P6-R highlight keys + `Tx::scroll_into_view(highlight_key)` now used | P6 | fixed |
 | OI-082 | P3-03 app | Slash menu is an inline panel, not caret-anchored; inserting takes two undo steps | Anchor the panel to the caret and group the replace+insert | P6 | open |
@@ -107,7 +107,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-085 | P5-03 PDF | Default PDF font is bundled Libertinus Serif; the app must supply a proportional sans and mono font | P5-04a loads Noto Sans + DejaVu Sans Mono via `fontdb`, cached per process, with a fallback note | P5 | fixed |
 | OI-086 | P5-03 PDF | No X-12 wide-table fitting; a pathological unbreakable cell can overflow | P6-PDF-T min-content measurement, 0.3-floor scaling and break-anywhere fallback; bbox proof | P6 | fixed |
 | OI-087 | P5-03 PDF | Raw HTML tables/lists/details flatten to inline text; video/audio are placeholders | P6-PDF-H structured tables (spans/headers), lists/start, details cards, quotes/code, file links for media; remote URLs never printed | P6 | fixed |
-| OI-088 | P5-03 PDF | Code/tables may split across pages; long code tokens use U+200B break opportunities; no PDF/UA validation | Page-break rules, cleaner code wrapping, PDF/UA gate | P6/P7 | open |
+| OI-088 | P5-03 PDF | Code/tables may split across pages; long code tokens use U+200B break opportunities; no PDF/UA validation | PDF/UA-1 is requested through Typst (validated on write: `pdfuaid:part 1`, `/Lang`, `/MarkInfo`, `/StructTreeRoot`, `/DisplayDocTitle`, tagged); localized title fallback and alt text for every image/formula. Short code (≤24 lines) and short tables wrap in `breakable: false` with a page-boundary regression; long tokens keep U+200B. Residuals: long code/tables still split (inherent), a single row taller than a page may split, no veraPDF in CI, AVIF falls back to alt (OI-183). | P6/P7 | fixed |
 
 | OI-089 | P3-04a app | Typing into a block's trailing blank line (or pasting several paragraphs into one field) can leave the in-memory block layout without a blank-line boundary until reload | P3 polish canonical re-partition on commit (edited field ± neighbour, one journal step) | P3 | fixed |
 | OI-090 | P3-04a app | Structural undo (split/merge) restores text and focus but the caret lands at the merged field's start/end | `caret_block` + caret anchors restore split/merge undo/redo and focus | P3 | fixed |
@@ -226,6 +226,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-179 | P6-F app | rune-kit builds the pane grip `focusable(false)`, so F-20's plain arrows on the grip cannot be focused; `Ctrl`+arrows while the tree has focus and eight palette commands are the substitute | Add a kit focusable grip if exact parity matters | P6 | accepted |
 | OI-181 | P6-L app | SVG save/copy and diagram PNG need a scene rasterizer; `rune-mermaid` exposes only an `El`/size, no serializer | Expose `Drawing::to_svg()` or `raster(scale)` in rune-mermaid, then reuse the preview's worker/menu | P6 | open |
 | OI-182 | P6-L app | Native pinch and the inline picture's hover hint are not wired (the block picture has the hint; an inline span has no wrapper to attach it to) | Add a pinch wire and a span wrapper once Rune exposes them | P6 | open |
+| OI-183 | P5 export | AVIF pictures fall back to alt text in DOCX and PDF: `image` 0.25 encodes AVIF but does not decode it; `avif-native` pulls dav1d (C/meson/nasm) and no pure-Rust AV1 decoder is in the tree | Add a decoder only if AVIF matters; otherwise keep the alt fallback | P5 | open |
 | OI-180 | P6-SAFE app | A watcher-observed external rename is rekeyed by the first window that processes the shared event; later windows keep the old Back/Forward spelling until reopened | `rename_history_paths` now broadcasts `UiMsg::DocumentRenamed` through `broadcast_window_rename`, so every window renames its places and refreshes the document's titles, including windows that never show the file. Tested with three windows. | P6 | fixed |
 
 ## 2. Resolved actions (examples)
@@ -255,9 +256,9 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above.
 
-- **Open (57):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 066, 074, 076, 078, 079, 080, 082, 088, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 141, 153, 155, 161, 163, 165, 166, 174, 175, 176, 181, 182
+- **Open (53):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 066, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 141, 153, 155, 161, 163, 165, 166, 174, 175, 176, 181, 182, 183
 - **Scheduled (4):** OI-003, 023, 027, 050
 - **Accepted (25):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 070, 072, 107, 108, 131, 133, 134, 136, 139, 150, 154, 157, 177, 179
-- **Fixed (96):** kept for history.
+- **Fixed (101):** kept for history.
 
 P3, P4 (with substitutes) and P5 are closed; P6 polish and P7 audit remain. Accepted gaps are re-checked at the next gate.

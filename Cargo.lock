@@ -2499,11 +2499,13 @@ name = "lmdv-export"
 version = "0.5.5"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "image",
  "lmdv-i18n",
  "lmdv-math",
  "lmdv-md",
  "percent-encoding",
+ "resvg 0.47.0",
  "roxmltree 0.21.2",
  "rune-highlights",
  "thiserror 2.0.21",
@@ -7367,6 +7369,7 @@ dependencies = [
  "arbitrary",
  "crc32fast",
  "crossbeam-utils",
+ "flate2",
  "indexmap",
  "memchr",
 ]

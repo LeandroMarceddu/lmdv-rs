@@ -422,7 +422,7 @@ fn html_details_and_media_degrade_to_text_and_links() {
 }
 
 #[test]
-fn the_toc_is_a_linked_heading_list() {
+fn the_toc_is_a_real_field_with_cached_entries() {
     let markdown = "# Title\n\n[TOC]\n\n## One\n\n### Two\n";
     let parts = unzip(&docx(markdown, &ExportOptions::default(), &NoAssets));
     let body = document(&parts);
@@ -432,6 +432,161 @@ fn the_toc_is_a_linked_heading_list() {
     assert!(body.contains("<w:hyperlink w:anchor=\"_lmdv2\" w:history=\"1\">"));
     // The h1 before the marker is not in the TOC.
     assert!(!body.contains(">Title</w:t></w:r></w:hyperlink>"));
+
+    // A real Word field, not a plain linked list: begin, instruction,
+    // separator, the cached entries as the result, end.
+    assert!(body.contains("<w:fldChar w:fldCharType=\"begin\" w:dirty=\"true\"/>"));
+    assert!(body.contains(" TOC \\o \"1-6\" \\h \\z \\u "));
+    assert!(body.contains("<w:fldChar w:fldCharType=\"separate\"/>"));
+    let doc = xml(&body);
+    let fields: Vec<&str> = doc
+        .descendants()
+        .filter(|node| node.has_tag_name((W, "fldChar")))
+        .filter_map(|node| node.attribute((W, "fldCharType")))
+        .collect();
+    assert_eq!(fields, ["begin", "separate", "end"], "one enclosing TOC field");
+
+    // The cached result is inside the field: the hyperlink sits after the
+    // separator and before the end character.
+    let field_range = |kind: &str| {
+        doc.descendants()
+            .find(|node| node.has_tag_name((W, "fldChar")) && node.attribute((W, "fldCharType")) == Some(kind))
+            .unwrap_or_else(|| panic!("the {kind} field character"))
+            .range()
+    };
+    let hyperlink = doc.descendants().find(|node| node.has_tag_name((W, "hyperlink"))).expect("a cached TOC entry");
+    assert!(field_range("separate").end <= hyperlink.range().start);
+    assert!(hyperlink.range().end <= field_range("end").start);
+
+    // Word updates the cached entries on open, so the page numbers it adds
+    // use the TOC styles defined here.
+    let settings = part(&parts, "word/settings.xml");
+    assert!(settings.contains("<w:updateFields w:val=\"true\"/>"), "{settings}");
+    assert!(body.contains("<w:pStyle w:val=\"TOC2\"/>"));
+    assert!(body.contains("<w:pStyle w:val=\"TOC3\"/>"));
+    let styles = part(&parts, "word/styles.xml");
+    for id in ["TOCHeading", "TOC1", "TOC2", "TOC3", "TOC6"] {
+        assert!(styles.contains(&format!("w:styleId=\"{id}\"")), "missing {id}");
+    }
+    assert!(styles.contains("<w:tab w:val=\"right\" w:leader=\"dot\""));
+}
+
+#[test]
+fn a_document_without_a_toc_does_not_ask_word_to_update_fields() {
+    let parts = unzip(&docx("# Title\n\nBody.\n", &ExportOptions::default(), &NoAssets));
+    assert!(!part(&parts, "word/settings.xml").contains("updateFields"));
+}
+
+#[test]
+fn quoted_list_runs_take_the_quote_colour() {
+    let markdown = "> Intro\n>\n> - alpha\n> - beta\n";
+    let parts = unzip(&docx(markdown, &ExportOptions::default(), &NoAssets));
+    let body = document(&parts);
+    let doc = xml(&body);
+    let paragraph = doc
+        .descendants()
+        .find(|node| {
+            node.has_tag_name((W, "p"))
+                && node.descendants().any(|child| {
+                    child.has_tag_name((W, "pStyle")) && child.attribute((W, "val")) == Some("QuoteListParagraph")
+                })
+        })
+        .expect("a list paragraph inside the quote");
+    // The paragraph mark keeps the muted colour, and the style now carries it
+    // into the runs too (OI-080).
+    let paragraph_properties =
+        paragraph.children().find(|node| node.has_tag_name((W, "pPr"))).expect("paragraph properties");
+    assert!(
+        paragraph_properties
+            .descendants()
+            .any(|node| node.has_tag_name((W, "color")) && node.attribute((W, "val")) == Some("59636E")),
+        "the paragraph mark is muted"
+    );
+    let alpha = paragraph
+        .descendants()
+        .find(|node| node.has_tag_name((W, "t")) && node.text() == Some("alpha"))
+        .expect("the item text");
+    let run = alpha.parent().expect("the text run");
+    assert!(
+        !run.descendants().any(|node| node.has_tag_name((W, "color"))),
+        "no direct colour: the muted colour must come from the style"
+    );
+
+    let styles = part(&parts, "word/styles.xml");
+    let style =
+        styles.split("<w:style ").find(|style| style.contains("w:styleId=\"QuoteListParagraph\"")).expect("the style");
+    assert!(style.contains("<w:color w:val=\"59636E\"/>"), "the quoted list style is muted: {style}");
+    assert!(style.contains("<w:basedOn w:val=\"ListParagraph\"/>"));
+}
+
+/// An SVG stand-in for a real local picture. Word has no portable SVG blip, so
+/// the exporter must rasterize it (OI-076).
+struct SvgAssets;
+
+const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="24">
+    <rect width="48" height="24" fill="#0969da"/>
+    <text x="4" y="17" font-family="sans-serif" font-size="12">Hi</text>
+</svg>"##;
+
+impl AssetResolver for SvgAssets {
+    fn image(&self, _src: &str, _alt: &str) -> Option<ExportedAsset> {
+        Some(ExportedAsset::new("image/svg+xml", SVG.as_bytes().to_vec()))
+    }
+
+    fn diagram(&self, _source: &str) -> Option<ExportedAsset> {
+        Some(ExportedAsset::new("image/svg+xml", SVG.as_bytes().to_vec()))
+    }
+}
+
+#[test]
+fn svg_pictures_are_rasterized_into_the_package() {
+    let markdown = "![A blue box](./art.svg)\n\n```mermaid\ngraph TD; A-->B;\n```\n";
+    let parts = unzip(&docx(markdown, &ExportOptions::default(), &SvgAssets));
+    let media: Vec<&String> = parts.keys().filter(|name| name.starts_with("word/media/")).collect();
+    assert_eq!(media, vec!["word/media/image1.png", "word/media/image2.png"]);
+    for name in media {
+        let bytes = &parts[name];
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "{name} is a PNG");
+        assert!(bytes.len() > 100, "{name} has real pixels");
+    }
+    let body = document(&parts);
+    assert_eq!(body.matches("<a:blip ").count(), 2, "both pictures are drawn");
+    assert!(body.contains("descr=\"A blue box\""));
+    assert!(body.contains("descr=\"Mermaid diagram\""));
+    // A 48×24 SVG at 2× is 96×48 CSS pixels: the drawing keeps that ratio.
+    assert!(body.contains("<wp:extent cx=\"914400\" cy=\"457200\"/>"), "{body}");
+}
+
+#[test]
+fn the_package_deflates_xml_parts_and_stores_pictures() {
+    use zip::CompressionMethod;
+
+    let source = fixture("test-features.md");
+    let bytes = docx(&source, &ExportOptions::default(), &TestAssets::with_png());
+    let mut archive = ZipArchive::new(Cursor::new(bytes.clone())).expect("a readable package");
+    assert_eq!(archive.by_name("word/document.xml").expect("the document").compression(), CompressionMethod::Deflated);
+    assert_eq!(
+        archive.by_name("word/media/image1.png").expect("the picture").compression(),
+        CompressionMethod::Stored,
+        "pictures are already compressed"
+    );
+    let mut document = String::new();
+    {
+        let entry = archive.by_name("word/document.xml").expect("the document");
+        assert!(
+            entry.compressed_size() * 2 < entry.size(),
+            "the document XML should deflate to less than half: {} of {}",
+            entry.compressed_size(),
+            entry.size()
+        );
+    }
+    archive.by_name("word/document.xml").expect("the document").read_to_string(&mut document).unwrap();
+    let mut uncompressed = 0u64;
+    for index in 0..archive.len() {
+        uncompressed += archive.by_index(index).expect("an entry").size();
+    }
+    assert_eq!(document, part(&unzip(&bytes), "word/document.xml"));
+    assert!((bytes.len() as u64) < uncompressed, "deflating must shrink the package");
 }
 
 #[test]
@@ -731,6 +886,10 @@ fn evidence_documents_are_written_on_request() {
         let bytes = docx(&markdown, &opts, &assets);
         fs::write(dir.join(name), bytes).expect("the evidence file");
     }
+
+    // OI-076: the SVG picture is rasterized to a PNG media part inside.
+    let svg = docx("![A blue box](./art.svg)\n", &ExportOptions::default(), &SvgAssets);
+    fs::write(dir.join("oi076-svg.docx"), svg).expect("the SVG evidence file");
 
     // P6-X1: a purpose-built notes document — a repeated reference, a
     // formatted definition with code/link, and inline math in a note.

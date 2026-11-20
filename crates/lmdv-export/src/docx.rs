@@ -22,9 +22,15 @@
 //!   `w:footnoteReference` runs, not an end-of-document list. A footnote that
 //!   references another keeps the inner number as superscript text, because
 //!   Word has no nested notes.
-//! - SVG and AVIF assets are not embedded: Word has no plain `a:blip` support
-//!   for them without a PNG fallback, so they degrade to their alt text.
-//! - A table of contents is a plain linked heading list, not a `TOC` field.
+//! - SVG pictures are rasterized to PNG on the export worker (OI-076), with
+//!   text shaped by Typst's bundled faces. AVIF still needs a decoder that is
+//!   not in the dependency tree, so it degrades to its alt text.
+//! - The table of contents is a real Word `TOC` field (OI-078): the entry
+//!   paragraphs are its cached result, and `w:updateFields` lets Word rebuild
+//!   them with page numbers when the document opens.
+//! - The package is deflated (OI-079): XML and relationship parts use the
+//!   fixed-level raw deflate stream that is now in the dependency tree, while
+//!   already-compressed pictures stay stored.
 //! - Warnings are not appended to the document: [`export_docx`] takes an
 //!   immutable [`ExportDoc`] and returns bytes only.
 
@@ -40,6 +46,7 @@ use crate::model::{
 };
 
 mod package;
+mod raster;
 
 /// The table-of-contents label, matching the HTML exporter.
 const TOC_LABEL: Key = lmdv_i18n::key("render.toc");
@@ -80,6 +87,18 @@ const XML_DECLARATION: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalo
 /// the body or of a callout cell).
 const TABLE_SEPARATOR: &str = "<w:p><w:pPr><w:spacing w:before=\"0\" w:after=\"0\" \
     w:line=\"120\" w:lineRule=\"auto\"/></w:pPr></w:p>";
+
+/// The opening of a real Word `TOC` field: the instruction covers heading
+/// levels 1–6, links the entries and honours outline levels. The entry
+/// paragraphs that follow are its cached result. `w:dirty` makes Word refresh
+/// the cached result even when the user declines the open-time update.
+const TOC_FIELD_START: &str = concat!(
+    "<w:r><w:fldChar w:fldCharType=\"begin\" w:dirty=\"true\"/></w:r>",
+    "<w:r><w:instrText xml:space=\"preserve\"> TOC \\o \"1-6\" \\h \\z \\u </w:instrText></w:r>",
+    "<w:r><w:fldChar w:fldCharType=\"separate\"/></w:r>",
+);
+/// The closing `w:fldChar` of the TOC field, in the last cached entry.
+const TOC_FIELD_END: &str = "<w:r><w:fldChar w:fldCharType=\"end\"/></w:r>";
 
 /// The character style a `w:footnoteReference`/`w:footnoteRef` run uses; the
 /// style itself carries the superscript (Word's own template does the same).
@@ -216,6 +235,7 @@ pub(crate) fn render(doc: &ExportDoc, opts: &DocxOptions) -> Vec<u8> {
     // embeds a picture/formula or links somewhere.
     let footnote_rels = (!writer.footnote_rels.is_empty()).then(|| writer.footnote_rels_xml());
     let core = writer.core_xml();
+    let has_toc = doc.blocks.iter().any(|block| matches!(block, ExportBlock::Toc { entries } if !entries.is_empty()));
 
     let mut parts = vec![
         package::Part::text("[Content_Types].xml", package::content_types(!doc.footnotes.is_empty())),
@@ -223,7 +243,7 @@ pub(crate) fn render(doc: &ExportDoc, opts: &DocxOptions) -> Vec<u8> {
         package::Part::text("word/document.xml", document),
         package::Part::text("word/styles.xml", styles),
         package::Part::text("word/numbering.xml", numbering),
-        package::Part::text("word/settings.xml", package::settings()),
+        package::Part::text("word/settings.xml", package::settings(has_toc)),
     ];
     if let Some(footnotes) = footnotes {
         parts.push(package::Part::text("word/footnotes.xml", footnotes));
@@ -236,7 +256,8 @@ pub(crate) fn render(doc: &ExportDoc, opts: &DocxOptions) -> Vec<u8> {
     parts.push(package::Part::text("docProps/app.xml", package::app()));
     for media in &writer.media {
         if let Some(asset) = doc.asset(media.asset) {
-            parts.push(package::Part { name: format!("word/media/{}", media.file_name), bytes: asset.bytes.clone() });
+            let bytes = media.raster.clone().unwrap_or_else(|| asset.bytes.clone());
+            parts.push(package::Part { name: format!("word/media/{}", media.file_name), bytes });
         }
     }
     package::zip(&parts)
@@ -291,6 +312,11 @@ struct NumberDef {
 struct Media {
     file_name: String,
     asset: AssetId,
+    /// A converted raster (an SVG rendered to PNG); `None` means the asset's
+    /// own bytes.
+    raster: Option<Vec<u8>>,
+    /// The converted raster's pixel size, for the drawing extent.
+    size: Option<(u64, u64)>,
     document_rel: Option<String>,
     footnote_rel: Option<String>,
 }
@@ -775,7 +801,7 @@ impl<'a> Writer<'a> {
         }
         self.runs(&mut content, runs, ctx);
         let ppr = Ppr {
-            style: Some("ListParagraph"),
+            style: Some(if ctx.quote { "QuoteListParagraph" } else { "ListParagraph" }),
             numbering: item.task.is_none().then_some((level, num_id)),
             border: ctx.quote.then_some(QUOTE_BORDER),
             after: Some(after),
@@ -994,12 +1020,12 @@ impl<'a> Writer<'a> {
     }
 
     /// Emits one `wp:inline` drawing run. Returns `false` when the asset cannot
-    /// be embedded (a missing asset, an empty file, SVG/AVIF, …).
+    /// be embedded (a missing asset, an empty file, AVIF, …).
     fn image_drawing(&mut self, out: &mut String, asset: AssetId, alt: &str, title: Option<&str>) -> bool {
         let part = self.part;
         let Some(media) = self.media_for(asset) else { return false };
         let Some(source) = self.doc.asset(asset) else { return false };
-        let (cx, cy) = image_extent(source);
+        let (cx, cy) = image_extent(source, self.media.get(media).and_then(|media| media.size));
         let rel_id = self.media_rel(media, part);
         let id = self.next_doc_pr;
         self.next_doc_pr += 1;
@@ -1036,20 +1062,29 @@ impl<'a> Writer<'a> {
     }
 
     /// Registers an asset as a media part and returns its index.
+    ///
+    /// An SVG is rasterized to PNG here (see [`raster`]); Word's plain
+    /// `a:blip` has no portable SVG support. AVIF has no decoder in the
+    /// exporter's dependency tree, so it still falls back to alt text.
     fn media_for(&mut self, asset: AssetId) -> Option<usize> {
         let index = asset.index();
         if let Some(slot) = self.media_by_asset.get(index).copied().flatten() {
             return Some(slot);
         }
-        let (extension, bytes_empty) = {
+        let (extension, raster, size) = {
             let source = self.doc.asset(asset)?;
-            (media_extension(source.mime)?, source.bytes.is_empty())
+            if source.bytes.is_empty() {
+                return None;
+            }
+            if source.mime == "image/svg+xml" {
+                let (png, (width, height)) = raster::svg_to_png(&source.bytes)?;
+                ("png", Some(png), Some((u64::from(width), u64::from(height))))
+            } else {
+                (media_extension(source.mime)?, None, None)
+            }
         };
-        if bytes_empty {
-            return None;
-        }
         let file_name = format!("image{}.{}", self.media.len() + 1, extension);
-        let media = Media { file_name, asset, document_rel: None, footnote_rel: None };
+        let media = Media { file_name, asset, raster, size, document_rel: None, footnote_rel: None };
         self.media.push(media);
         let media_index = self.media.len() - 1;
         if let Some(slot) = self.media_by_asset.get_mut(index) {
@@ -1079,14 +1114,30 @@ impl<'a> Writer<'a> {
         if entries.is_empty() {
             return;
         }
-        let mut content = String::new();
+        let mut heading = String::new();
         let label = self.toc_label.clone();
-        self.styled_run(&mut content, &label, "<w:b/>", false);
-        out.push_str(&paragraph(Ppr { keep_next: true, after: Some(80), ..Ppr::default() }, &content));
-        self.toc_level(out, entries, 0, ctx);
+        self.styled_run(&mut heading, &label, "<w:b/>", false);
+        out.push_str(&paragraph(
+            Ppr { style: Some("TOCHeading"), keep_next: true, after: Some(120), ..Ppr::default() },
+            &heading,
+        ));
+        // The entry paragraphs are the field's cached result: a reader that
+        // does not update fields still sees a usable, linked table of contents.
+        // Word rebuilds it (with page numbers) on open because `settings.xml`
+        // sets `w:updateFields`, or on F9.
+        let mut paragraphs = Vec::new();
+        self.toc_level(&mut paragraphs, entries, ctx);
+        let Some(first) = paragraphs.first_mut() else { return };
+        insert_after_paragraph_properties(first, TOC_FIELD_START);
+        if let Some(last) = paragraphs.last_mut() {
+            insert_before_paragraph_end(last, TOC_FIELD_END);
+        }
+        for paragraph in paragraphs {
+            out.push_str(&paragraph);
+        }
     }
 
-    fn toc_level(&mut self, out: &mut String, entries: &[ExportTocEntry], depth: usize, ctx: Ctx) {
+    fn toc_level(&mut self, out: &mut Vec<String>, entries: &[ExportTocEntry], ctx: Ctx) {
         for entry in entries {
             let mut content = String::new();
             let opened = self.bookmarks.get(&entry.id).cloned().is_some_and(|anchor| {
@@ -1100,11 +1151,17 @@ impl<'a> Writer<'a> {
             if opened {
                 content.push_str("</w:hyperlink>");
             }
-            out.push_str(&paragraph(
-                Ppr { after: Some(20), indent: Some(ctx.indent() + 360 * (depth as u32 + 1)), ..Ppr::default() },
+            let level = entry.level.clamp(1, 6);
+            out.push(paragraph(
+                Ppr {
+                    style: Some(toc_style(level)),
+                    after: Some(20),
+                    indent: Some(ctx.indent() + 220 * (u32::from(level) - 1)),
+                    ..Ppr::default()
+                },
                 &content,
             ));
-            self.toc_level(out, &entry.children, depth + 1, ctx);
+            self.toc_level(out, &entry.children, ctx);
         }
     }
 
@@ -1805,6 +1862,35 @@ impl<'a> Writer<'a> {
         xml.push_str("<w:uiPriority w:val=\"34\"/><w:qFormat/><w:pPr>");
         xml.push_str("<w:spacing w:after=\"40\"/><w:ind w:left=\"720\"/><w:contextualSpacing/></w:pPr></w:style>");
 
+        // OI-080: a list inside a block quote must not keep the body colour
+        // its runs would inherit from List Paragraph. The paragraph mark was
+        // already muted; this style mutes the runs too.
+        xml.push_str("<w:style w:type=\"paragraph\" w:styleId=\"QuoteListParagraph\">");
+        xml.push_str("<w:name w:val=\"Quoted List Paragraph\"/><w:basedOn w:val=\"ListParagraph\"/>");
+        xml.push_str("<w:next w:val=\"Normal\"/><w:uiPriority w:val=\"34\"/><w:qFormat/>");
+        xml.push_str(&format!("<w:rPr><w:color w:val=\"{MUTED_COLOR}\"/></w:rPr></w:style>"));
+
+        // The TOC field's own heading and entry styles. The right tab with a
+        // dot leader is what Word uses when it rebuilds the field with page
+        // numbers; the cached entries have no page numbers of their own.
+        xml.push_str("<w:style w:type=\"paragraph\" w:styleId=\"TOCHeading\">");
+        xml.push_str("<w:name w:val=\"TOC Heading\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/>");
+        xml.push_str("<w:uiPriority w:val=\"39\"/><w:qFormat/><w:pPr><w:keepNext/>");
+        xml.push_str("<w:spacing w:before=\"240\" w:after=\"120\" w:line=\"240\" w:lineRule=\"auto\"/></w:pPr>");
+        xml.push_str("<w:rPr><w:b/><w:sz w:val=\"32\"/><w:szCs w:val=\"32\"/></w:rPr></w:style>");
+        for level in 1..=6u8 {
+            xml.push_str(&format!(
+                "<w:style w:type=\"paragraph\" w:styleId=\"{style}\"><w:name w:val=\"toc {level}\"/>\
+                 <w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/><w:uiPriority w:val=\"39\"/>\
+                 <w:unhideWhenUsed/><w:pPr><w:tabs><w:tab w:val=\"right\" w:leader=\"dot\" w:pos=\"{tab}\"/>\
+                 </w:tabs><w:spacing w:before=\"0\" w:after=\"60\" w:line=\"240\" w:lineRule=\"auto\"/>\
+                 <w:ind w:left=\"{indent}\"/></w:pPr></w:style>",
+                style = toc_style(level),
+                tab = self.content_width,
+                indent = 220 * (u32::from(level) - 1),
+            ));
+        }
+
         xml.push_str("<w:style w:type=\"paragraph\" w:styleId=\"Quote\">");
         xml.push_str("<w:name w:val=\"Quote\"/><w:basedOn w:val=\"Normal\"/><w:next w:val=\"Normal\"/>");
         xml.push_str("<w:uiPriority w:val=\"29\"/><w:qFormat/><w:pPr>");
@@ -1966,6 +2052,37 @@ fn heading_style(level: u8) -> &'static str {
     }
 }
 
+/// The built-in Word paragraph style of a cached TOC entry at `level`.
+fn toc_style(level: u8) -> &'static str {
+    match level.clamp(1, 6) {
+        1 => "TOC1",
+        2 => "TOC2",
+        3 => "TOC3",
+        4 => "TOC4",
+        5 => "TOC5",
+        _ => "TOC6",
+    }
+}
+
+/// Inserts `runs` as the first content of a rendered paragraph, after its
+/// `w:pPr` (the field opening must precede the cached entry's hyperlink).
+fn insert_after_paragraph_properties(paragraph: &mut String, runs: &str) {
+    let at = paragraph
+        .find("</w:pPr>")
+        .map(|at| at + "</w:pPr>".len())
+        .or_else(|| paragraph.find('>').map(|at| at + 1))
+        .unwrap_or(0);
+    paragraph.insert_str(at, runs);
+}
+
+/// Inserts `runs` just before a rendered paragraph's closing tag.
+fn insert_before_paragraph_end(paragraph: &mut String, runs: &str) {
+    match paragraph.rfind("</w:p>") {
+        Some(at) => paragraph.insert_str(at, runs),
+        None => paragraph.push_str(runs),
+    }
+}
+
 /// `(before, after, half-point size, color)` for a heading level.
 fn heading_metrics(level: u8) -> (u32, u32, u32, &'static str) {
     match level.clamp(1, 6) {
@@ -2027,12 +2144,13 @@ fn media_extension(mime: &str) -> Option<&'static str> {
     })
 }
 
-/// The drawing extent in EMU: the asset's logical size when known, otherwise
-/// the picture's intrinsic pixel size at 96 dpi, capped at 16 cm wide.
-fn image_extent(asset: &ExportAsset) -> (u64, u64) {
+/// The drawing extent in EMU: the asset's logical size when known, else the
+/// converted raster's pixel size, else the picture's intrinsic pixel size at
+/// 96 dpi, capped at 16 cm wide.
+fn image_extent(asset: &ExportAsset, raster: Option<(u64, u64)>) -> (u64, u64) {
     let (width, height) = match (asset.width, asset.height) {
         (Some(width), Some(height)) if width > 0 && height > 0 => (u64::from(width), u64::from(height)),
-        _ => intrinsic_size(&asset.bytes).unwrap_or(FALLBACK_MEDIA),
+        _ => raster.or_else(|| intrinsic_size(&asset.bytes)).unwrap_or(FALLBACK_MEDIA),
     };
     let mut cx = width.saturating_mul(EMU_PER_PIXEL).max(1);
     let mut cy = height.saturating_mul(EMU_PER_PIXEL).max(1);
@@ -2309,6 +2427,8 @@ mod tests {
         assert_eq!(media_extension("image/png"), Some("png"));
         assert_eq!(media_extension("image/jpeg"), Some("jpeg"));
         assert_eq!(media_extension("image/webp"), Some("webp"));
+        // SVG is rasterized to PNG before this lookup (`media_for`); AVIF has
+        // no decoder in the dependency tree, so both are not plain media types.
         assert_eq!(media_extension("image/svg+xml"), None);
         assert_eq!(media_extension("image/avif"), None);
         assert_eq!(media_extension("application/pdf"), None);
@@ -2324,13 +2444,13 @@ mod tests {
             height: Some(1000),
             baseline: None,
         };
-        let (cx, cy) = image_extent(&asset);
+        let (cx, cy) = image_extent(&asset, None);
         assert_eq!(cx, MAX_MEDIA_EMU);
         // 3200 x 9525 was clamped, so the height keeps the 3.2:1 ratio.
         assert!((cy as f64 - (MAX_MEDIA_EMU as f64 / 3.2)).abs() < 2.0, "{cy}");
 
         let small = ExportAsset { width: Some(100), height: Some(50), ..asset };
-        assert_eq!(image_extent(&small), (100 * EMU_PER_PIXEL, 50 * EMU_PER_PIXEL));
+        assert_eq!(image_extent(&small, None), (100 * EMU_PER_PIXEL, 50 * EMU_PER_PIXEL));
     }
 
     #[test]
