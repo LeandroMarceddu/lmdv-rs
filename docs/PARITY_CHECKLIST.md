@@ -49,15 +49,15 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | File browser and folder search | 22 | 19 | 2 | 1 | 0 | 0 |
 | Outline, section line and history | 15 | 9 | 2 | 4 | 0 | 0 |
 | Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
-| Links and media | 15 | 3 | 0 | 7 | 4 | 1 |
+| Links and media | 15 | 4 | 0 | 8 | 2 | 1 |
 | System, CLI and file integration | 27 | 11 | 5 | 3 | 1 | 7 |
 | Window chrome | 10 | 0 | 3 | 3 | 0 | 4 |
-| Drag and drop | 8 | 0 | 2 | 2 | 4 | 0 |
-| Help, start page, notices, rating | 13 | 1 | 0 | 8 | 3 | 1 |
+| Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
+| Help, start page, notices, rating | 13 | 2 | 0 | 8 | 2 | 1 |
 | Accessibility | 15 | 9 | 0 | 6 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 0 | 16 | 1 | 0 | 3 |
-| **All** | **342** | **165** | **52** | **89** | **18** | **18** |
+| **All** | **342** | **169** | **52** | **90** | **13** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -313,7 +313,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 - [~] **L-01** In-page anchors (P0 · F-LINKS) — partial
 - [~] **L-02** External schemes (P0 · F-LINKS) — partial
-- [ ] **L-03** Wiki resolution (P0 · F-LINKS) — missing
+- [x] **L-03** Wiki resolution (P0 · F-LINKS) — done
 - [x] **L-04** Same-document link (P0 · F-LINKS) — done
 - [x] **L-05** Folder link (P1 · F-NESTED) — done
 - [ ] **L-06** Image link (P1 · F-IMAGE) — missing
@@ -321,7 +321,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **L-08** Unresolved link (P0 · F-ERRORS) — partial
 - [~] **L-09** Pasted text links (P0 · F-PASTE) — partial
 - [~] **L-10** Network links/media (P0 · F-SECURITY) — partial
-- [ ] **L-11** Link click placement (P0 · F-LINKS) — missing
+- [~] **L-11** Link click placement (P0 · F-LINKS) — partial
 - [ ] **L-12** Image maps and SVG links (P2 · F-HTML) — missing
 - [x] **L-13** Old anchors (P1 · F-HEADINGS) — done
 - [x] **L-14** URL safety (P0 · F-SECURITY) — n/a
@@ -372,8 +372,8 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 ## D — Drag and drop (8)
 
-- [ ] **D-01** Drop overlay (P1 · Drag file over window: overlay.) — missing
-- [ ] **D-02** File drop (P0 · Drop 3 files on tab 2: tabs inserted there.) — missing
+- [x] **D-01** Drop overlay (P1 · Drag file over window: overlay.) — done
+- [x] **D-02** File drop (P0 · Drop 3 files on tab 2: tabs inserted there.) — done
 - [ ] **D-03** Image drop in editor (P1 · Drop PNG while editing inserts image.) — missing
 - [~] **D-04** Tab drag (P0 · Reorder and tear-off.) — partial
 - [x] **D-05** Cross-window ghost (P1 · Ghost follows pointer over other window.) — substitute
@@ -394,7 +394,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **H-09** Error card (P1 · Permission-denied file: error card, app alive.) — partial
 - [x] **H-10** Rate prompt (P2 · Simulate dates: card once, one window, Later returns after 30 d.) — n/a
 - [x] **H-11** Quick reference from home (P2 · Empty window `?` opens overlay.) — done
-- [ ] **H-12** Drop hint (P2 · Overlay visible during drag.) — missing
+- [x] **H-12** Drop hint (P2 · Overlay visible during drag.) — done
 - [~] **H-13** Version display (P2 · Both show same version.) — partial
 
 ## A — Accessibility (15)

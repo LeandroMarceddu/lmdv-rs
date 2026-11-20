@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5 (reader highlights/tables, panes, palette, drafts), the lightbox/tab-menu/overflow batches and the P5 export extras are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0/v0.5.5 releases are complete. Remaining: OI-104 (PDF papercuts, held), OI-165 (help links, blocked), panes/export extras and the P7 audit. P0–P5 and P6-01 complete.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is done (169 done, 52 substitutes, 90 partial, 13 missing, 18 n/a), the three P0 missing behaviors are implemented (wiki links, click placement, file drop), and v0.6.0 is released. Remaining: the P0 partials, the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -372,7 +372,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0** and **v0.5.5** were published from it (unsigned, no checksums).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5** and **v0.6.0** were published from it (unsigned, no checksums).
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
@@ -428,19 +428,25 @@
 - Dependencies: `resvg` and `flate2` were already compiled in the Typst graph; no new package entered `Cargo.lock`.
 - Full gate green after the batch. Open export items: OI-104 (held), OI-106 (needs the rune-mermaid serializer, OI-181), OI-183 (AVIF decoder).
 
-## Next up
+## P0 missing — wiki links, click placement, file drop — complete
 
-P6 and P5 are complete except the deliberately open gaps; the six substitute decisions were accepted by the user on 2026-11-20.
+- L-03: `lmdv_io::resolve_document_link` probes the spelling, each Markdown extension, then `index`/`README`/`readme`; the app resolves non-Markdown links on a worker (`JobMsg::LinkResolved`), keeps anchors and drops delayed answers after a tab/document change. An explicit `.md` spelling opens directly.
+- L-11: `WindowSpec::on_modifiers` feeds `LinkPlacement` — plain foreground, Ctrl background, Ctrl+Shift foreground, Shift new window, middle background. Residuals: plain opens a foreground tab (tab-per-document model), middle-drag cannot be distinguished, Shift loses the `#section`.
+- D-01/D-02/H-12: the root accepts Markdown drops, shows “Drop to open” while a drag is over the window, opens first-front/rest-background, and inserts at the tab index from the measured slots; non-Markdown drops are refused with a notice. X11/Windows only (Wayland reports no file drags).
+- Audit: 169 done, 52 substitute, 90 partial, 13 missing, 18 n/a; 45 P0 gaps remain (partials plus image drop and drag-to-scroll).
+- v0.6.0 tag; release notes in `docs/releases/v0.6.0.md`.
+
+## Next up
 
 **Next when work resumes:**
 
-1. P7 packaging hardening: OI-153 (add `LICENSE`, pick a three-part reverse-DNS id, fix the installer fallback icon, signed checksums), then OI-155 (Windows runtime) if Windows becomes a target.
-2. The 342-row parity audit (`docs/PARITY_CHECKLIST.md` is 0/342 checked) to triage the older P1–P4 tails.
-3. OI-104 (PDF papercuts, held), OI-106 (needs the rune-mermaid serializer, OI-181), OI-183 (AVIF decoder), OI-165 (repo links, blocked by the private repository).
+1. Triage the 45 P0 gap rows in `docs/PARITY_AUDIT.md` (tabs strip, editor preview/sync, links, start page/help), then D-03 image drop (OI-187) and drag-to-scroll (OI-186).
+2. The scheduled Rune port to `7a707454` (OI-189, `docs/RUNE_DELTA_2026-11-20.md`).
+3. P7 packaging: LICENSE, three-part reverse-DNS id, installer icon, signed checksums (OI-153); Windows runtime only if it becomes a target (OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 
-**Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. It looks like a rare Rune shaping-cache assertion under parallel layout, not a product bug — record any repeat with the run id.
+**Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. Record any repeat with the run id.
 
 ## P6-01b — complete
 

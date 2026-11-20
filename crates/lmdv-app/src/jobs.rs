@@ -71,6 +71,20 @@ pub enum JobMsg {
     TreeChanged { root: PathBuf },
     /// The recursive folder watch could not be installed.
     TreeWatchFailed { root: PathBuf, error: String },
+    /// A wiki-style local link probe finished (L-03/L-11).
+    ///
+    /// `tab`, `doc`, `dest`, `fragment` and `placement` are the click's own
+    /// context, so the completion can honor the active-tab guard and place the
+    /// document exactly as the gesture asked.
+    LinkResolved {
+        job: JobId,
+        tab: TabId,
+        doc: DocumentId,
+        dest: String,
+        fragment: Option<String>,
+        placement: crate::links::LinkPlacement,
+        result: Result<Option<lmdv_io::LinkResolution>, String>,
+    },
 }
 
 /// One window's worker→UI mailbox.
@@ -409,6 +423,54 @@ impl JobHub {
                 doc,
                 format,
                 result: Err("the export worker could not start".to_owned()),
+            });
+        }
+        job
+    }
+
+    /// Probes a local link's wiki-style spellings on a worker and posts
+    /// [`JobMsg::LinkResolved`] (L-03).
+    ///
+    /// The candidate order and canonicalization live in
+    /// [`lmdv_io::resolve_document_link`]; this method only carries the click's
+    /// placement context back so the UI can honor its active-tab guard.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_link(
+        &self,
+        mailbox: Arc<WorkerMailbox>,
+        tab: TabId,
+        doc: DocumentId,
+        dest: String,
+        fragment: Option<String>,
+        placement: crate::links::LinkPlacement,
+        root: PathBuf,
+        path: PathBuf,
+    ) -> JobId {
+        let job = self.allocate();
+        let worker_mailbox = mailbox.clone();
+        let worker_dest = dest.clone();
+        let worker_fragment = fragment.clone();
+        let spawned = rune::task::spawn("lmdv-link", move || {
+            let result = lmdv_io::resolve_document_link(&root, &path).map_err(|error| error.to_string());
+            worker_mailbox.post(JobMsg::LinkResolved {
+                job,
+                tab,
+                doc,
+                dest: worker_dest,
+                fragment: worker_fragment,
+                placement,
+                result,
+            });
+        });
+        if spawned.is_err() {
+            mailbox.post(JobMsg::LinkResolved {
+                job,
+                tab,
+                doc,
+                dest,
+                fragment,
+                placement,
+                result: Err("the link worker could not start".to_owned()),
             });
         }
         job

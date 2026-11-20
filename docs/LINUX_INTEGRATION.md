@@ -1072,7 +1072,7 @@ AppDir/
 * The desktop file **inside** the image should use `Exec=lmdv %f`; AppImage integration tools rewrite it to an absolute path to the `.AppImage` when they install it.
 * AppImage does not auto-integrate. Options: `AppImageLauncher` or `appimaged` moves/copies the file and installs the desktop entry/icon; otherwise:
   ```bash
-  ./lmdv-0.5.5-x86_64.AppImage --appimage-extract
+  ./lmdv-0.6.0-x86_64.AppImage --appimage-extract
   # copy squashfs-root/usr/share/applications/lmdv.desktop to ~/.local/share/applications,
   # rewrite Exec to the absolute .AppImage path, copy the icon, then register as in §3
   ```

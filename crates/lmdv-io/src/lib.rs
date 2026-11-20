@@ -28,7 +28,7 @@ pub mod write;
 
 pub use dirs::{AppDirs, DirsIssue, ResolvedDirs, documents_dir};
 pub use launch::{Launch, absolute_lexical, parse_args};
-pub use path_policy::{PathError, PathPolicy, ResolvedFile};
+pub use path_policy::{LinkResolution, PathError, PathPolicy, ResolvedFile, resolve_document_link};
 pub use read::{LARGE_DOC_BYTES, LoadedFile, MAX_DOC_BYTES, ReadError, is_large_document, probe, read_document};
 pub use tree::{SearchHit, TreeEntry, TreeError, TreeListing, is_markdown_name, list_tree, search_tree};
 pub use write::{SaveOutcome, WriteError, save_document};

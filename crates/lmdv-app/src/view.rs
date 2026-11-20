@@ -33,6 +33,11 @@ pub const PREVIEW_MAX_LINES: usize = 300;
 /// freeze the first frame.
 pub const PREVIEW_MAX_BYTES: usize = 256 * 1024;
 
+/// The “Drop to open” card's element key (H-12).
+pub const DROP_CARD_KEY: &str = "drop-card";
+/// The drop card's centered layer (D-01).
+pub const DROP_OVERLAY_KEY: &str = "drop-overlay";
+
 /// The editor header's line count and block count are catalog plurals.
 const EDITOR_LINES: lmdv_i18n::PluralKey = lmdv_i18n::plural_key("editor.lines");
 /// The block count's plural base.
@@ -112,22 +117,32 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
     crate::lightbox::overlay(state, cx, &kit, &mut layer);
     crate::palette_ui::overlay(state, cx, &kit, &mut layer);
     crate::settings_ui::overlay(state, cx, &kit, &mut layer);
-    // A-08: Escape and Tab close a menu and hand focus back to the tree. Rune's
-    // menus take Escape themselves when they are modal; F-12's is not (its Tab
-    // must close too), so the window handles both here. Every other key falls
-    // through untouched.
-    rune_kit::root(shell, layer).on_key(|state: &mut WindowState, event, tx| {
-        if event.key == rune::Key::Escape && state.left.is_peeking() {
-            state.left.end_peek();
-            return true;
-        }
-        if state.browser_menu().is_some() && matches!(event.key, rune::Key::Escape | rune::Key::Tab) {
-            state.close_browser_menu();
-            tx.focus(crate::browser::BROWSER_TREE_KEY, false);
-            return true;
-        }
-        false
-    })
+    drop_overlay(state, &kit, &mut layer);
+    rune_kit::root(shell, layer)
+        // D-01/D-02: the window root takes Markdown files from another app. A
+        // drag carrying none of them is stopped here rather than passed on, and
+        // its drop says why. Wayland reports no external file drags (winit
+        // 0.30); this is X11, Windows and macOS, plus the headless scripts.
+        .accepts_files(crate::window::is_markdown_path)
+        .on_drop_hover(|state: &mut WindowState, over, _: &mut Tx| state.drop.set_over(over))
+        .on_drop_files(|state: &mut WindowState, files, tx| state.dropped_files(files, tx))
+        .on_drop_rejected(|state: &mut WindowState, files, _: &mut Tx| state.dropped_files_rejected(files))
+        // A-08: Escape and Tab close a menu and hand focus back to the tree.
+        // Rune's menus take Escape themselves when they are modal; F-12's is
+        // not (its Tab must close too), so the window handles both here. Every
+        // other key falls through untouched.
+        .on_key(|state: &mut WindowState, event, tx| {
+            if event.key == rune::Key::Escape && state.left.is_peeking() {
+                state.left.end_peek();
+                return true;
+            }
+            if state.browser_menu().is_some() && matches!(event.key, rune::Key::Escape | rune::Key::Tab) {
+                state.close_browser_menu();
+                tx.focus(crate::browser::BROWSER_TREE_KEY, false);
+                return true;
+            }
+            false
+        })
 }
 
 /// The preview block menu (E-04): “Edit from here” at the pointer, plus
@@ -644,6 +659,17 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
         // A torn tab leaves the 28-point strip band, which the strip's scroll
         // viewport clips; the layered ghost floats over the window instead.
         .build_layered(kit, layer);
+
+    // D-02: the last frame's tab band and tab rects turn a file drop's x into
+    // the index its files are inserted at. The kit keys every built tab slot
+    // `t-{id}`; the rects are in window points, as `Tx::drop_point` reports.
+    let rects: Vec<(usize, [f32; 4])> = state
+        .tabs()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, tab)| cx.window_layout(&format!("t-{}", tab_key(tab.id))).map(|rect| (index, rect)))
+        .collect();
+    state.drop.record_geometry(cx.window_layout("tab-band"), &rects);
 
     row().key("tab-band").w_full().h(40.0).px(8.0).center_y().child(strip.grow(1.0))
 }
@@ -2039,6 +2065,39 @@ fn source_preview(doc: &Document, kit: &Kit, note: Option<&str>) -> El {
         )
 }
 
+/// The “Drop to open” card a file drag shows over the window (D-01/H-12).
+///
+/// It is decoration for a gesture already in flight: it takes no pointer
+/// events, no keyboard focus and no accessibility node, so the drag can end on
+/// anything under it and a reader never hears it. The hover comes from the
+/// root's `on_drop_hover` and ends when the drag leaves or drops.
+fn drop_overlay(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
+    if !state.drop.over() {
+        return;
+    }
+    let c = &kit.c;
+    let card = row()
+        .key(DROP_CARD_KEY)
+        .padding(16.0)
+        .gap(10.0)
+        .center_y()
+        .focusable(false)
+        .a11y_hidden()
+        .child(icon(&icons::DOCUMENT, 20.0).color(c.icon_muted))
+        .child(text(lmdv_i18n::t!("drop.card")).font(kit.ty.ui_medium).color(c.text_base));
+    let surface = rune_kit::popover::raised(kit, card, kit.radius.md);
+    layer.push(
+        el().key(DROP_OVERLAY_KEY)
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .focusable(false)
+            .a11y_hidden()
+            .center()
+            .child(surface),
+    );
+}
+
 fn notice_bar(notice: &Notice, kit: &Kit) -> El {
     let c = &kit.c;
     let mut bar = row()
@@ -2665,6 +2724,160 @@ mod tests {
             state.poll(0.0, &mut tx);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
+    }
+
+    /// A ready document in the shared registry, so a drop never starts a load.
+    fn ready_file(shared: &crate::shared::AppShared, path: &std::path::Path, text: &str) {
+        let id = shared.docs_mut().allocate_id();
+        let doc = std::rc::Rc::new(Document::ready(
+            id,
+            lmdv_core::DocumentKey::File(path.to_path_buf()),
+            crate::window::title_for_path(path),
+            lmdv_core::SourceBuffer::new(text),
+        ));
+        shared.docs_mut().insert_ready(doc);
+    }
+
+    /// The strip's tab slots in the order they draw: (`x`, label).
+    fn tab_slots(elements: &[ElementInfo]) -> Vec<(f32, String)> {
+        let mut slots: Vec<(f32, String)> = elements
+            .iter()
+            .filter(|element| element.key.as_deref().is_some_and(|key| key.starts_with("t-tab-")))
+            .filter_map(|element| Some((element.rect[0], element.label.clone()?)))
+            .collect();
+        slots.sort_by(|left, right| left.0.total_cmp(&right.0));
+        slots
+    }
+
+    fn has_key(elements: &[ElementInfo], key: &str) -> bool {
+        elements.iter().any(|element| element.key.as_deref() == Some(key))
+    }
+
+    #[test]
+    fn a_file_drag_shows_the_drop_card_and_leaving_takes_it_away() {
+        let temp = TempDir::new().unwrap();
+        let state = window(&temp);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        assert!(!has_key(&runtime.elements(), DROP_CARD_KEY), "no card without a drag");
+
+        runtime.drag_files(vec![temp.path().join("notes.md")], Some((420.0, 300.0)));
+        runtime.frame(1.0 / 60.0);
+        runtime.frame(2.0 / 60.0);
+        let elements = runtime.elements();
+        let card = elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(DROP_CARD_KEY))
+            .expect("the card follows the drag");
+        assert!(!card.focusable, "the card is decoration, not a focus stop");
+        assert!(
+            elements.iter().any(|element| element.text.as_deref() == Some(lmdv_i18n::t!("drop.card"))),
+            "the card is localized"
+        );
+        let tree = format!("{:?}", runtime.accessibility_json());
+        assert!(!tree.contains(DROP_CARD_KEY), "the card is hidden from assistive clients");
+        assert!(!tree.contains(lmdv_i18n::t!("drop.card")), "its words are not read either");
+
+        runtime.drag_files_leave();
+        // The card fades out as Rune unmounts it; the gate waits for the exit.
+        for frame in 3..40 {
+            runtime.frame(f64::from(frame) / 60.0);
+        }
+        assert!(!has_key(&runtime.elements(), DROP_CARD_KEY), "leaving the window removes it");
+    }
+
+    #[test]
+    fn a_drop_opens_markdown_files_and_takes_the_card_away() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        scene_tabs(&mut state);
+        let one = temp.path().join("dropped-one.md");
+        let two = temp.path().join("dropped-two.markdown");
+        ready_file(&shared, &one, "# One\n");
+        ready_file(&shared, &two, "# Two\n");
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        assert_eq!(tab_slots(&runtime.elements()).len(), 3, "the tabs scene");
+
+        runtime.drag_files(vec![one.clone(), two.clone()], Some((550.0, 420.0)));
+        runtime.frame(2.0 / 60.0);
+        runtime.frame(3.0 / 60.0);
+        assert!(has_key(&runtime.elements(), DROP_CARD_KEY), "the drag shows the card");
+        runtime.drop_files(vec![one, two], Some((550.0, 420.0)));
+        // The card fades out as Rune unmounts it; the gate waits for the exit.
+        for frame in 4..40 {
+            runtime.frame(f64::from(frame) / 60.0);
+        }
+        let elements = runtime.elements();
+        assert!(!has_key(&elements, DROP_CARD_KEY), "the drop removes the card");
+        let labels: Vec<String> = tab_slots(&elements).into_iter().map(|(_, label)| label).collect();
+        assert_eq!(
+            labels,
+            ["Welcome to lmdv", "Reading notes", "A note being edited", "dropped-one.md", "dropped-two.markdown"],
+            "the first file opens in front and the rest join behind it"
+        );
+    }
+
+    #[test]
+    fn a_drop_on_the_strip_inserts_at_the_tab_under_the_pointer() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        scene_tabs(&mut state);
+        let one = temp.path().join("first.md");
+        let two = temp.path().join("second.md");
+        ready_file(&shared, &one, "# First\n");
+        ready_file(&shared, &two, "# Second\n");
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        runtime.frame(2.0 / 60.0);
+
+        let slots: Vec<(f32, String)> = tab_slots(&runtime.elements());
+        assert_eq!(slots.len(), 3, "the tabs scene");
+        let second = runtime
+            .elements()
+            .into_iter()
+            .filter(|element| element.key.as_deref().is_some_and(|key| key.starts_with("t-tab-")))
+            .filter_map(|element| Some((element.rect, element.label.clone()?)))
+            .find(|(_, label)| label == &slots[1].1)
+            .expect("the second tab's rect");
+        // The left half of the second tab, past its left edge and before its middle.
+        let at = (second.0[0] + second.0[2] / 4.0, second.0[1] + second.0[3] / 2.0);
+
+        runtime.drop_files(vec![one, two], Some(at));
+        for frame in 3..40 {
+            runtime.frame(f64::from(frame) / 60.0);
+        }
+        let labels: Vec<String> = tab_slots(&runtime.elements()).into_iter().map(|(_, label)| label).collect();
+        assert_eq!(
+            labels,
+            ["Welcome to lmdv", "first.md", "second.md", "Reading notes", "A note being edited"],
+            "the files take the drop index and the next ones"
+        );
+    }
+
+    #[test]
+    fn a_non_markdown_drop_opens_nothing_and_names_the_file() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        scene_tabs(&mut state);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+
+        runtime.drop_files(vec![temp.path().join("diagram.png")], Some((550.0, 420.0)));
+        runtime.frame(2.0 / 60.0);
+        let elements = runtime.elements();
+        assert_eq!(tab_slots(&elements).len(), 3, "a picture opens no tab");
+        assert!(
+            elements.iter().any(|element| element.text.as_deref().is_some_and(|text| text.contains("diagram.png"))),
+            "the notice says which file it refused"
+        );
+        assert!(!has_key(&elements, DROP_CARD_KEY), "a refused drag shows no drop card");
     }
 
     #[test]

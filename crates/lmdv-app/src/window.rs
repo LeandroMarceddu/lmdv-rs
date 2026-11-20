@@ -1,6 +1,6 @@
 //! One window: its tabs, transient UI state, mailboxes and job completions.
 
-use std::cell::{OnceCell, RefCell};
+use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -297,6 +297,91 @@ pub struct UiState {
     pub(crate) focus_visible: bool,
 }
 
+/// A file drag from another app over this window (D-01, D-02, H-12).
+///
+/// The hover flag drives the “Drop to open” card. The strip geometry is what
+/// the last frame laid out, in window points, so a drop can turn its x into a
+/// tab index: the kit keys every tab slot `t-{id}`, and `Cx::window_layout`
+/// reads those rects. A strip of more than forty tabs builds only the ones near
+/// its viewport; the index is exact on every built tab and resolves to a built
+/// tab's neighbour otherwise.
+#[derive(Debug, Default)]
+pub struct DropState {
+    /// A file drag this window takes is over it (D-01/H-12).
+    over: bool,
+    /// The tab band's rect, from the last frame.
+    strip: Cell<Option<[f32; 4]>>,
+    /// Each built tab's strip index and rect, from the last frame.
+    tabs: RefCell<Vec<(usize, [f32; 4])>>,
+}
+
+impl DropState {
+    /// Whether a drag of Markdown files is over the window (H-12).
+    pub fn over(&self) -> bool {
+        self.over
+    }
+
+    /// The hover the root's `on_drop_hover` reports (H-12).
+    pub(crate) fn set_over(&mut self, over: bool) {
+        self.over = over;
+    }
+
+    /// Remembers the strip's and its built tabs' last-frame rects (D-02).
+    pub(crate) fn record_geometry(&self, strip: Option<[f32; 4]>, tabs: &[(usize, [f32; 4])]) {
+        self.strip.set(strip);
+        let mut slot = self.tabs.borrow_mut();
+        slot.clear();
+        slot.extend_from_slice(tabs);
+    }
+
+    /// The strip index a drop at `(x, y)` in window points inserts at: the
+    /// first tab whose middle is right of `x`, or just past the last built one
+    /// (D-02). `None` when the point is not on the tab band.
+    pub(crate) fn strip_index(&self, x: f32, y: f32) -> Option<usize> {
+        let strip = self.strip.get()?;
+        if x < strip[0] || x > strip[0] + strip[2] || y < strip[1] || y > strip[1] + strip[3] {
+            return None;
+        }
+        let tabs = self.tabs.borrow();
+        if tabs.is_empty() {
+            return None;
+        }
+        Some(
+            tabs.iter()
+                .find(|(_, rect)| x < rect[0] + rect[2] * 0.5)
+                .map_or_else(|| tabs.last().map_or(0, |(index, _)| index + 1), |(index, _)| *index),
+        )
+    }
+}
+
+/// Where an open places its tab (D-02, T-13/T-14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OpenPlace {
+    /// The normal open: in front, replacing a front start page (T-13).
+    Front,
+    /// Appended behind the front tab (T-14's background open).
+    Background,
+    /// At a strip index, in front (D-02's first dropped file).
+    At(usize),
+    /// At a strip index, behind the front tab (D-02's later files).
+    AtBackground(usize),
+}
+
+impl OpenPlace {
+    /// The strip index to insert at, when this placement names one.
+    fn index(self) -> Option<usize> {
+        match self {
+            Self::At(index) | Self::AtBackground(index) => Some(index),
+            Self::Front | Self::Background => None,
+        }
+    }
+
+    /// Whether the tab joins behind the front tab.
+    fn background(self) -> bool {
+        matches!(self, Self::Background | Self::AtBackground(_))
+    }
+}
+
 /// The result of closing a tab.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseOutcome {
@@ -332,6 +417,9 @@ pub struct WindowState {
     pub right: PaneState,
     /// Tab-strip gestures.
     pub drag: TabDragState,
+    /// A file drag from another app, and the strip's last-frame geometry (D-01,
+    /// D-02, H-12).
+    pub drop: DropState,
     /// A torn-out tab's grab point and hover target (P4-02c).
     pub(crate) tear: crate::tear_out::TearState,
     /// Transient UI state.
@@ -362,6 +450,8 @@ pub struct WindowState {
     waker: RefCell<Option<Waker>>,
     /// One link handler per window, shared by every article frame.
     link_wire: LinkWire,
+    /// The modifiers the window last reported, for link-click placement (L-11).
+    link_mods: rune::Mods,
     /// One task-checkbox control handler per window, attached only to viewer
     /// articles.
     task_control_wire: TaskControlWire,
@@ -464,6 +554,7 @@ impl WindowState {
                 .range(f32::from(RIGHT_WIDTH_DEFAULT), f32::from(RIGHT_WIDTH_MAX))
                 .collapsed(),
             drag: TabDragState::new(),
+            drop: DropState::default(),
             tear: crate::tear_out::TearState::default(),
             ui: UiState::default(),
             reading: ReadingState::default(),
@@ -482,6 +573,7 @@ impl WindowState {
             link_wire: Rc::new(|e: rune::El| {
                 e.on_link(|state: &mut WindowState, dest: &str, tx: &mut Tx| state.open_link(dest, tx))
             }),
+            link_mods: rune::Mods::default(),
             task_control_wire: crate::tasks::task_control_wire(),
             block_wire: crate::preview_nav::block_wire(),
             tasks: crate::tasks::TaskState::default(),
@@ -645,6 +737,16 @@ impl WindowState {
         &self.link_wire
     }
 
+    /// The modifiers this window last reported, for link-click placement.
+    pub(crate) fn link_modifiers(&self) -> rune::Mods {
+        self.link_mods
+    }
+
+    /// Records the held modifiers; `WindowSpec::on_modifiers` calls this.
+    pub(crate) fn set_link_modifiers(&mut self, mods: rune::Mods) {
+        self.link_mods = mods;
+    }
+
     /// The shared task-control wire, used only by viewer articles.
     pub(crate) fn cached_task_control_wire(&self) -> &TaskControlWire {
         &self.task_control_wire
@@ -788,6 +890,12 @@ impl WindowState {
     /// goes on the opened tab's Back list (O-12), unless this open is itself a
     /// Back/Forward move or a session replay.
     pub fn open_path(&mut self, path: PathBuf) -> TabId {
+        self.open_path_placed(path, OpenPlace::Front).0
+    }
+
+    /// [`Self::open_path`] with D-02's drop placements, returning the tab and
+    /// whether it was newly opened (false when an open tab came forward).
+    fn open_path_placed(&mut self, path: PathBuf, place: OpenPlace) -> (TabId, bool) {
         let from = self.open_origin();
         let path = lmdv_io::absolute_lexical(&path);
         // F-01: a document outside the browser's root re-roots the pane there;
@@ -799,21 +907,77 @@ impl WindowState {
         };
 
         if let Some(index) = self.index_of_document(doc.id) {
-            self.switch_to_index(index);
+            if !place.background() {
+                self.switch_to_index(index);
+            }
             let tab = self.tabs[index].id;
-            self.record_open(tab, from);
-            return tab;
+            if !place.background() {
+                self.record_open(tab, from);
+            }
+            return (tab, false);
         }
 
         let needs_load = !matches!(*doc.status.borrow(), DocStatus::Ready);
-        let tab = self.attach_document(doc.clone());
+        let tab = self.attach_document_placed(doc.clone(), place.index(), None, place.background());
         if needs_load {
             self.start_load(doc.id, path);
         } else if !self.restoring_tabs {
             self.shared.record_recent(path, unix_millis());
         }
-        self.record_open(tab, from);
-        tab
+        if !place.background() {
+            self.record_open(tab, from);
+        }
+        (tab, true)
+    }
+
+    /// Opens files dropped from another app (D-02).
+    ///
+    /// Only Markdown paths are opened; `files` has already passed
+    /// `accepts_files`. The first opens in front and the rest join behind it.
+    /// Dropped on the tab strip, they take the strip index the drop point names
+    /// and successive files follow at the next indices.
+    pub(crate) fn dropped_files(&mut self, files: &[PathBuf], tx: &mut Tx) {
+        self.drop.set_over(false);
+        let strip = tx.drop_point().and_then(|point| self.drop.strip_index(point.window_x, point.window_y));
+        self.open_dropped_at(files, strip);
+        self.apply_pending_scroll(tx);
+    }
+
+    /// [`Self::dropped_files`] without a pointer, for tests and the headless
+    /// script path: `strip` is the drop index, `None` for the window itself.
+    pub(crate) fn open_dropped_at(&mut self, files: &[PathBuf], strip: Option<usize>) {
+        let markdown: Vec<PathBuf> = files.iter().filter(|path| is_markdown_path(path)).cloned().collect();
+        if markdown.is_empty() {
+            return;
+        }
+        let mut cursor = strip;
+        for (index, path) in markdown.into_iter().enumerate() {
+            let place = match cursor {
+                Some(at) if index == 0 => OpenPlace::At(at),
+                Some(at) => OpenPlace::AtBackground(at),
+                None if index == 0 => OpenPlace::Front,
+                None => OpenPlace::Background,
+            };
+            let (tab, opened) = self.open_path_placed(path, place);
+            if let Some(at) = cursor {
+                // New files take the following indices; an existing document
+                // opening in front moves the cursor past its tab once.
+                if opened || index == 0 {
+                    cursor = self.tabs.iter().position(|candidate| candidate.id == tab).map(|at| at + 1).or(Some(at));
+                }
+            }
+        }
+    }
+
+    /// Says why a dropped file did not open (D-02: Markdown only).
+    pub(crate) fn dropped_files_rejected(&mut self, files: &[PathBuf]) {
+        self.drop.set_over(false);
+        let Some(first) = files.first() else { return };
+        let name = first
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| first.display().to_string());
+        self.notice(lmdv_i18n::t!("msg.notMarkdown", "name" => name));
     }
 
     /// Adds a ready in-memory document, for scenes and tests. Never touches
@@ -850,6 +1014,18 @@ impl WindowState {
         index: Option<usize>,
         anchor: Option<ScrollAnchor>,
     ) -> TabId {
+        self.attach_document_placed(doc, index, anchor, false)
+    }
+
+    /// [`Self::attach_document_at`] with D-02's background placement: the tab
+    /// joins the strip and the front tab stays where it is.
+    fn attach_document_placed(
+        &mut self,
+        doc: Rc<Document>,
+        index: Option<usize>,
+        anchor: Option<ScrollAnchor>,
+        background: bool,
+    ) -> TabId {
         let mut tab = Tab::for_document(self.allocate_tab(), doc.clone());
         self.adopt_cached_parse(&mut tab, &doc);
         if let Some(anchor) = anchor {
@@ -862,13 +1038,15 @@ impl WindowState {
         let tab_id = tab.id;
         let anchor = tab.view.anchor.clone();
         // OI-105: an export keeps its document front, so an opened tab joins the
-        // strip in the background until the job ends.
+        // strip in the background until the job ends. D-02's later dropped files
+        // join the same way, without an export.
         let pinned = self.export_pinned_document().and_then(|doc| self.index_of_document(doc));
-        let replacing_start = pinned.is_none()
+        let keep_front = background || pinned.is_some();
+        let replacing_start = !keep_front
             && index.is_none()
             && !self.restoring_tabs
             && self.tabs.get(self.active).is_some_and(Tab::is_start);
-        if !replacing_start && pinned.is_none() {
+        if !replacing_start && !keep_front {
             self.capture_active_position();
             self.save_outline_filter();
         }
@@ -877,19 +1055,11 @@ impl WindowState {
         } else if let Some(index) = index {
             let index = index.min(self.tabs.len());
             self.tabs.insert(index, tab);
-            self.active = match pinned {
-                Some(active) => {
-                    if index <= active {
-                        active + 1
-                    } else {
-                        active
-                    }
-                }
-                None => index,
-            };
+            self.active =
+                if keep_front { if index <= self.active { self.active + 1 } else { self.active } } else { index };
         } else {
             self.tabs.push(tab);
-            if pinned.is_none() {
+            if !keep_front {
                 self.active = self.tabs.len().saturating_sub(1);
             }
         }
@@ -897,7 +1067,7 @@ impl WindowState {
         if let Some(path) = doc.key.borrow().path().map(Path::to_path_buf) {
             self.shared.watch_path(&path);
         }
-        if pinned.is_none() {
+        if !keep_front {
             self.note_active_tab();
             self.sync_editor_panes();
             self.begin_restore(&anchor);
@@ -1532,6 +1702,9 @@ impl WindowState {
                 }
             }
             JobMsg::Probed { .. } => false,
+            JobMsg::LinkResolved { tab, doc, dest, fragment, placement, result, .. } => {
+                self.finish_link_resolve(tab, doc, dest, fragment, placement, result, tx)
+            }
             JobMsg::Stored { ok, .. } => {
                 if ok {
                     false
@@ -2202,6 +2375,20 @@ pub fn title_for_path(path: &Path) -> String {
         .unwrap_or_else(|| path.display().to_string())
 }
 
+/// Whether an external drop may open `path` (D-02: Markdown only).
+///
+/// The rule is the file browser's own [`lmdv_io::is_markdown_name`], so a drop
+/// and the tree agree on `.md`, `.markdown` and the rest.
+pub(crate) fn is_markdown_path(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).is_some_and(lmdv_io::is_markdown_name)
+}
+
+/// Remembers the modifiers a window holds so a link click can place its target
+/// (T-12/L-11). `WindowSpec::on_modifiers` calls this on every change.
+pub(crate) fn modifiers_changed(state: &mut WindowState, mods: rune::Mods, _: &mut Tx) {
+    state.set_link_modifiers(mods);
+}
+
 /// Whether a completed read describes newer content than a document's saved
 /// base (OI-172).
 ///
@@ -2332,6 +2519,145 @@ mod tests {
         assert_ne!(first, second);
         assert_eq!(state.tabs().len(), 2);
         assert_eq!(state.active_index(), 1);
+    }
+
+    fn ready_files(shared: &AppShared, temp: &TempDir, names: &[&str]) -> Vec<PathBuf> {
+        names
+            .iter()
+            .map(|name| {
+                let path = temp.path().join(name);
+                ready_doc(shared, path.to_str().expect("a UTF-8 test path"), "text");
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_markdown_drop_opens_the_first_in_front_and_the_rest_behind() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let paths = ready_files(&shared, &temp, &["one.md", "two.markdown", "three.MD"]);
+        state.open_synthetic("Existing", "existing");
+        let existing = state.active_tab().map(|tab| tab.id).expect("a document");
+
+        state.open_dropped_at(&paths, None);
+
+        assert_eq!(state.tabs().len(), 4, "one tab per dropped file");
+        let titles: Vec<String> = state.tabs().iter().map(Tab::title).collect();
+        assert_eq!(titles, ["Existing", "one", "two", "three"]);
+        assert_eq!(state.active_tab().map(Tab::title).as_deref(), Some("one"), "the first file is in front");
+        assert_eq!(state.tabs()[0].id, existing, "the old front tab keeps its place");
+        assert_eq!(state.tabs()[2].title(), "two", "the remaining files joined behind");
+        assert_eq!(state.tabs()[3].title(), "three");
+    }
+
+    #[test]
+    fn a_drop_of_a_file_already_shown_brings_that_tab_forward_and_never_duplicates_it() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let paths = ready_files(&shared, &temp, &["one.md", "two.md"]);
+        state.open_synthetic("Existing", "existing");
+        let first = state.open_path(paths[0].clone());
+        state.open_synthetic("Front", "front");
+        assert_ne!(state.active_tab().map(|tab| tab.id), Some(first));
+
+        state.open_dropped_at(&paths, None);
+
+        assert_eq!(state.tabs().iter().filter(|tab| tab.id == first).count(), 1, "no duplicate");
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(first), "the dropped document comes forward");
+        assert_eq!(state.tabs().last().map(Tab::title).as_deref(), Some("two"), "the rest still joins behind");
+    }
+
+    #[test]
+    fn a_strip_drop_inserts_at_the_index_and_successive_files_follow() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let paths = ready_files(&shared, &temp, &["a.md", "b.md", "c.md"]);
+        state.open_synthetic("One", "one");
+        state.open_synthetic("Two", "two");
+        state.open_synthetic("Three", "three");
+        state.activate_index(2);
+
+        state.open_dropped_at(&paths, Some(1));
+
+        let titles: Vec<String> = state.tabs().iter().map(Tab::title).collect();
+        assert_eq!(titles, ["One", "a", "b", "c", "Two", "Three"]);
+        assert_eq!(state.active_index(), 1, "the first dropped file takes the drop index");
+        assert_eq!(state.active_tab().map(Tab::title).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn a_strip_drop_past_the_last_tab_appends_after_it() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let paths = ready_files(&shared, &temp, &["a.md"]);
+        state.open_synthetic("One", "one");
+        state.open_synthetic("Two", "two");
+
+        state.open_dropped_at(&paths, Some(2));
+
+        let titles: Vec<String> = state.tabs().iter().map(Tab::title).collect();
+        assert_eq!(titles, ["One", "Two", "a"]);
+    }
+
+    #[test]
+    fn the_strip_drop_index_reads_the_measured_tab_rects() {
+        let temp = TempDir::new().unwrap();
+        let state = window(&temp);
+        // A strip from y 40 to 68; tabs 80 points wide, the last one longer.
+        state.drop.record_geometry(
+            Some([0.0, 40.0, 1000.0, 28.0]),
+            &[(0, [8.0, 40.0, 80.0, 28.0]), (1, [96.0, 40.0, 80.0, 28.0]), (2, [184.0, 40.0, 200.0, 28.0])],
+        );
+
+        assert_eq!(state.drop.strip_index(0.0, 50.0), Some(0), "left of the first tab");
+        assert_eq!(state.drop.strip_index(40.0, 50.0), Some(0), "left of its middle");
+        assert_eq!(state.drop.strip_index(60.0, 50.0), Some(1), "past its middle");
+        assert_eq!(state.drop.strip_index(120.0, 50.0), Some(1));
+        assert_eq!(state.drop.strip_index(200.0, 50.0), Some(2));
+        assert_eq!(state.drop.strip_index(1000.0, 50.0), Some(3), "past the last tab");
+        assert_eq!(state.drop.strip_index(50.0, 100.0), None, "below the tab band is a window drop");
+        assert_eq!(state.drop.strip_index(1200.0, 50.0), None, "outside the band's right edge");
+        assert_eq!(state.drop.strip_index(-10.0, 50.0), None, "outside its left edge");
+    }
+
+    #[test]
+    fn only_markdown_paths_are_dropped_in() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let paths = [temp.path().join("a.md"), temp.path().join("b.MARKDOWN"), temp.path().join("c.txt")];
+        let start = state.tabs().len();
+        assert!(
+            matches!(state.active_tab().map(|tab| &tab.source), Some(TabSource::Start)),
+            "a start page is in front"
+        );
+
+        state.open_dropped_at(&paths, None);
+
+        assert_eq!(state.tabs().len(), start + 1, "the first file replaces the start page and the second joins it");
+        let titles: Vec<String> = state.tabs().iter().map(Tab::title).collect();
+        assert_eq!(titles, ["a", "b"], "the text file is not opened");
+        assert!(is_markdown_path(&temp.path().join("a.md")));
+        assert!(is_markdown_path(&temp.path().join("b.MARKDOWN")), "the browser's rule ignores case");
+        assert!(!is_markdown_path(&temp.path().join("c.txt")));
+        assert!(!is_markdown_path(&temp.path().join("no-extension")), "a stem alone is not Markdown");
+    }
+
+    #[test]
+    fn a_refused_drop_says_which_file_is_not_markdown() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let paths = [temp.path().join("picture.png")];
+
+        state.dropped_files_rejected(&paths);
+
+        let notice = state.ui.notice.as_ref().expect("a notice explains the refusal");
+        assert!(notice.text.contains("picture.png"), "the notice names the file: {}", notice.text);
+        assert!(notice.text.to_lowercase().contains("markdown"), "and says what it would take");
     }
 
     #[test]

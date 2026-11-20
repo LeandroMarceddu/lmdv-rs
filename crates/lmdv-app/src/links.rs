@@ -8,20 +8,27 @@
 //!
 //! The rules: fragments resolve through [`MdDoc::resolve_heading`]; footnote
 //! references and entries scroll inside the article; `http`/`https`/`mailto`
-//! open externally on the explicit click; relative Markdown links open in a tab
-//! through the normal load job, at the `#section` they name when they carry one;
-//! network/device spellings and script URLs are refused with a notice. Nothing
-//! here follows a link on its own.
+//! open externally on the explicit click; relative links either open a
+//! Markdown tab through the normal load job (at the `#section` they name when
+//! they carry one) or, when their spelling does not already end in a Markdown
+//! extension, probe the wiki-style spellings on a worker first (L-03);
+//! network/device spellings and script URLs are refused with a notice. A
+//! click's placement follows its modifiers and button (L-11): plain in front,
+//! Ctrl or middle in a background tab, Ctrl+Shift in a foreground tab, Shift in
+//! a new window. Nothing here follows a link on its own.
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use lmdv_core::DocumentKey;
+use lmdv_core::{DocumentId, DocumentKey, TabId};
+use lmdv_io::Launch;
 use lmdv_md::{Block, MdDoc};
 use lmdv_render::{DetailsState, LinkWire, heading_key};
-use rune::Tx;
+use rune::{Mods, PointerButton, Tx};
 
 use crate::commands::MARKDOWN_EXTENSIONS;
 use crate::window::{TabView, WindowState};
+use crate::windows::{WindowKind, WindowOpenRequest};
 
 /// What one link destination means.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -51,6 +58,43 @@ pub enum LinkTarget {
     },
     /// A destination the app refuses, with the reason to show.
     Refused(String),
+}
+
+/// How a link click places the document it opens (T-12/L-11).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkPlacement {
+    /// The normal foreground open: the current window, in front. This is the
+    /// app's existing plain-click behavior.
+    #[default]
+    Current,
+    /// Ctrl+click or a middle click: a tab behind the one in front.
+    BackgroundTab,
+    /// Ctrl+Shift+click: a new tab in front.
+    ForegroundTab,
+    /// Shift+click: a window of its own.
+    NewWindow,
+}
+
+impl LinkPlacement {
+    /// The placement a click asks for.
+    ///
+    /// A middle click wins over the keyboard modifiers, as a browser's middle
+    /// click does. Shift alone asks for a window; Ctrl+Shift makes it a
+    /// foreground tab instead.
+    pub fn for_click(mods: Mods, button: PointerButton) -> Self {
+        if button == PointerButton::Middle {
+            return Self::BackgroundTab;
+        }
+        if mods.shift && !mods.ctrl {
+            Self::NewWindow
+        } else if mods.ctrl && mods.shift {
+            Self::ForegroundTab
+        } else if mods.ctrl {
+            Self::BackgroundTab
+        } else {
+            Self::Current
+        }
+    }
 }
 
 impl TabView {
@@ -132,8 +176,18 @@ impl WindowState {
         self.local_target(dest, false)
     }
 
-    /// Runs one rendered link destination.
+    /// Runs one rendered link destination with the click's placement.
+    ///
+    /// The window records the held modifiers through `WindowSpec::on_modifiers`;
+    /// a middle click is reported by Rune in [`Tx::button`], so both decide the
+    /// placement here (L-11).
     pub fn open_link(&mut self, dest: &str, tx: &mut Tx) {
+        let placement = LinkPlacement::for_click(self.link_modifiers(), tx.button());
+        self.open_link_placed(dest, placement, tx);
+    }
+
+    /// [`Self::open_link`] with an explicit placement.
+    pub(crate) fn open_link_placed(&mut self, dest: &str, placement: LinkPlacement, tx: &mut Tx) {
         match self.classify_link(dest) {
             LinkTarget::Fragment(fragment) => self.jump_fragment(&fragment, tx),
             // OI-162: a footnote jump glides like a heading when its target is
@@ -164,24 +218,83 @@ impl WindowState {
                     self.notice(lmdv_i18n::t!("msg.openFailed", "name" => url, "err" => error));
                 }
             }
+            // L-03: a spelling that already names a Markdown file is the first
+            // candidate itself and opens at once, keeping same-document jumps,
+            // Back/Forward recording and the editor lease rules on the frame
+            // the click happened. Every other local spelling probes the wiki
+            // candidates on a worker.
             LinkTarget::Local { path, markdown: true, fragment } => {
-                self.open_linked_document(path, fragment, tx);
+                self.place_linked_document(path, fragment, placement, tx);
             }
-            // L-05: a link to a folder roots the file pane there and shows it,
-            // with no tab. The listing decides whether the target really is a
-            // folder with Markdown; a plain file falls back to the notice M-31
-            // wants before opening something externally.
-            LinkTarget::Local { path, markdown: false, .. } => self.open_folder_link(path),
+            LinkTarget::Local { path, markdown: false, fragment } => {
+                self.resolve_local_link(path, dest, fragment, placement);
+            }
             LinkTarget::Refused(reason) => self.notice(reason),
         }
     }
 
-    /// Opens a Markdown link's document, at its `#section` when it names one.
+    /// Starts the wiki-style probe for a local link whose spelling does not end
+    /// in a Markdown extension (L-03). The worker posts
+    /// [`crate::jobs::JobMsg::LinkResolved`] with this click's context.
+    fn resolve_local_link(&mut self, path: PathBuf, dest: &str, fragment: Option<String>, placement: LinkPlacement) {
+        let display = dest.split_once('#').map_or(dest, |(path, _)| path).to_owned();
+        let Some(root) = self.active_document_root() else { return };
+        let Some((tab, doc)) = self.active_tab().and_then(|tab| Some((tab.id, tab.document_id()?))) else { return };
+        let path = lmdv_io::absolute_lexical(&path);
+        self.shared.jobs().resolve_link(self.worker().clone(), tab, doc, display, fragment, placement, root, path);
+    }
+
+    /// Accepts a [`crate::jobs::JobMsg::LinkResolved`] completion.
+    ///
+    /// The click's tab and document must still be the ones in front: a resolve
+    /// that lands after the user switched away changes nothing (L-11). That is
+    /// the only guard; a link followed in the tab it was clicked from acts
+    /// normally, including a background placement.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finish_link_resolve(
+        &mut self,
+        tab: TabId,
+        doc: DocumentId,
+        dest: String,
+        fragment: Option<String>,
+        placement: LinkPlacement,
+        result: Result<Option<lmdv_io::LinkResolution>, String>,
+        tx: &mut Tx,
+    ) -> bool {
+        let still_active =
+            self.active_tab().is_some_and(|current| current.id == tab && current.document_id() == Some(doc));
+        if !still_active {
+            return false;
+        }
+        match result {
+            Ok(Some(lmdv_io::LinkResolution::File { path, markdown: true })) => {
+                self.place_linked_document(path, fragment, placement, tx);
+            }
+            // L-07 is not part of the wiki resolver: an existing non-Markdown
+            // file takes the same folder attempt as before and reports
+            // "not a Markdown file" when the listing refuses it.
+            Ok(Some(lmdv_io::LinkResolution::File { path, markdown: false })) => self.open_folder_link(path),
+            // L-05: a link resolving to a directory roots the file pane there
+            // and shows it, with no tab.
+            Ok(Some(lmdv_io::LinkResolution::Directory(path))) => self.open_folder_link(path),
+            Ok(None) | Err(_) => self.notice(lmdv_i18n::t!("msg.notFound", "name" => dest)),
+        }
+        true
+    }
+
+    /// Applies a click placement to an opened Markdown document.
     ///
     /// A link to the document on screen moves within it instead of reloading
-    /// the file (M-30): the same place rule as an outline jump applies, so the
-    /// place left goes on Back and a landing under 8 points does not (O-12).
-    fn open_linked_document(&mut self, path: PathBuf, fragment: Option<String>, tx: &mut Tx) {
+    /// the file (M-30), whatever the placement: the same place rule as an
+    /// outline jump applies, so the place left goes on Back and a landing under
+    /// 8 points does not (O-12).
+    fn place_linked_document(
+        &mut self,
+        path: PathBuf,
+        fragment: Option<String>,
+        placement: LinkPlacement,
+        tx: &mut Tx,
+    ) {
         let path = lmdv_io::absolute_lexical(&path);
         if fragment.is_some() && self.active_path().as_deref() == Some(path.as_path()) {
             if let Some(fragment) = fragment {
@@ -189,6 +302,52 @@ impl WindowState {
             }
             return;
         }
+        match placement {
+            LinkPlacement::Current | LinkPlacement::ForegroundTab => {
+                self.open_linked_document(path, fragment, tx);
+            }
+            LinkPlacement::BackgroundTab => {
+                let previous = self.active_tab().map(|tab| tab.id);
+                let opened = self.open_path(path);
+                if let Some(fragment) = fragment
+                    && let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == opened)
+                {
+                    tab.view.fragment = Some(fragment);
+                }
+                // The document in front stays there; the click leaves it with
+                // its place and keeps its own viewport (T-12/T-14).
+                if let Some(index) =
+                    previous.and_then(|previous| self.tabs.iter().position(|candidate| candidate.id == previous))
+                {
+                    self.switch_to_index(index);
+                }
+                self.apply_pending_scroll(tx);
+            }
+            LinkPlacement::NewWindow => self.open_link_in_new_window(path),
+        }
+    }
+
+    /// Opens a link target in a window of its own (Shift+click, L-11).
+    ///
+    /// A `#section` cannot travel: [`Launch`] carries the path and line only, so
+    /// a new window opens the document at its remembered/first place.
+    fn open_link_in_new_window(&mut self, path: PathBuf) {
+        let position = self.shared.cascade_position(self.id());
+        let request = WindowOpenRequest {
+            launch: Launch { path: Some(path), ..Launch::default() },
+            kind: WindowKind::Normal,
+            position,
+        };
+        if let Err(error) = Rc::clone(&self.shared).request_new_window(request) {
+            self.notice(lmdv_i18n::t!("msg.openWindowFailed", "err" => error));
+        }
+    }
+
+    /// Opens a Markdown link's document in front, at its `#section` when it
+    /// names one. The same-document move already happened in
+    /// [`Self::place_linked_document`].
+    fn open_linked_document(&mut self, path: PathBuf, fragment: Option<String>, tx: &mut Tx) {
+        let path = lmdv_io::absolute_lexical(&path);
         let tab = self.open_path(path);
         if let Some(fragment) = fragment
             && let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab)
@@ -299,13 +458,58 @@ pub fn is_markdown(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::time::{Duration, Instant};
+
+    use lmdv_core::{DocStatus, WindowId};
     use tempfile::TempDir;
 
     use super::*;
+    use crate::jobs::JobMsg;
+    use crate::shared::AppShared;
     use crate::test_support;
+    use crate::window::Tab;
+    use crate::windows::OpenedWindow;
 
     fn window(temp: &TempDir) -> WindowState {
         WindowState::new(test_support::shared(temp))
+    }
+
+    fn poll_until(state: &mut WindowState, what: &str, mut done: impl FnMut(&WindowState) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut tx = Tx::default();
+        while !done(state) {
+            assert!(Instant::now() < deadline, "{what} never happened");
+            state.poll(0.0, &mut tx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn ready(state: &WindowState) -> bool {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| matches!(*doc.status.borrow(), DocStatus::Ready))
+    }
+
+    fn open_file(state: &mut WindowState, path: PathBuf) {
+        state.open_path(path);
+        poll_until(state, "the document load", ready);
+    }
+
+    fn write(temp: &TempDir, rel: &str) -> PathBuf {
+        let path = temp.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("# {rel}\n")).unwrap();
+        path
+    }
+
+    fn canonical(path: &Path) -> PathBuf {
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    fn shows(state: &WindowState, path: &Path) -> bool {
+        let path = canonical(path);
+        state.tabs().iter().any(|tab| {
+            tab.document().and_then(|doc| doc.key.borrow().path().map(Path::to_path_buf)) == Some(path.clone())
+        })
     }
 
     #[test]
@@ -337,38 +541,196 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("index.md");
         std::fs::write(&file, "# Index\n\n[next](next.markdown)\n").unwrap();
+        let drawing = root.join("drawing.png");
+        std::fs::write(&drawing, b"png").unwrap();
 
         let mut state = window(&temp);
-        state.open_path(file.clone());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_none()
-            && std::time::Instant::now() < deadline
-        {
-            let mut tx = Tx::default();
-            state.poll(0.0, &mut tx);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        open_file(&mut state, file.clone());
+
         let target = state.classify_link("next.markdown");
         assert_eq!(target, LinkTarget::Local { path: root.join("next.markdown"), markdown: true, fragment: None });
 
         assert_eq!(
             state.classify_link("drawing.png"),
-            LinkTarget::Local { path: root.join("drawing.png"), markdown: false, fragment: None }
+            LinkTarget::Local { path: drawing.clone(), markdown: false, fragment: None }
         );
         state.open_link("drawing.png", &mut Tx::default());
+        poll_until(&mut state, "the non-Markdown folder attempt", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown file"))
+        });
+        assert!(state.browser.root().is_some(), "a file that is not a folder says so and goes back");
+    }
+
+    #[test]
+    fn an_unresolved_link_reports_not_found() {
+        let temp = TempDir::new().unwrap();
+        let index = write(&temp, "index.md");
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+
+        state.open_link("gone", &mut Tx::default());
+        poll_until(&mut state, "the not-found notice", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("Not found"))
+        });
+        assert_eq!(state.tabs().len(), 1, "nothing opened");
+    }
+
+    #[test]
+    fn wiki_links_probe_extensions_and_folder_indexes() {
+        let temp = TempDir::new().unwrap();
+        let index = write(&temp, "index.md");
+        let note = write(&temp, "note.md");
+        let deeper = write(&temp, "nested/deeper.md");
+        let readme = write(&temp, "guide/README.md");
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+        let index_tab = state.active_tab().expect("the index tab").id;
+
+        let mut tx = Tx::default();
+        state.open_link("note", &mut tx);
+        poll_until(&mut state, "`note` resolving to `note.md`", |state| {
+            state.active_path().as_deref() == Some(canonical(&note).as_path())
+        });
+
+        state.activate_tab(index_tab);
+        state.open_link("nested/deeper", &mut tx);
+        poll_until(&mut state, "`nested/deeper` resolving to `deeper.md`", |state| {
+            state.active_path().as_deref() == Some(canonical(&deeper).as_path())
+        });
+
+        // Links resolve from the document that holds them, so go back to the
+        // root document before following the folder spelling.
+        state.activate_tab(index_tab);
+        state.open_link("guide/", &mut tx);
+        poll_until(&mut state, "`guide/` resolving to its README", |state| {
+            state.active_path().as_deref() == Some(canonical(&readme).as_path())
+        });
+    }
+
+    #[test]
+    fn a_link_anchor_is_stripped_before_resolution_and_applied_after() {
+        let temp = TempDir::new().unwrap();
+        let index = write(&temp, "index.md");
+        let next = temp.path().join("next.md");
+        std::fs::write(&next, "# Next\n\n## Part\n\ntext\n").unwrap();
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+
+        let mut tx = Tx::default();
+        state.open_link("next#part", &mut tx);
+        poll_until(&mut state, "the anchored document", |state| {
+            state.active_path().as_deref() == Some(canonical(&next).as_path())
+                && state.active_tab().is_some_and(|tab| tab.view.reader.is_some() && tab.view.fragment.is_none())
+        });
+        let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("the model");
+        assert_eq!(model.resolve_heading("part").map(|index| model.headings[index].text.as_str()), Some("Part"));
+    }
+
+    #[test]
+    fn link_placements_follow_modifiers_and_the_button() {
+        let temp = TempDir::new().unwrap();
+        let a = write(&temp, "a.md");
+        let b = write(&temp, "b.md");
+        let c = write(&temp, "c.md");
+        let d = write(&temp, "d.md");
+        let e = write(&temp, "e.md");
+        let mut state = window(&temp);
+        open_file(&mut state, a.clone());
+
+        let plain = Mods::default();
+        let ctrl = Mods { ctrl: true, ..Mods::default() };
+        let ctrl_shift = Mods { ctrl: true, shift: true, ..Mods::default() };
+        let shift = Mods { shift: true, ..Mods::default() };
+
+        assert_eq!(LinkPlacement::for_click(plain, PointerButton::Primary), LinkPlacement::Current);
+        assert_eq!(LinkPlacement::for_click(ctrl, PointerButton::Primary), LinkPlacement::BackgroundTab);
+        assert_eq!(LinkPlacement::for_click(ctrl_shift, PointerButton::Primary), LinkPlacement::ForegroundTab);
+        assert_eq!(LinkPlacement::for_click(shift, PointerButton::Primary), LinkPlacement::NewWindow);
         assert_eq!(
-            state.browser.root(),
-            Some(root.join("drawing.png").as_path()),
-            "a non-Markdown link is tried as a folder, never handed to the desktop"
+            LinkPlacement::for_click(Mods::default(), PointerButton::Middle),
+            LinkPlacement::BackgroundTab,
+            "a middle click opens behind without any keyboard modifier"
         );
-        let target = root.join("drawing.png");
-        let generation = state.browser.tree_generation;
-        state.finish_tree_listing(generation, target.clone(), Err(lmdv_io::TreeError::NotADirectory(target)));
-        assert!(
-            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown file")),
-            "a file that is not a folder says so and goes back"
-        );
-        assert_eq!(state.browser.root(), Some(root.as_path()));
+
+        let mut tx = Tx::default();
+        state.set_link_modifiers(ctrl);
+        state.open_link("b", &mut tx);
+        poll_until(&mut state, "the background tab", |state| shows(state, &b));
+        assert_eq!(state.active_path().as_deref(), Some(canonical(&a).as_path()), "Ctrl+click keeps the front tab");
+
+        state.set_link_modifiers(ctrl_shift);
+        state.open_link("c", &mut tx);
+        poll_until(&mut state, "the foreground tab", |state| {
+            state.active_path().as_deref() == Some(canonical(&c).as_path())
+        });
+        assert!(shows(&state, &b), "the background tab is still there");
+
+        state.set_link_modifiers(plain);
+        state.open_link("d", &mut tx);
+        poll_until(&mut state, "the plain open", |state| {
+            state.active_path().as_deref() == Some(canonical(&d).as_path())
+        });
+
+        state.shared().set_window_opener(recording_opener);
+        OPENED.with(|opened| opened.borrow_mut().clear());
+        state.set_link_modifiers(shift);
+        state.open_link("e", &mut tx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while OPENED.with(|opened| opened.borrow().is_empty()) {
+            assert!(Instant::now() < deadline, "the new-window open never happened");
+            state.poll(0.0, &mut tx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let opened = OPENED.with(|opened| opened.borrow().clone());
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].launch.path.as_deref(), Some(canonical(&e).as_path()));
+        assert_eq!(state.active_path().as_deref(), Some(canonical(&d).as_path()), "Shift+click leaves this window");
+        assert!(!shows(&state, &e), "the new window does not also open a tab here");
+    }
+
+    #[test]
+    fn a_delayed_resolve_does_not_act_on_a_tab_the_user_left() {
+        let temp = TempDir::new().unwrap();
+        let a = write(&temp, "a.md");
+        let b = write(&temp, "b.md");
+        let c = write(&temp, "c.md");
+        let mut state = window(&temp);
+        open_file(&mut state, a.clone());
+        let first = state.active_tab().expect("the first tab").id;
+        open_file(&mut state, c.clone());
+        assert_eq!(state.active_path().as_deref(), Some(canonical(&c).as_path()));
+        let stale_tab = state.active_tab().expect("the tab that clicked").id;
+        let stale_doc = state.active_tab().and_then(Tab::document_id).expect("the document that clicked");
+
+        // The probe was started in C; its completion lands after the user
+        // switched to A and must change nothing.
+        assert!(state.activate_tab(first));
+        let mut tx = Tx::default();
+        state.worker().post(JobMsg::LinkResolved {
+            job: 1,
+            tab: stale_tab,
+            doc: stale_doc,
+            dest: "b".to_owned(),
+            fragment: None,
+            placement: LinkPlacement::Current,
+            result: Ok(Some(lmdv_io::LinkResolution::File { path: canonical(&b), markdown: true })),
+        });
+        state.poll(0.0, &mut tx);
+        assert!(!shows(&state, &b), "a resolve from the tab the user left changes nothing");
+        assert_eq!(state.tabs().len(), 2);
+
+        // The same completion from the tab in front does open the target.
+        state.open_link("b", &mut tx);
+        poll_until(&mut state, "the link followed from the front tab", |state| shows(state, &b));
+    }
+
+    thread_local! {
+        static OPENED: RefCell<Vec<WindowOpenRequest>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn recording_opener(_: &Rc<AppShared>, request: WindowOpenRequest) -> Result<OpenedWindow, String> {
+        OPENED.with(|opened| opened.borrow_mut().push(request.clone()));
+        Ok(OpenedWindow { id: WindowId(999) })
     }
 
     #[test]

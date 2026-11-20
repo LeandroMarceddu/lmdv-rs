@@ -288,7 +288,7 @@ pub(crate) fn window_spec(
         .on_close(window_closed)
         .on_quit(app_quit)
         .on_focus(focus_changed);
-    let mut spec = rune::WindowSpec::from_app(key, app).state(state);
+    let mut spec = rune::WindowSpec::from_app(key, app).state(state).on_modifiers(crate::window::modifiers_changed);
     if let Some(position) = frame.position {
         spec.options.position = Some(position);
     }

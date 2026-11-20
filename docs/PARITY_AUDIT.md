@@ -18,7 +18,7 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 165 done, 52 substitute, 89 partial, 18 missing, 18 n/a.
+**342 rows:** 169 done, 52 substitute, 90 partial, 13 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
@@ -31,17 +31,17 @@ matches this audit.
 | File browser and folder search | 22 | 19 | 2 | 1 | 0 | 0 |
 | Outline, section line and history | 15 | 9 | 2 | 4 | 0 | 0 |
 | Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
-| Links and media | 15 | 3 | 0 | 7 | 4 | 1 |
+| Links and media | 15 | 4 | 0 | 8 | 2 | 1 |
 | System, CLI and file integration | 27 | 11 | 5 | 3 | 1 | 7 |
 | Window chrome | 10 | 0 | 3 | 3 | 0 | 4 |
-| Drag and drop | 8 | 0 | 2 | 2 | 4 | 0 |
-| Help, start page, notices, rating | 13 | 1 | 0 | 8 | 3 | 1 |
+| Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
+| Help, start page, notices, rating | 13 | 2 | 0 | 8 | 2 | 1 |
 | Accessibility | 15 | 9 | 0 | 6 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 0 | 16 | 1 | 0 | 3 |
-| **All** | **342** | **165** | **52** | **89** | **18** | **18** |
+| **All** | **342** | **169** | **52** | **90** | **13** | **18** |
 
-## P0 gaps (47)
+## P0 gaps (45)
 
 Priority-0 rows that are not yet done. The full evidence and the precise missing
 clause are in the area files.
@@ -96,25 +96,23 @@ clause are in the area files.
 
 - **C-01** (partial) — `palette_tests::ctrl_k_opens_and_closes_the_palette_while_reading`, `the_editor_keeps_ctrl_k_for_its_link_command`, `ctrl_shift_p_opens_it_anywhere`, `a_held_opening_key_does_not_close_it`,…
 
-### L — Links and media (8)
+### L — Links and media (7)
 
 - **L-01** (partial) — `p2_tests.rs::a_fragment_link_scrolls_to_its_heading`, `nav_tests.rs::a_same_document_anchor_link_jumps_and_records_the_place_left`, `::a_jump_that_lands_within_eight_points_records_nothing`,…
 - **L-02** (partial) — `links.rs::destinations_classify_without_touching_the_disk` accepts https/mailto and rejects script/file schemes. `tel:` is not accepted (`links.rs:120`), and unsupported schemes produce a notice…
-- **L-03** (missing) — `links.rs:217-232` only joins the path and decides Markdown by extension. No `.md` extension probe, no `index`/`README`/`readme` fallback, no existence resolution (`resolve_doc` equivalent). Test…
 - **L-07** (partial) — A non-folder link produces the “not a Markdown file” notice (asserted in `links.rs::a_relative_markdown_link_resolves_inside_the_document_folder`), but there is no **Open** whitelist, no **Show in…
 - **L-08** (partial) — `open_linked_document` opens a tab for a missing Markdown target, so the user gets an error tab rather than “Not found: …”; recents/tree/search are not refreshed. `msg.notFound` is only used by…
 - **L-09** (partial) — A pasted document refuses with `link.needsFile` (`links.rs:219`); in-page anchors still work. No **Save as…** action, and the specified `msg.pastedLink` string is unused.
 - **L-10** (partial) — Network paths are refused before lookup (`links.rs:129-131`), satisfying the main rule. The notice differs from the specified text, and the same-share exception is absent (a UNC document is…
-- **L-11** (missing) — `open_link(&mut self, dest, tx)` has no modifier argument (`links.rs:136`); only `on_link` is wired (`window.rs:482-483`), so Ctrl/Shift/middle placement cannot work. Rune’s `on_link_secondary`…
+- **L-11** (partial) — `LinkPlacement` + `WindowSpec::on_modifiers`: plain foreground, Ctrl background, Ctrl+Shift foreground, Shift new window, middle background (`links::`/`nav_tests` tests). Named gaps: plain opens a…
 
 ### S — System, CLI and file integration (2)
 
 - **S-04** (partial) — `window.rs::a_forwarded_launch_opens_a_tab_with_its_line` and `windows.rs::a_launch_for_a_new_file_goes_to_the_idle_window_and_clears_its_claim` cover one forwarded launch and the shared inbox. No…
 - **S-12** (partial) — `app.rs:20-22` uses 1100×760 logical and min 560×420. The spec is 1200×860 and min 480×480. No test asserts either number. Native frame/decorations and the “visible after first render” rule are…
 
-### D — Drag and drop (2)
+### D — Drag and drop (1)
 
-- **D-02** (missing) — With no external drop path there is no Markdown filtering, background placement or tab-strip index insertion.
 - **D-04** (partial) — Tab drag exists through the kit and the T-22 transfer path, but see T-19: no reorder test, 4 pt slop, and the export pin refuses the drop rather than the gesture.
 
 ### H — Help, start page, notices, rating (3)
@@ -135,31 +133,11 @@ clause are in the area files.
 
 - **P-05** (partial) — `recents.json` max 12/dedupe (`store.rs::recents_are_capped_and_deduplicated`), written on open and rename (`editor_tests::a_rename_follows_the_document_registry_recents_and_positions`). There is…
 
-## P1/P2 gaps
-
-Listed per row in the area files above. Counts:
-
-- **R**: 5 P1/P2 partial or missing rows
-- **T**: 5 P1/P2 partial or missing rows
-- **E**: 9 P1/P2 partial or missing rows
-- **M**: 2 P1/P2 partial or missing rows
-- **V**: 3 P1/P2 partial or missing rows
-- **X**: 6 P1/P2 partial or missing rows
-- **F**: 1 P1/P2 partial or missing rows
-- **O**: 2 P1/P2 partial or missing rows
-- **L**: 3 P1/P2 partial or missing rows
-- **S**: 2 P1/P2 partial or missing rows
-- **W**: 3 P1/P2 partial or missing rows
-- **D**: 4 P1/P2 partial or missing rows
-- **H**: 8 P1/P2 partial or missing rows
-- **A**: 5 P1/P2 partial or missing rows
-- **I**: 2 P1/P2 partial or missing rows
-
 ## How this is maintained
 
 1. Re-run the audit for the affected areas after a batch (read the spec rows, the
    implementation and the tests; do not mark `done` without evidence).
-2. Update the area table; `scripts/gen-parity-checklist.py` regenerates
-   `PARITY_CHECKLIST.md` and `--check` enforces it in the gate.
+2. Update the area table; run `scripts/gen-parity-audit.py` and
+   `scripts/gen-parity-checklist.py`. `--check` enforces the checklist in the gate.
 3. Add a row to `OPEN_ITEMS.md` for a gap that needs a decision or a substitute
    acceptance; the audit keeps the per-behavior status.

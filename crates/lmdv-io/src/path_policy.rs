@@ -44,6 +44,90 @@ pub struct ResolvedFile {
     pub meta: FileMeta,
 }
 
+/// What a local Markdown link resolved to (L-03).
+///
+/// The wiki-style probes return an existing file when one of their spellings
+/// exists, and otherwise remember that the spelling names a directory so the
+/// app can try it as a folder link (L-05).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkResolution {
+    /// An existing regular file.
+    File {
+        /// The canonical path of the file.
+        path: PathBuf,
+        /// Whether the file's extension is one of the Markdown extensions.
+        markdown: bool,
+    },
+    /// An existing directory no `index`/`README`/`readme` file was found in.
+    Directory(PathBuf),
+}
+
+/// Resolves a local Markdown link against its document folder.
+///
+/// The candidates, in order, are the spelling itself when it is a file, then
+/// the spelling with each Markdown extension appended, then `index`, `README`
+/// and `readme` with each extension inside the spelling. The first existing
+/// regular file wins. When none exists but the spelling is a directory, that
+/// directory is returned for the folder-link path. Case follows the
+/// filesystem: names are built literally and never lowercased.
+///
+/// This is blocking I/O and belongs on a worker.
+pub fn resolve_document_link(root: &Path, rel: &Path) -> Result<Option<LinkResolution>, PathError> {
+    reject_network_or_device(rel)?;
+    let base = if rel.is_absolute() { rel.to_path_buf() } else { root.join(rel) };
+    reject_network_or_device(&base)?;
+
+    for candidate in link_candidates(&base) {
+        let Ok(metadata) = fs::metadata(&candidate) else { continue };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(&candidate) else { continue };
+        reject_network_or_device(&canonical)?;
+        reject_system_path(&canonical)?;
+        return Ok(Some(LinkResolution::File { markdown: is_markdown_path(&canonical), path: canonical }));
+    }
+
+    if fs::metadata(&base).is_ok_and(|metadata| metadata.is_dir()) {
+        let canonical = fs::canonicalize(&base).map_err(map_io(&base))?;
+        reject_network_or_device(&canonical)?;
+        reject_system_path(&canonical)?;
+        return Ok(Some(LinkResolution::Directory(canonical)));
+    }
+    Ok(None)
+}
+
+/// The spellings [`resolve_document_link`] probes, in order.
+fn link_candidates(base: &Path) -> Vec<PathBuf> {
+    let extensions = crate::tree::MARKDOWN_EXTENSIONS;
+    let mut candidates = Vec::with_capacity(1 + extensions.len() * 4);
+    candidates.push(base.to_path_buf());
+    for extension in extensions {
+        candidates.push(appended_extension(base, extension));
+    }
+    for name in ["index", "README", "readme"] {
+        for extension in extensions {
+            candidates.push(base.join(format!("{name}.{extension}")));
+        }
+    }
+    candidates
+}
+
+/// `path` with `.<extension>` appended to the whole spelling.
+fn appended_extension(path: &Path, extension: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(extension);
+    PathBuf::from(name)
+}
+
+/// Whether `path`'s extension is one of the Markdown extensions.
+fn is_markdown_path(path: &Path) -> bool {
+    path.extension().and_then(OsStr::to_str).is_some_and(|extension| {
+        crate::tree::MARKDOWN_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known))
+    })
+}
+
 /// Why a path is not allowed.
 #[derive(Debug, thiserror::Error)]
 pub enum PathError {
@@ -406,6 +490,108 @@ mod tests {
         assert!(is_reserved_device_name(OsStr::new("con.md")));
         assert!(!is_reserved_device_name(OsStr::new("console.md")));
         assert!(!is_reserved_device_name(OsStr::new("COM10.txt")));
+    }
+
+    #[test]
+    fn document_links_probe_the_spelling_itself_first() {
+        let temp = TempDir::new().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        write(&root.join("note"), b"# Note\n");
+        write(&root.join("note.md"), b"# Wrong\n");
+
+        let resolved = resolve_document_link(&root, Path::new("note")).unwrap();
+        assert_eq!(
+            resolved,
+            Some(LinkResolution::File { path: root.join("note"), markdown: false }),
+            "an existing file wins over its extension spelling"
+        );
+    }
+
+    #[test]
+    fn document_links_probe_extensions_in_their_declared_order() {
+        let temp = TempDir::new().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        write(&root.join("other.markdown"), b"# Other\n");
+        write(&root.join("other.md"), b"# Other\n");
+
+        let resolved = resolve_document_link(&root, Path::new("other")).unwrap();
+        assert_eq!(
+            resolved,
+            Some(LinkResolution::File { path: root.join("other.md"), markdown: true }),
+            "the extension list is probed in order"
+        );
+    }
+
+    #[test]
+    fn document_links_try_extensions_before_a_folder_index() {
+        let temp = TempDir::new().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        write(&root.join("guide.md"), b"# Guide\n");
+        write(&root.join("guide/index.md"), b"# Index\n");
+
+        let resolved = resolve_document_link(&root, Path::new("guide")).unwrap();
+        assert_eq!(
+            resolved,
+            Some(LinkResolution::File { path: root.join("guide.md"), markdown: true }),
+            "`guide.md` comes before `guide/index.md`"
+        );
+
+        fs::remove_file(root.join("guide.md")).unwrap();
+        let resolved = resolve_document_link(&root, Path::new("guide")).unwrap();
+        assert_eq!(
+            resolved,
+            Some(LinkResolution::File { path: root.join("guide/index.md"), markdown: true }),
+            "a folder link falls back to its index"
+        );
+    }
+
+    #[test]
+    fn document_links_try_index_then_readme_then_lowercase_readme() {
+        let temp = TempDir::new().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        write(&root.join("upper/README.md"), b"# Upper\n");
+        write(&root.join("lower/readme.md"), b"# Lower\n");
+        write(&root.join("both/README.md"), b"# Upper\n");
+        write(&root.join("both/readme.md"), b"# Lower\n");
+
+        let upper = resolve_document_link(&root, Path::new("upper")).unwrap();
+        assert_eq!(upper, Some(LinkResolution::File { path: root.join("upper/README.md"), markdown: true }));
+        let lower = resolve_document_link(&root, Path::new("lower")).unwrap();
+        assert_eq!(lower, Some(LinkResolution::File { path: root.join("lower/readme.md"), markdown: true }));
+        let both = resolve_document_link(&root, Path::new("both")).unwrap();
+        assert_eq!(
+            both,
+            Some(LinkResolution::File { path: root.join("both/README.md"), markdown: true }),
+            "README comes before readme"
+        );
+    }
+
+    #[test]
+    fn document_links_report_an_existing_folder_and_a_missing_target() {
+        let temp = TempDir::new().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        fs::create_dir_all(root.join("empty")).unwrap();
+        write(&root.join("empty/notes.txt"), b"text");
+
+        assert_eq!(
+            resolve_document_link(&root, Path::new("empty")).unwrap(),
+            Some(LinkResolution::Directory(root.join("empty")))
+        );
+        assert_eq!(resolve_document_link(&root, Path::new("gone")).unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn document_links_follow_the_filesystem_case() {
+        let temp = TempDir::new().unwrap();
+        let root = fs::canonicalize(temp.path()).unwrap();
+        write(&root.join("Case.md"), b"# Case\n");
+
+        assert_eq!(
+            resolve_document_link(&root, Path::new("case")).unwrap(),
+            None,
+            "a lower-case spelling does not match `Case.md` on a case-sensitive filesystem"
+        );
     }
 
     #[test]
