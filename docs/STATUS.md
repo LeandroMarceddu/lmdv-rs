@@ -430,11 +430,13 @@
 
 ## Next up
 
+P6 and P5 are complete except the deliberately open gaps; the six substitute decisions were accepted by the user on 2026-11-20.
+
 **Next when work resumes:**
 
-1. The six P6 substitute decisions (OI-141/161/163/166/174/175) await the user's answer; OI-165 (links), OI-181/182 (serializer, pinch/inline hint) stay open.
-2. P7 audit and packaging hardening: OI-153 (LICENSE, rDNS id, installer icon, signing), OI-155 (Windows runtime), then the 342-row parity audit.
-3. OI-104 and OI-106 when unheld/unblocked.
+1. P7 packaging hardening: OI-153 (add `LICENSE`, pick a three-part reverse-DNS id, fix the installer fallback icon, signed checksums), then OI-155 (Windows runtime) if Windows becomes a target.
+2. The 342-row parity audit (`docs/PARITY_CHECKLIST.md` is 0/342 checked) to triage the older P1–P4 tails.
+3. OI-104 (PDF papercuts, held), OI-106 (needs the rune-mermaid serializer, OI-181), OI-183 (AVIF decoder), OI-165 (repo links, blocked by the private repository).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

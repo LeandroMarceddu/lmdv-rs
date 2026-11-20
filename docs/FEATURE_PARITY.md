@@ -164,6 +164,12 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | S-11/15/16/17, W-03/05/06/08, I-05 | Store/MSIX/WebView2-native behavior | Not applicable | **n/a** |
 | M-12 | Full Mermaid 11 | 17 native families; unsupported → code block | **substitute** |
 | R-20/X-03 | Rich copy of a selection | Whole-doc rich copy done (P5-04b); selection needs a block-range serializer | **build** |
+| R-07 | Space pages the article even with a control focused | Keyboard focus on an interactive control keeps Space activation (accessibility-first); PageDown always pages and Space pages with the article/block focused | **substitute** (OI-161, user 2026-11-20) |
+| R-19 | Click-to-source centring and landing flash | Owning block as the hit proxy, 40 pt horizontal reveal margin, static 1.2 s landing band | **substitute** (OI-163, user 2026-11-20) |
+| T-17 | Tab strip wheel translation and overflow timing | Horizontal/Shift wheel, physical digits and clamped moves; plain vertical wheel and exact ⌄ timing need kit APIs | **accepted-gap** (OI-166) |
+| E-32 / S-16 | Native spelling suggestions menu | Underlines and engine suggestions; Rune's field menu has no app hook and a custom menu needs a text-hit API | **accepted-gap** (OI-174) |
+| P-11 | Flat `editor-spell` key | Stored as `prefs.json` `editor.spellcheck`; off survives restart | **substitute** (OI-175) |
+| Section line / sticky table | Per-frame focus query and measured header height | Poll-time focus tracking for keyed focusables; the sticky band uses the block top | **substitute** (OI-141, user 2026-11-20) |
 | F-20 | Drag the inner pane edge; arrows on the grip; double-click resets | Drag, double-click reset and persisted widths work; the kit builds its grip `focusable(false)`, so the arrow keys live on the focused tree (`Ctrl`+arrows) plus eight palette commands | **substitute** (OI-179) |
 | E-14 | Opening another document while editing a dirty buffer asks “You have unsaved changes. Discard them?” | No prompt: each tab keeps its own editor session, undo and crash draft, so switching documents discards nothing. Every destructive path (tab/window/native close, quit) still asks Save / Don't save / Cancel, and a save in flight defers the close. | **substitute** (user, 2026-11-18) |
 | T-SHARED | A file may be edited independently in two windows (CodeMirror buffers + conflict detection) | One canonical buffer + one editor lease; other windows are live viewers; explicit takeover | **substitute** (ADR-004/023) |
