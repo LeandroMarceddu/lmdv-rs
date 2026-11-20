@@ -440,6 +440,8 @@ P6 and P5 are complete except the deliberately open gaps; the six substitute dec
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 
+**Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. It looks like a rare Rune shaping-cache assertion under parallel layout, not a product bug — record any repeat with the run id.
+
 ## P6-01b — complete
 
 - Added 10 `render.*` keys to all six catalogs (callout titles, footnotes, image, Mermaid, details, table); P6-01c added four more (external-open, footnote number, math, backlink); all 413-key sets identical and valid JSON.
