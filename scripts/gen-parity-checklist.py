@@ -18,9 +18,24 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "docs" / "BEHAVIOR_SPEC.md"
 OUT = ROOT / "docs" / "PARITY_CHECKLIST.md"
+AUDIT = ROOT / "docs" / "audit"
 
 SECTION_RE = re.compile(r"^### 2\.(\d+) (.+?) \(([A-Z]+)\)\s*$")
 ROW_RE = re.compile(r"^\|\s*([A-Z]+-\d+)\s*\|")
+STATUS_RE = re.compile(r"^\|\s*([A-Z]+-\d+)\s*\|\s*P[0-2]\s*\|\s*(done|substitute|partial|missing|n/a)\s*\|")
+
+# The audit tables are the status source: the checklist is generated from them.
+def audit_statuses() -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    if AUDIT.is_dir():
+        for path in sorted(AUDIT.glob("*.md")):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                m = STATUS_RE.match(line.strip())
+                if m:
+                    statuses[m.group(1)] = m.group(2)
+    return statuses
+
+MARK = {"done": "[x]", "substitute": "[x]", "partial": "[~]", "missing": "[ ]", "n/a": "[x]"}
 
 
 def cells(line: str) -> list[str]:
@@ -87,19 +102,19 @@ def main() -> int:
     out: list[str] = []
     out.append("# Parity checklist")
     out.append("")
-    out.append("Generated from [`BEHAVIOR_SPEC.md`](BEHAVIOR_SPEC.md) by")
-    out.append("`scripts/gen-parity-checklist.py`. Do not edit by hand; tick items as")
-    out.append("they are implemented and keep the evidence in `docs/FEATURE_PARITY.md`.")
+    out.append("Generated from [`BEHAVIOR_SPEC.md`](BEHAVIOR_SPEC.md) and the status tables in")
+    out.append("[`audit/`](audit/) by `scripts/gen-parity-checklist.py`. Do not edit by hand:")
+    out.append("update the audit, then regenerate. Evidence is cited per row in the audit.")
     out.append("")
     out.append(f"**Total behaviors:** {rows}")
     out.append("")
     out.append("## How to use")
     out.append("")
-    out.append("- `[ ]` not started, `[~]` in progress (write `- [~]`), `[x]` done with evidence.")
-    out.append("- A row is done only when its acceptance criterion in the spec has a test,")
-    out.append("  golden, tree assertion or manual note.")
-    out.append("- `accepted-gap` items are marked `[x]` in a separate line with the reason;")
-    out.append("  do not silently drop them.")
+    out.append("- `[ ]` missing, `[~]` partial, `[x]` done or accepted substitute/gap.")
+    out.append("- Status and evidence live in `docs/audit/*.md`; this file is generated from them.")
+    out.append("  Do not edit it by hand: run `scripts/gen-parity-checklist.py` after an audit.")
+    out.append("- A row is done only when its acceptance criterion has a test, golden, tree")
+    out.append("  assertion or manual note; the tag after each row names its status.")
     out.append("")
     out.append("## Counts")
     out.append("")
@@ -111,12 +126,38 @@ def main() -> int:
         p2 = sum(1 for _, _, p, _ in items if p.startswith("P2"))
         out.append(f"| {title} | {prefix} | {len(items)} | {p0} | {p1} | {p2} |")
     out.append("")
+    statuses = audit_statuses()
+    out.append("### Audit status")
+    out.append("")
+    out.append("| Area | Rows | Done | Substitute | Partial | Missing | n/a |")
+    out.append("|---|---:|---:|---:|---:|---:|---:|")
+    totals = {key: 0 for key in ("done", "substitute", "partial", "missing", "n/a")}
+    for prefix, title, items in sections:
+        counts = {key: 0 for key in totals}
+        for rid, _, _, _ in items:
+            status = statuses.get(rid)
+            if status in counts:
+                counts[status] += 1
+        for key in totals:
+            totals[key] += counts[key]
+        out.append(
+            f"| {title} | {len(items)} | {counts['done']} | {counts['substitute']} | "
+            f"{counts['partial']} | {counts['missing']} | {counts['n/a']} |"
+        )
+    out.append(
+        f"| **All** | **{rows}** | **{totals['done']}** | **{totals['substitute']}** | "
+        f"**{totals['partial']}** | **{totals['missing']}** | **{totals['n/a']}** |"
+    )
+    out.append("")
     for prefix, title, items in sections:
         out.append(f"## {prefix} — {title} ({len(items)})")
         out.append("")
         for rid, feature, priority, fixture in items:
             fixture = f" · {fixture}" if fixture else ""
-            out.append(f"- [ ] **{rid}** {feature} ({priority}{fixture})")
+            status = statuses.get(rid)
+            mark = MARK.get(status or "", "[ ]")
+            tag = f" — {status}" if status else ""
+            out.append(f"- {mark} **{rid}** {feature} ({priority}{fixture}){tag}")
         out.append("")
 
     rendered = "\n".join(out) + "\n"
