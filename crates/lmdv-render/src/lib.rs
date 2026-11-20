@@ -219,10 +219,10 @@ impl HighlightKind {
 /// through each block's inline source map, so a range that crosses blocks, or
 /// covers Markdown markers (`**`, the URL of a link), paints only the text those
 /// bytes produced. Zero-length ranges, ranges with no mapped text, and ranges
-/// past the source are ignored. An inline formula or a picture that draws as an
-/// image maps to its object glyph; when that glyph takes no width the paint is
-/// invisible, while a range that reaches the prose on either side paints that
-/// prose (OI-043 limitation).
+/// past the source are ignored. An inline formula or picture maps to the box it
+/// draws, its TeX or syntax included; a link's destination paints the link's
+/// label; a front-matter key or value paints its drawn text; and a heading's
+/// bytes also paint the generated TOC label copied from them (OI-127).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Highlight {
     /// The source bytes to paint.
@@ -312,6 +312,39 @@ pub struct MediaRef {
     pub end_line: usize,
 }
 
+/// One GFM table cell as the renderer drew it, for the app's preview (V-17).
+///
+/// [`text`](Self::text) is what the cell draws; inline markup disappears, a
+/// formula keeps its TeX, and objects that draw no text contribute nothing.
+/// [`links`](Self::links) name the drawn runs that are links and their
+/// destinations, so the preview can follow them; [`task`](Self::task) records a
+/// task checkbox, which the preview shows as an inert glyph.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableCell {
+    /// The cell's drawn text, whitespace collapsed.
+    pub text: String,
+    /// The link runs inside [`text`](Self::text), in byte offsets.
+    pub links: Vec<TableLink>,
+    /// A task checkbox in the cell and its state (`true` checked).
+    pub task: Option<bool>,
+}
+
+impl TableCell {
+    /// A plain cell with no links or task checkbox.
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self { text: text.into(), links: Vec::new(), task: None }
+    }
+}
+
+/// One link drawn inside a [`TableCell`] (V-17).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableLink {
+    /// The link's byte range in [`TableCell::text`].
+    pub range: std::ops::Range<usize>,
+    /// The destination as written.
+    pub dest: String,
+}
+
 /// One GFM table as the renderer drew it, for the app's action bar, preview and
 /// spreadsheet copy (M-06, X-16).
 ///
@@ -319,9 +352,7 @@ pub struct MediaRef {
 /// quotes; [`block`](Self::block) and [`index`](Self::index) name the top-level
 /// block it sits in, and [`source`](Self::source) is the table's own source
 /// range, so two tables in one quote stay distinct. The cells are the drawn
-/// text, one string per cell in reading order: inline markup disappears, a
-/// formula keeps its TeX, and objects that draw no text (pictures, task boxes)
-/// contribute nothing. Whitespace is collapsed and each row is padded to
+/// cells, one per column in reading order; each row is padded to
 /// [`columns`](Self::columns) with empty cells.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableRef {
@@ -337,11 +368,11 @@ pub struct TableRef {
     pub end_line: usize,
     /// One alignment per column, as the delimiter row wrote it.
     pub align: Vec<lmdv_md::Align>,
-    /// The header cells' drawn text, one per column (empty strings when the
-    /// table has no header row).
-    pub head: Vec<String>,
-    /// The body rows' drawn text, one entry per cell.
-    pub rows: Vec<Vec<String>>,
+    /// The header cells, one per column (empty cells when the table has no
+    /// header row).
+    pub head: Vec<TableCell>,
+    /// The body rows' cells, one entry per cell.
+    pub rows: Vec<Vec<TableCell>>,
     /// The column count (header and body rows agree).
     pub columns: usize,
 }
@@ -449,7 +480,8 @@ impl DetailsState for AllClosed {
 
 /// Everything the renderer needs beyond the document and theme.
 pub struct RenderOptions<'a> {
-    /// The article width in points, used for wide tables and image scaling.
+    /// The reading column's content width in points, used for wide tables and
+    /// image scaling.
     pub width: f32,
     /// The kit Markdown style used for Mermaid diagrams (its fields are
     /// crate-private at this rev, so all other tokens come from [`DocTheme`]).

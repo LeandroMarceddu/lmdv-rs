@@ -252,15 +252,50 @@ fn quit(state: &mut WindowState, _: &mut Tx) {
     state.request_quit();
 }
 
-fn toggle_browser(state: &mut WindowState, _: &mut Tx) {
-    state.left.toggle();
+fn toggle_browser(state: &mut WindowState, tx: &mut Tx) {
+    // F-18: a keyboard toggle focuses the pane; a toolbar press does not.
+    state.toggle_browser_pane(tx, tx.by_keys());
 }
 
 fn toggle_outline(state: &mut WindowState, tx: &mut Tx) {
     state.toggle_outline();
+    // F-18/P-09: the outline's choice is global (`toc-hidden`).
+    state.persist_outline_visibility();
     // Closing the outline lets the section line appear once the page settles
     // (O-07); opening it takes the line away at once.
     tx.wake_at(state.ui.last_now + crate::section::SECTION_SETTLE_SECONDS + 0.02);
+}
+
+fn browser_wider(state: &mut WindowState, _: &mut Tx) {
+    state.nudge_browser_pane(1, false);
+}
+
+fn browser_narrower(state: &mut WindowState, _: &mut Tx) {
+    state.nudge_browser_pane(-1, false);
+}
+
+fn browser_default_width(state: &mut WindowState, _: &mut Tx) {
+    state.reset_browser_pane_width();
+}
+
+fn browser_max_width(state: &mut WindowState, _: &mut Tx) {
+    state.maximize_browser_pane();
+}
+
+fn outline_wider(state: &mut WindowState, _: &mut Tx) {
+    state.nudge_outline_pane(1, false);
+}
+
+fn outline_narrower(state: &mut WindowState, _: &mut Tx) {
+    state.nudge_outline_pane(-1, false);
+}
+
+fn outline_default_width(state: &mut WindowState, _: &mut Tx) {
+    state.reset_outline_pane_width();
+}
+
+fn outline_max_width(state: &mut WindowState, _: &mut Tx) {
+    state.maximize_outline_pane();
 }
 
 fn help_keys(state: &mut WindowState, _: &mut Tx) {
@@ -1225,6 +1260,86 @@ pub static COMMANDS: &[CommandSpec] = &[
         checked: Some(outline_open),
     },
     CommandSpec {
+        id: "view.browser-wider",
+        title: "Wider file browser",
+        category: CommandCategory::View,
+        keywords: &["pane", "browser", "tree", "width", "wider", "resize", "sidebar"],
+        default_keys: &[],
+        run: browser_wider,
+        enabled: always,
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.browser-narrower",
+        title: "Narrower file browser",
+        category: CommandCategory::View,
+        keywords: &["pane", "browser", "tree", "width", "narrower", "resize", "sidebar"],
+        default_keys: &[],
+        run: browser_narrower,
+        enabled: always,
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.browser-width-default",
+        title: "Default file-browser width",
+        category: CommandCategory::View,
+        keywords: &["pane", "browser", "tree", "width", "default", "reset", "resize"],
+        default_keys: &[],
+        run: browser_default_width,
+        enabled: always,
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.browser-width-max",
+        title: "Widest file browser",
+        category: CommandCategory::View,
+        keywords: &["pane", "browser", "tree", "width", "max", "widest", "resize"],
+        default_keys: &[],
+        run: browser_max_width,
+        enabled: always,
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.outline-wider",
+        title: "Wider outline",
+        category: CommandCategory::View,
+        keywords: &["pane", "outline", "toc", "width", "wider", "resize", "inspector"],
+        default_keys: &[],
+        run: outline_wider,
+        enabled: |state: &WindowState| state.has_active_headings(),
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.outline-narrower",
+        title: "Narrower outline",
+        category: CommandCategory::View,
+        keywords: &["pane", "outline", "toc", "width", "narrower", "resize", "inspector"],
+        default_keys: &[],
+        run: outline_narrower,
+        enabled: |state: &WindowState| state.has_active_headings(),
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.outline-width-default",
+        title: "Default outline width",
+        category: CommandCategory::View,
+        keywords: &["pane", "outline", "toc", "width", "default", "reset", "resize"],
+        default_keys: &[],
+        run: outline_default_width,
+        enabled: |state: &WindowState| state.has_active_headings(),
+        checked: None,
+    },
+    CommandSpec {
+        id: "view.outline-width-max",
+        title: "Widest outline",
+        category: CommandCategory::View,
+        keywords: &["pane", "outline", "toc", "width", "max", "widest", "resize"],
+        default_keys: &[],
+        run: outline_max_width,
+        enabled: |state: &WindowState| state.has_active_headings(),
+        checked: None,
+    },
+    CommandSpec {
         id: "view.pin",
         title: "Keep on top",
         category: CommandCategory::View,
@@ -1642,6 +1757,14 @@ pub fn command_title(state: &WindowState, command: &CommandSpec) -> String {
         "view.toggle-preview" => lmdv_i18n::t!("toolbar.preview"),
         "view.toggle-browser" => lmdv_i18n::t!("toolbar.tree"),
         "view.toggle-outline" => lmdv_i18n::t!("toolbar.toc"),
+        "view.browser-wider" => lmdv_i18n::t!("cmd.pane.browserWider"),
+        "view.browser-narrower" => lmdv_i18n::t!("cmd.pane.browserNarrower"),
+        "view.browser-width-default" => lmdv_i18n::t!("cmd.pane.browserDefault"),
+        "view.browser-width-max" => lmdv_i18n::t!("cmd.pane.browserMax"),
+        "view.outline-wider" => lmdv_i18n::t!("cmd.pane.outlineWider"),
+        "view.outline-narrower" => lmdv_i18n::t!("cmd.pane.outlineNarrower"),
+        "view.outline-width-default" => lmdv_i18n::t!("cmd.pane.outlineDefault"),
+        "view.outline-width-max" => lmdv_i18n::t!("cmd.pane.outlineMax"),
         "view.pin" => lmdv_i18n::t!("keys.pin"),
         "browser.up" => lmdv_i18n::t!("pane.up"),
         "browser.search" => lmdv_i18n::t!("pane.searchPlaceholder"),

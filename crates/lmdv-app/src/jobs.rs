@@ -21,7 +21,7 @@ use std::time::Duration;
 use lmdv_core::{DocumentId, Draft, Eol, FileMeta, JobId, TabId, WindowId};
 use lmdv_edit::spell::{Availability, DictionaryFiles, Spell};
 use lmdv_io::AppDirs;
-use lmdv_io::store::{StoreHandle, load_draft};
+use lmdv_io::store::{DraftIssue, StoreHandle, load_draft_reported};
 use lmdv_io::{ReadError, SaveOutcome, WriteError, read_document, save_document};
 use lmdv_md::MdDoc;
 use rune::Waker;
@@ -41,8 +41,9 @@ pub enum JobMsg {
     /// A Markdown parse finished. `revision` is the buffer revision the source
     /// came from; the receiver drops it when a newer revision exists.
     Parsed { doc: DocumentId, revision: u64, result: Result<Arc<MdDoc>, String> },
-    /// A crash draft read finished (E-17). `None` when no draft exists.
-    DraftLoaded { doc: DocumentId, key: String, draft: Option<Draft> },
+    /// A crash draft read finished (E-17). `None` when no draft exists; an
+    /// `issue` means the file is unreadable and must not be overwritten (OI-169).
+    DraftLoaded { doc: DocumentId, key: String, draft: Option<Draft>, issue: Option<DraftIssue> },
     /// An HTML/DOCX/PDF export finished (P5-04).
     Exported {
         job: JobId,
@@ -358,11 +359,11 @@ impl JobHub {
         let worker_mailbox = mailbox.clone();
         let worker_key = key.clone();
         let spawned = rune::task::spawn("lmdv-draft", move || {
-            let draft = load_draft(&dirs, &worker_key);
-            worker_mailbox.post(JobMsg::DraftLoaded { doc, key: worker_key, draft });
+            let loaded = load_draft_reported(&dirs, &worker_key);
+            worker_mailbox.post(JobMsg::DraftLoaded { doc, key: worker_key, draft: loaded.value, issue: loaded.issue });
         });
         if spawned.is_err() {
-            mailbox.post(JobMsg::DraftLoaded { doc, key, draft: None });
+            mailbox.post(JobMsg::DraftLoaded { doc, key, draft: None, issue: None });
         }
         job
     }

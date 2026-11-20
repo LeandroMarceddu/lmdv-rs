@@ -17,13 +17,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use lmdv_render::{TableRef, TableWire};
-use rune::{Cursor, Cx, El, Key, KeyEvent, Span, Tx, col, el, rich, row, text, text_input};
+use rune::{Cursor, Cx, El, Key, KeyEvent, Link, Span, TextStyle, Tx, col, el, rich, row, text, text_input};
 use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, SortDir};
 
 use crate::icons;
 use crate::tables::{
-    CELL_PAD, HEADER_HEIGHT, MIN_COLUMN, PREVIEW_MARGIN, PREVIEW_PAD, ROW_HEIGHT, TABLE_PREVIEW_CLOSE,
-    TABLE_PREVIEW_COPY, TABLE_PREVIEW_FILTER_KEY, TABLE_PREVIEW_KEY, TABLE_PREVIEW_PANEL, TABLE_PREVIEW_SCROLL,
+    CELL_PAD, PREVIEW_MARGIN, PREVIEW_PAD, TABLE_PREVIEW_CLOSE, TABLE_PREVIEW_COPY, TABLE_PREVIEW_FILTER_KEY,
+    TABLE_PREVIEW_KEY, TABLE_PREVIEW_PANEL, TABLE_PREVIEW_SCROLL, TABLE_PREVIEW_ZOOM_IN, TABLE_PREVIEW_ZOOM_OUT,
     TablePreview, highlight_ranges,
 };
 use crate::window::WindowState;
@@ -120,7 +120,7 @@ pub(crate) fn preview_overlay(state: &WindowState, cx: &mut Cx<WindowState>, kit
 /// The preview's panel: title, filter, count and the grid.
 fn preview_panel(preview: &TablePreview, kit: &Kit, width: f32, height: f32, sorted: bool, copied: bool) -> El {
     let c = &kit.c;
-    let title = format!("{}: {}", lmdv_i18n::t!("zoom.table"), preview.table.head.join(", "));
+    let title = preview_title(preview);
     let panel_title = title.clone();
     let close = IconButton::new(kit.glyph.close)
         .variant(IconButtonVariant::GhostMuted)
@@ -138,6 +138,26 @@ fn preview_panel(preview: &TablePreview, kit: &Kit, width: f32, height: f32, sor
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| state.copy_table(tx))
         .build(kit)
         .key(TABLE_PREVIEW_COPY);
+    let zoom_out = IconButton::new(&icons::MINUS)
+        .variant(IconButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .label(lmdv_i18n::t!("zoom.out"))
+        .help(lmdv_i18n::t!("zoom.out"))
+        .on_press(|state: &mut WindowState| {
+            state.table_preview_zoom(-1);
+        })
+        .build(kit)
+        .key(TABLE_PREVIEW_ZOOM_OUT);
+    let zoom_in = IconButton::new(&icons::PLUS)
+        .variant(IconButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .label(lmdv_i18n::t!("zoom.in"))
+        .help(lmdv_i18n::t!("zoom.in"))
+        .on_press(|state: &mut WindowState| {
+            state.table_preview_zoom(1);
+        })
+        .build(kit)
+        .key(TABLE_PREVIEW_ZOOM_IN);
     let header = row()
         .key("table-preview-header")
         .w_full()
@@ -146,6 +166,8 @@ fn preview_panel(preview: &TablePreview, kit: &Kit, width: f32, height: f32, sor
         .gap(8.0)
         .center_y()
         .child(text(title).key("table-preview-title").font(kit.ty.ui_medium).color(c.text_base).truncate().grow(1.0))
+        .child(zoom_out)
+        .child(zoom_in)
         .child(copy)
         .child(close);
 
@@ -200,17 +222,35 @@ fn preview_panel(preview: &TablePreview, kit: &Kit, width: f32, height: f32, sor
     panel
 }
 
+/// The preview panel's title: the table's header cells.
+fn preview_title(preview: &TablePreview) -> String {
+    let head = preview.table.head.iter().map(|cell| cell.text.as_str()).collect::<Vec<_>>().join(", ");
+    format!("{}: {}", lmdv_i18n::t!("zoom.table"), head)
+}
+
+/// `style` at the preview's text zoom (V-12).
+///
+/// The font size and line height scale, so the text is laid out again at the
+/// larger size and stays sharp; a transform would blur it.
+fn scaled(style: TextStyle, zoom: f32) -> TextStyle {
+    TextStyle {
+        size: style.size * zoom,
+        line_height: if style.line_height > 0.0 { style.line_height * zoom } else { 0.0 },
+        ..style
+    }
+}
+
 /// The scrolling grid: sticky header, virtual rows and the frozen first column.
 fn preview_grid(preview: &TablePreview, kit: &Kit) -> El {
     let c = &kit.c;
     let columns = preview.table.columns.max(1);
-    let width = preview.table_width.max(1.0);
-    let label = format!("{}: {}", lmdv_i18n::t!("zoom.table"), preview.table.head.join(", "));
+    let width = preview.drawn_width().max(1.0);
+    let label = preview_title(preview);
     let mut header = row()
         .key("table-preview-head")
         .role("row")
         .w(width)
-        .h(HEADER_HEIGHT)
+        .h(preview.header_height())
         .items_stretch()
         .sticky_top(0.0)
         .fill(c.layer_02);
@@ -220,10 +260,11 @@ fn preview_grid(preview: &TablePreview, kit: &Kit) -> El {
     let mut content = col().key("table-preview-grid").role("grid").label(label).w(width).child(header);
     let words = Rc::new(preview.words());
     let rows = preview.shown.len();
+    let row_height = preview.row_height();
     let kit = kit.clone();
     content = content.child(col().key("table-preview-rows").w(width).growth(rune::GrowthSpec::default()).virtual_rows(
         rows,
-        ROW_HEIGHT,
+        row_height,
         |state: &WindowState, index| {
             state
                 .table_preview()
@@ -235,16 +276,7 @@ fn preview_grid(preview: &TablePreview, kit: &Kit) -> El {
     col()
         .key(TABLE_PREVIEW_SCROLL)
         .role("region")
-        // Every part of this label is a catalog key; the original's viewport
-        // string also describes zoom, which this slice does not implement
-        // (V-12 is a follow-up).
-        .label(format!(
-            "{}. {}. {}. {}",
-            lmdv_i18n::t!("zoom.table"),
-            lmdv_i18n::t!("zoom.filterHint"),
-            lmdv_i18n::t!("zoom.sortHint"),
-            lmdv_i18n::t!("zoom.close")
-        ))
+        .label(format!("{}. {}", preview_title(preview), lmdv_i18n::t!("zoom.tableViewport")))
         .w_full()
         .grow(1.0)
         .min_h(0.0)
@@ -252,13 +284,17 @@ fn preview_grid(preview: &TablePreview, kit: &Kit) -> El {
         .no_focus_ring()
         .scroll_xy()
         .scroll_edge_fade(12.0)
+        // V-12: Ctrl+wheel zooms the text exponentially; a plain wheel keeps
+        // Rune's scrolling.
+        .on_wheel(|state: &mut WindowState, event: rune::WheelEvent, tx: &mut Tx| state.table_preview_wheel(&event, tx))
         .child(content)
 }
 
 /// One header cell: sortable by click or Enter, with its sort direction.
 fn header_cell(preview: &TablePreview, kit: &Kit, column: usize) -> El {
     let c = &kit.c;
-    let width = preview.widths.get(column).copied().unwrap_or(MIN_COLUMN);
+    let zoom = preview.zoom;
+    let width = preview.column_width(column);
     let title = preview.cell(true, 0, column).to_owned();
     let sorted = preview.sort.and_then(|(sorted, dir)| (sorted == column).then_some(dir));
     let mut cell = row()
@@ -268,7 +304,7 @@ fn header_cell(preview: &TablePreview, kit: &Kit, column: usize) -> El {
         .sorted(sorted.map(|dir| dir == SortDir::Ascending))
         .w(width)
         .h_full()
-        .px(CELL_PAD)
+        .px(CELL_PAD * zoom)
         .center_y()
         .clip_soft(0.0);
     if preview.frozen && column == 0 {
@@ -289,9 +325,9 @@ fn header_cell(preview: &TablePreview, kit: &Kit, column: usize) -> El {
                 activate
             });
     }
-    let mut inner = row().gap(4.0).center_y().child(
+    let mut inner = row().gap(4.0 * zoom).center_y().child(
         text(title)
-            .font(kit.ty.text_small_medium)
+            .font(scaled(kit.ty.text_small_medium, zoom))
             .color(if sorted.is_some() { c.text_base } else { c.text_muted })
             .truncate()
             .shrink()
@@ -299,7 +335,8 @@ fn header_cell(preview: &TablePreview, kit: &Kit, column: usize) -> El {
     );
     if let Some(dir) = sorted {
         let glyph = if dir == SortDir::Ascending { "↑" } else { "↓" };
-        inner = inner.child(text(glyph).key("table-preview-sort").font(kit.ty.small).color(c.text_accent));
+        inner =
+            inner.child(text(glyph).key("table-preview-sort").font(scaled(kit.ty.small, zoom)).color(c.text_accent));
     }
     cell.child(inner)
 }
@@ -311,8 +348,8 @@ fn preview_row(state: &WindowState, kit: &Kit, words: &Rc<Vec<Vec<char>>>, index
     let mut row = row()
         .key(format!("table-preview-row-{source}"))
         .role("row")
-        .w(preview.table_width.max(1.0))
-        .h(ROW_HEIGHT)
+        .w(preview.drawn_width().max(1.0))
+        .h(preview.row_height())
         .items_stretch()
         .border_sides([0.0, 0.0, 0.5, 0.0], kit.c.border_weak)
         .border_layout();
@@ -322,26 +359,41 @@ fn preview_row(state: &WindowState, kit: &Kit, words: &Rc<Vec<Vec<char>>>, index
     row
 }
 
-/// One body cell, with the filter's matches painted behind their text.
+/// One body cell, with the filter's matches painted behind their text and its
+/// links followable (V-13, V-17).
 fn body_cell(preview: &TablePreview, kit: &Kit, words: &[Vec<char>], source: usize, column: usize) -> El {
     let c = &kit.c;
-    let width = preview.widths.get(column).copied().unwrap_or(MIN_COLUMN);
-    let value = preview.cell(false, source, column);
+    let zoom = preview.zoom;
+    let width = preview.column_width(column);
+    let cell_data = preview.cell_data(false, source, column);
+    let value = cell_data.text.as_str();
     let ranges = highlight_ranges(value, words);
-    let mut spans = Vec::with_capacity(ranges.len());
+    let mut spans = Vec::with_capacity(ranges.len() + cell_data.links.len());
     for range in ranges {
         spans.push(
             Span::new(range.start, range.end).bg(kit.alpha(c.text_accent, if kit.dark { 0.38 } else { 0.24 }), 2.0),
         );
     }
+    for link in &cell_data.links {
+        spans.push(Span::new(link.range.start, link.range.end).color(c.text_accent).underline(c.text_accent));
+    }
     let mut content = if spans.is_empty() { text(value.to_owned()) } else { rich(value.to_owned(), spans) };
-    content = content.font(kit.ty.text_small).color(c.text_base).truncate().shrink().min_w(0.0);
+    content = content.font(scaled(kit.ty.text_small, zoom)).color(c.text_base).truncate().shrink().min_w(0.0);
+    // A link keeps its own click: the preview closes and the app follows the
+    // destination exactly as it would from the article (V-17).
+    if !cell_data.links.is_empty() {
+        for link in &cell_data.links {
+            content = content.link(Link::new(link.range.clone(), link.dest.clone()));
+        }
+        content =
+            content.on_link(|state: &mut WindowState, dest: &str, tx: &mut Tx| state.preview_table_link(dest, tx));
+    }
     let mut cell = row()
         .key(format!("table-preview-c{column}"))
         .role("gridcell")
         .w(width)
         .h_full()
-        .px(CELL_PAD)
+        .px(CELL_PAD * zoom)
         .center_y()
         .clip_soft(0.0);
     match preview.table.align.get(column).copied().unwrap_or(lmdv_md::Align::None) {
@@ -378,6 +430,8 @@ pub fn scene_table_preview(state: &mut WindowState) {
     state.open_table_preview(&mut tx);
     state.set_table_filter("alpha beta");
     state.cycle_table_sort(0);
+    // V-12: the scene shows a 125% text zoom over the wide, filtered table.
+    state.table_preview_zoom(1);
     state.ui.notice = None;
     state.ui.help = None;
 }

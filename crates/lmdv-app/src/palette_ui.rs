@@ -7,6 +7,14 @@
 //! footer with the keys' help and the live result count (`role=status`,
 //! announced 300 ms after the last key). Choosing a row closes the palette
 //! first, so what the action focuses keeps the keyboard.
+//!
+//! C-12 also asks for `aria-autocomplete="list"` and `aria-controls` from the
+//! input to the list. Pinned Rune has no API for either attribute (its
+//! accessibility state carries role, label, description, expanded,
+//! active-descendant, checked, level, selected and disabled only), so
+//! `role=combobox` + `aria-expanded` + `aria-activedescendant` is the complete
+//! set this build can express (OI-148). Adding the two would need a Rune patch
+//! beside 0003.
 
 use rune::{Color, Cursor, Cx, El, LiveRegion, Span, TextStyle, col, el, icon, rich, row, text, text_input};
 use rune_kit::{Keybind, Kit};

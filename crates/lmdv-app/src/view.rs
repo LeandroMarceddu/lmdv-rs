@@ -10,7 +10,7 @@ use rune::{
     Align, Color, Cursor, Cx, El, GrowthSpec, Phase, PointerButton, PointerPress, ScrollSpec, TextStyle, Tx, col, el,
     icon, row, text, text_input,
 };
-use rune_kit::shell::{SplitView, TabItem, TabItemStatus, TabOrientation, TabStrip, Toolbar};
+use rune_kit::shell::{SidebarPeek, SplitView, TabItem, TabItemStatus, TabOrientation, TabStrip, Toolbar};
 use rune_kit::syntax::SyntaxTheme;
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Placement,
@@ -71,7 +71,8 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
     // The panes read the previous frame's layout (the browser's keyboard menu
     // follows its row), so build them before the split mounts them.
     let sidebar = crate::browser::pane(state, cx, &pane_kit);
-    let inspector = outline::pane(state, cx, &pane_kit);
+    let inspector = outline::pane(state, cx, &pane_kit)
+        .on_magnify(|state: &mut WindowState, event, _: &mut Tx| state.pane_magnify(event.delta));
     let shell = SplitView::new(main)
         .sidebar(&state.left, |state: &mut WindowState| &mut state.left, sidebar)
         .inspector(&state.right, |state: &mut WindowState| &mut state.right, inspector)
@@ -80,6 +81,8 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
         .frame_inset(8.0)
         .toolbar_in_panel()
         .hide_sidebar_toggle()
+        // F-19: a folded pane peeks over the text instead of docking.
+        .sidebar_peek(SidebarPeek::new())
         .reduced_motion(cx.is_reduced_motion())
         .build(&kit)
         // O-14: the mouse's side buttons navigate over the whole window, as
@@ -89,6 +92,10 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
         // `button`.
         .pointer_buttons([PointerButton::Back, PointerButton::Forward])
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
+            // F-19: a click outside the peek closes it before it navigates.
+            if state.left.is_peeking() {
+                state.left.end_peek();
+            }
             state.nav_pointer_button(tx.button(), tx);
         })
         .role("group");
@@ -110,6 +117,10 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
     // must close too), so the window handles both here. Every other key falls
     // through untouched.
     rune_kit::root(shell, layer).on_key(|state: &mut WindowState, event, tx| {
+        if event.key == rune::Key::Escape && state.left.is_peeking() {
+            state.left.end_peek();
+            return true;
+        }
         if state.browser_menu().is_some() && matches!(event.key, rune::Key::Escape | rune::Key::Tab) {
             state.close_browser_menu();
             tx.focus(crate::browser::BROWSER_TREE_KEY, false);
@@ -1791,9 +1802,13 @@ fn reader_article(
     let headings = if tab.view.mode == Mode::Viewer {
         let headings = crate::section::measure_headings(cx, model);
         state.set_heading_tops(headings.clone());
+        // OI-162: the footnote entries and their first references, so a `fn:`/
+        // `fnref:` jump can glide when its target is already on screen.
+        state.set_footnote_tops(crate::reading::measure_footnotes(cx, model));
         headings
     } else {
         state.set_heading_tops(Vec::new());
+        state.set_footnote_tops(Vec::new());
         Vec::new()
     };
     if tab.view.mode == Mode::Editor {

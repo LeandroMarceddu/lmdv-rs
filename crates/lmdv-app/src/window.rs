@@ -335,6 +335,8 @@ pub struct WindowState {
     pub ui: UiState,
     /// Reading positions and the `--line` flash.
     pub(crate) reading: ReadingState,
+    /// The reader's `Ctrl`+wheel/pinch accumulator (F-21).
+    pub(crate) reader_magnify: f32,
     /// The reader's single-key state: the j/k target, the `g g` window and the
     /// pinned heading (R-06–R-09/O-04).
     pub(crate) reading_keys: crate::reading_keys::ReadingKeys,
@@ -460,6 +462,7 @@ impl WindowState {
             tear: crate::tear_out::TearState::default(),
             ui: UiState::default(),
             reading: ReadingState::default(),
+            reader_magnify: 0.0,
             reading_keys: crate::reading_keys::ReadingKeys::default(),
             section_line: crate::section::SectionLineState::default(),
             outline_filter: TextEdit::default(),
@@ -1458,7 +1461,7 @@ impl WindowState {
             }
             JobMsg::Parsed { doc, revision, result } => self.finish_parse(doc, revision, result, tx),
             JobMsg::Saved { job, doc, generation, result } => self.handle_saved(job, doc, generation, result, tx),
-            JobMsg::DraftLoaded { doc, key, draft } => self.handle_draft_loaded(doc, key, draft),
+            JobMsg::DraftLoaded { doc, key, draft, issue } => self.handle_draft_loaded(doc, key, draft, issue),
             JobMsg::Exported { job, doc, format, result } => self.handle_exported(job, doc, format, result),
             JobMsg::RichCopied { job, doc, result } => self.handle_rich_copied(job, doc, result, tx),
             JobMsg::Opened { path, result, .. } => self.handle_opened(path, result),

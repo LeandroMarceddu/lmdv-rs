@@ -425,8 +425,14 @@ impl<'a> ReaderView<'a> {
     /// Builds the scrollable article.
     pub fn build(self) -> El {
         let (pad_x, pad_top) = self.padding();
+        // R-02/OI-138: tables, code and pictures fit the reading column, not the
+        // window. A 760 pt column inside a wide window leaves a 664 pt text
+        // width, so a table wider than the column scrolls inside it instead of
+        // overflowing the article.
+        let column = self.max_width.map_or(self.width, |max| self.width.min(max));
+        let content_width = (column - 2.0 * pad_x).max(1.0);
         let opts = RenderOptions {
-            width: self.width,
+            width: content_width,
             style: self.style,
             math: self.math,
             images: self.images,
@@ -461,6 +467,9 @@ impl<'a> ReaderView<'a> {
             // A notched mouse wheel glides like the reading keys; a trackpad's
             // precise deltas, modified wheels and horizontal ones stay Rune's.
             .on_wheel(|state: &mut WindowState, event: rune::WheelEvent, tx: &mut Tx| state.article_wheel(&event, tx))
+            // F-21: Ctrl+wheel or a pinch over the document changes the reader
+            // size, never the panels'.
+            .on_magnify(|state: &mut WindowState, event, _: &mut Tx| state.reader_magnify(event.delta))
             .on_scroll_offset(move |at| {
                 scroll.set(ScrollSnapshot::from_pos(at));
                 if let Some(signal) = &signal {

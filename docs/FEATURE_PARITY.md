@@ -164,6 +164,7 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | S-11/15/16/17, W-03/05/06/08, I-05 | Store/MSIX/WebView2-native behavior | Not applicable | **n/a** |
 | M-12 | Full Mermaid 11 | 17 native families; unsupported → code block | **substitute** |
 | R-20/X-03 | Rich copy of a selection | Whole-doc rich copy done (P5-04b); selection needs a block-range serializer | **build** |
+| F-20 | Drag the inner pane edge; arrows on the grip; double-click resets | Drag, double-click reset and persisted widths work; the kit builds its grip `focusable(false)`, so the arrow keys live on the focused tree (`Ctrl`+arrows) plus eight palette commands | **substitute** (OI-179) |
 | E-14 | Opening another document while editing a dirty buffer asks “You have unsaved changes. Discard them?” | No prompt: each tab keeps its own editor session, undo and crash draft, so switching documents discards nothing. Every destructive path (tab/window/native close, quit) still asks Save / Don't save / Cancel, and a save in flight defers the close. | **substitute** (user, 2026-11-18) |
 | T-SHARED | A file may be edited independently in two windows (CodeMirror buffers + conflict detection) | One canonical buffer + one editor lease; other windows are live viewers; explicit takeover | **substitute** (ADR-004/023) |
 | T-28 | No tab restoration across a full restart (only window geometry) | Session restore is an intentional extension; editor text comes from drafts | **extension** |

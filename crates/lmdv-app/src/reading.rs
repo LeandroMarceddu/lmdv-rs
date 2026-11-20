@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use lmdv_core::{DocStatus, DocumentId, ScrollAnchor};
 use lmdv_md::MdDoc;
-use lmdv_render::heading_key;
+use lmdv_render::{footnote_key, heading_key};
 use rune::Tx;
 
 use crate::reader::{ARTICLE_SCROLL_KEY, ScrollSignal, ScrollSnapshot, ViewportAnchor};
@@ -62,6 +62,21 @@ pub struct LandingFlash {
     pub range: Range<usize>,
     /// Virtual clock time at which the band expires.
     pub until: f64,
+}
+
+/// Where one footnote's entry row and first reference sit, from the last frame.
+///
+/// Footnote jumps use the same measured glide as headings when the target is on
+/// screen (OI-162). A reference is an inline link run with no element key, so
+/// the top-level block that owns it stands in for its exact position.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MeasuredFootnote {
+    /// The footnote's label as written.
+    pub label: String,
+    /// The entry row's top below the article viewport's top.
+    pub entry: Option<f32>,
+    /// The first reference's owning block key and top below the viewport's top.
+    pub reference: Option<(String, f32)>,
 }
 
 /// A heading jump holding the section line until its glide settles (O-09).
@@ -118,6 +133,8 @@ pub(crate) struct ReadingState {
     pub(crate) landing: Option<LandingWait>,
     /// The heading landing band, once it lights up (O-10/A-15).
     pub(crate) landing_flash: Option<LandingFlash>,
+    /// The drawn footnote entries and their first references (OI-162).
+    pub(crate) footnote_tops: std::cell::RefCell<Vec<MeasuredFootnote>>,
 }
 
 impl WindowState {
@@ -163,6 +180,64 @@ impl WindowState {
     /// The last drawn top of heading `index`, relative to the viewport top.
     pub(crate) fn heading_top(&self, index: usize) -> Option<f32> {
         self.reading.heading_tops.borrow().iter().find(|heading| heading.index == index).map(|heading| heading.top)
+    }
+
+    /// Records this frame's drawn footnote entries and first references (OI-162).
+    pub(crate) fn set_footnote_tops(&self, tops: Vec<MeasuredFootnote>) {
+        *self.reading.footnote_tops.borrow_mut() = tops;
+    }
+
+    /// A footnote jump target and its top below the viewport, from the last frame.
+    fn footnote_target(&self, label: &str, back: bool) -> Option<Option<f32>> {
+        let tops = self.reading.footnote_tops.borrow();
+        let measured = tops.iter().find(|footnote| footnote.label == label)?;
+        Some(if back { measured.reference.as_ref().map(|(_, top)| *top) } else { measured.entry })
+    }
+
+    /// Jumps to a footnote entry (`fn:`) or back to its first reference
+    /// (`fnref:`), gliding like a heading when the target is on screen (OI-162).
+    ///
+    /// The destination comes from the last frame's drawing, so it lands the
+    /// target just below the viewport top exactly as an outline jump does. A
+    /// target that is scrolled out of view takes the instant key request
+    /// instead: a long jump across the page should not animate every line.
+    /// Reduced motion turns the glide into one frame in Rune itself (A-15).
+    pub(crate) fn jump_to_footnote(&mut self, label: &str, back: bool, tx: &mut Tx) {
+        let scroll = self.reading.scroll.get();
+        let top = self.footnote_target(label, back).flatten();
+        match footnote_glide(scroll, top, crate::nav::JUMP_INSET) {
+            Some(y) => tx.scroll_to(ARTICLE_SCROLL_KEY, 0.0, y),
+            None => {
+                // A reference jumps to the block the model puts it in; an entry
+                // is keyed by its own row. A document without the definition
+                // has nothing to scroll to.
+                let Some(key) = self.footnote_target_key(label, back) else { return };
+                tx.scroll_key_to(key, crate::nav::JUMP_INSET);
+            }
+        }
+    }
+
+    /// The element key an off-screen footnote jump names, from the last frame.
+    fn footnote_target_key(&self, label: &str, back: bool) -> Option<String> {
+        if !back {
+            return Some(footnote_key(label));
+        }
+        if let Some((key, _)) = self
+            .reading
+            .footnote_tops
+            .borrow()
+            .iter()
+            .find(|footnote| footnote.label == label)
+            .and_then(|footnote| footnote.reference.as_ref())
+        {
+            return Some(key.clone());
+        }
+        // A frame that has not measured the reference yet still knows the block
+        // the model puts it in, so the instant jump has a real target.
+        let doc = self.active_reader()?;
+        let footnote = doc.footnotes.iter().find(|footnote| footnote.label == label)?;
+        let index = doc.block_index_at(footnote.first_ref.as_ref()?.start)?;
+        doc.block_key(index).map(str::to_owned)
     }
 
     /// The heading id stored for `anchor`, or a raw-offset marker.
@@ -548,6 +623,44 @@ pub(crate) fn anchor_for(doc: &MdDoc, snapshot: ScrollSnapshot, viewport: Option
     ScrollAnchor { id: String::new(), offset: snapshot.offset }
 }
 
+/// Where a footnote jump glides to, or `None` when its target is out of view
+/// and the jump should be instant (OI-162).
+///
+/// `top` is the target's last measured top below the viewport's top. A target
+/// that is on screen lands like a heading ([`crate::nav::heading_destination`]),
+/// so the glide and the section line behave the same; one above the viewport or
+/// below its bottom takes the instant key request instead.
+pub(crate) fn footnote_glide(scroll: ScrollSnapshot, top: Option<f32>, inset: f32) -> Option<f32> {
+    let viewport = scroll.viewport.max(0.0);
+    top.filter(|top| top.is_finite() && *top >= 0.0 && *top < viewport)
+        .map(|top| crate::nav::heading_destination(scroll, top, inset))
+}
+
+/// Where each footnote's entry and first reference were drawn, relative to the
+/// article viewport's top (OI-162).
+///
+/// Runs in the reader view, which is the only place with layout access. A
+/// footnote entry is a keyed row; its first reference is an inline link with no
+/// element key, so the top-level block that owns it is measured instead. An
+/// element the frame has not mounted is left unmeasured, and its jump stays
+/// instant.
+pub fn measure_footnotes<S>(cx: &rune::Cx<S>, doc: &MdDoc) -> Vec<MeasuredFootnote> {
+    let viewport_top = cx.window_layout(ARTICLE_SCROLL_KEY).map_or(0.0, |rect| rect[1]);
+    doc.footnotes
+        .iter()
+        .map(|footnote| {
+            let entry = cx.window_layout(&footnote_key(&footnote.label)).map(|rect| rect[1] - viewport_top);
+            let reference = footnote.first_ref.as_ref().and_then(|range| {
+                let index = doc.block_index_at(range.start)?;
+                let key = doc.block_key(index)?;
+                let top = cx.window_layout(key)?[1] - viewport_top;
+                Some((key.to_owned(), top))
+            });
+            MeasuredFootnote { label: footnote.label.clone(), entry, reference }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use lmdv_core::{DocumentKey, ScrollAnchor};
@@ -818,6 +931,130 @@ mod tests {
         state.reading.scroll_signal.set(ScrollSignal { report: 1, by_hand: false });
         state.apply_pending_scroll(&mut Tx::default());
         assert!(state.reading.pending.is_none(), "the inherited report is not a user scroll");
+    }
+
+    /// One headless frame of the window, as `--tree` sees it.
+    fn draw(state: WindowState) -> Vec<rune::ElementInfo> {
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.elements()
+    }
+
+    #[test]
+    fn a_footnote_link_lands_on_its_entry() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let mut source = String::from("A reference.[^1]\n\n");
+        for index in 0..40 {
+            source.push_str(&format!("Paragraph {index} fills the page so the note is below it.\n\n"));
+        }
+        source.push_str("[^1]: The note.\n");
+        state.open_synthetic("Notes", &source);
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.update(|state: &mut WindowState, tx: &mut Tx| state.open_link("fn:1", tx));
+        for _ in 0..8 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.state.reading.scroll.get().offset > 0.0, "the page moved to the footnote");
+        let entry = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("fn-1"))
+            .expect("the entry row");
+        assert!(entry.visible[1] >= 0.0 && entry.visible[1] < 760.0, "the entry is in view: {:?}", entry.visible);
+    }
+
+    #[test]
+    fn a_viewer_find_hit_over_a_formula_paints_its_box() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("Math", "Before $x+y$ after.\n");
+        // A selection across a formula prefills the find bar with its drawn
+        // placeholder; that hit's source range covers the formula (OI-127).
+        state.show_reader_find(&lmdv_md::OBJECT_CHAR.to_string());
+        let tab = state.active_tab().expect("tab");
+        assert_eq!(tab.view.reader_find.matches.len(), 1, "the formula is one hit");
+        let elements = draw(state);
+        let mark = elements.iter().find(|element| element.role == "mark").expect("the formula's paint");
+        assert!(
+            mark.rect[2] > 25.0 && mark.rect[3] < 16.0,
+            "the formula's drawn box, not a text-height chip: {:?}",
+            mark.rect
+        );
+    }
+
+    #[test]
+    fn a_viewer_find_hit_over_an_inline_image_paints_its_box() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("notes");
+        std::fs::create_dir_all(&root).unwrap();
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/img/test.png");
+        std::fs::copy(fixture, root.join("dot.png")).unwrap();
+        std::fs::write(root.join("note.md"), "Before ![dot](./dot.png) after.\n").unwrap();
+        let mut state = window(&temp);
+        // Headless waits for the decode, so the picture's size is stable within
+        // the frame that first draws it.
+        state.shared().set_headless();
+        state.open_path(root.join("note.md"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_none()
+            && std::time::Instant::now() < deadline
+        {
+            state.poll(0.0, &mut Tx::default());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_some(), "the page parsed");
+        state.show_reader_find(&lmdv_md::OBJECT_CHAR.to_string());
+        let tab = state.active_tab().expect("tab");
+        assert_eq!(tab.view.reader_find.matches.len(), 1, "the picture is one hit");
+        let elements = draw(state);
+        let mark = elements.iter().find(|element| element.role == "mark").expect("the picture's paint");
+        assert!(
+            mark.rect[2] > 60.0 && mark.rect[3] > 30.0,
+            "the picture's drawn box, not its alt text: {:?}",
+            mark.rect
+        );
+    }
+
+    #[test]
+    fn a_footnote_jump_glides_only_when_its_target_is_on_screen() {
+        let scroll = ScrollSnapshot { offset: 100.0, max: 2000.0, viewport: 700.0 };
+        // On screen: the heading rule lands it 12 points below the viewport top.
+        assert_eq!(footnote_glide(scroll, Some(120.0), 12.0), Some(208.0));
+        assert_eq!(footnote_glide(scroll, Some(0.0), 12.0), Some(88.0));
+        // Out of view: an instant key request instead of a glide across the page.
+        assert_eq!(footnote_glide(scroll, Some(-40.0), 12.0), None);
+        assert_eq!(footnote_glide(scroll, Some(700.0), 12.0), None);
+        assert_eq!(footnote_glide(scroll, None, 12.0), None);
+        // A clamped destination never asks for a negative offset.
+        assert_eq!(
+            footnote_glide(ScrollSnapshot { offset: 0.0, max: 2000.0, viewport: 700.0 }, Some(5.0), 12.0),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn a_footnote_jump_uses_the_measured_entry_and_reference() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic(
+            "Note",
+            "Text[^1]
+
+[^1]: The note.
+",
+        );
+        state.set_footnote_tops(vec![MeasuredFootnote {
+            label: "1".to_owned(),
+            entry: Some(320.0),
+            reference: Some(("b0".to_owned(), -80.0)),
+        }]);
+        assert_eq!(state.footnote_target("1", false), Some(Some(320.0)));
+        assert_eq!(state.footnote_target("1", true), Some(Some(-80.0)));
+        assert_eq!(state.footnote_target("gone", false), None);
+        assert_eq!(state.footnote_target_key("1", true).as_deref(), Some("b0"), "the block is the instant target");
+        assert_eq!(state.footnote_target_key("1", false).as_deref(), Some("fn-1"), "an entry is keyed by its row");
     }
 
     #[test]

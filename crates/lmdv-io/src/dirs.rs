@@ -7,7 +7,8 @@
 //! overrides the root, for tests and advanced users.
 //!
 //! [`AppDirs::resolve_reported`] also says when portable mode could not use
-//! `<exe dir>/data` and the normal XDG roots were substituted.
+//! `<exe dir>/data` — because it cannot be created or because the existing
+//! folder is not writable — and the normal XDG roots were substituted.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -25,12 +26,13 @@ pub const PORTABLE_MARKER: &str = "lmdv-portable.txt";
 /// asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DirsIssue {
-    /// Portable mode was selected, but `<exe dir>/data` could not be created.
-    /// The normal XDG roots are used instead, so the copy still starts.
+    /// Portable mode was selected, but `<exe dir>/data` could not be created
+    /// or an existing one is not writable. The normal XDG roots are used
+    /// instead, so the copy still starts.
     PortableUnavailable {
-        /// The portable data root that could not be created.
+        /// The portable data root that could not be used.
         root: PathBuf,
-        /// The creation error, for the notice.
+        /// The creation or permission error, for the notice.
         reason: String,
     },
 }
@@ -77,9 +79,10 @@ impl AppDirs {
 
     /// Resolves the directories and reports any fallback.
     ///
-    /// Portable mode creates `<exe dir>/data` while resolving so it can tell
-    /// whether the copy is usable; if that fails, the normal XDG roots are
-    /// used and [`DirsIssue::PortableUnavailable`] is returned.
+    /// Portable mode creates `<exe dir>/data` while resolving, and checks an
+    /// existing one for write access, so it can tell whether the copy is
+    /// usable; if not, the normal XDG roots are used and
+    /// [`DirsIssue::PortableUnavailable`] is returned.
     pub fn resolve_reported() -> ResolvedDirs {
         let executable = std::env::current_exe().ok();
         Self::resolve_from_reported(&|name| std::env::var_os(name), executable.as_deref())
@@ -169,7 +172,7 @@ impl AppDirs {
             let has_marker = fs::symlink_metadata(&marker).is_ok_and(|metadata| metadata.is_file());
             if has_marker {
                 let root = lexical(exe_dir.join("data"));
-                match fs::create_dir_all(&root) {
+                match prepare_portable_root(&root) {
                     Ok(()) => {
                         let state = root.join("state");
                         return ResolvedDirs {
@@ -250,6 +253,64 @@ fn xdg_path(get: &dyn Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBu
     let value = get(name)?;
     let path = PathBuf::from(value);
     if path.is_absolute() { Some(path) } else { None }
+}
+
+/// Makes sure the portable data root can be used for this session.
+///
+/// A missing root is created. An existing root is only checked, never probed
+/// with a file, so a read-only USB stick, a folder owned by another user or a
+/// folder without write permission falls back to XDG before anything is
+/// written inside it (OI-170).
+fn prepare_portable_root(root: &Path) -> io::Result<()> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {
+            if is_writable_dir(root) {
+                Ok(())
+            } else {
+                Err(io::Error::new(io::ErrorKind::PermissionDenied, "the folder is not writable"))
+            }
+        }
+        Ok(_) => Err(io::Error::new(io::ErrorKind::NotADirectory, "the path is not a folder")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir_all(root),
+        Err(error) => Err(error),
+    }
+}
+
+/// Whether `path` admits new entries for the current user.
+///
+/// On Unix `access(2)` answers from the inode's mode, owner and the mount's
+/// read-only flag without creating anything in the folder.
+#[cfg(unix)]
+fn is_writable_dir(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut bytes = path.as_os_str().as_bytes().to_vec();
+    if bytes.contains(&0) {
+        return false;
+    }
+    bytes.push(0);
+    unsafe { libc::access(bytes.as_ptr().cast(), libc::W_OK) == 0 }
+}
+
+/// Windows exposes no portable write-permission check for a folder, so a
+/// uniquely named folder is created and removed. This is the one platform
+/// where answering costs a probe; a denied folder is then reported before the
+/// app writes into it.
+#[cfg(windows)]
+fn is_writable_dir(path: &Path) -> bool {
+    let probe = path.join(format!(".lmdv-write-probe-{}", std::process::id()));
+    match fs::create_dir(&probe) {
+        Ok(()) => {
+            let _ = fs::remove_dir(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_writable_dir(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| !metadata.permissions().readonly())
 }
 
 /// The degraded root used when neither the environment nor the profile
@@ -399,6 +460,42 @@ mod tests {
         }
         #[cfg(unix)]
         assert_eq!(resolved.dirs.data, PathBuf::from("/x/data/md.lmdv"), "the XDG root is used");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_pre_existing_portable_root_that_is_not_writable_falls_back_to_xdg() {
+        use std::os::unix::fs::PermissionsExt;
+
+        if unsafe { libc::geteuid() } == 0 {
+            // root ignores the permission bits, so no folder is unwritable.
+            return;
+        }
+        let temp = TempDir::new().unwrap();
+        let exe_dir = temp.path().join("portable-full");
+        fs::create_dir_all(&exe_dir).unwrap();
+        fs::write(exe_dir.join(PORTABLE_MARKER), b"").unwrap();
+        let data = exe_dir.join("data");
+        fs::create_dir_all(&data).unwrap();
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o555)).unwrap();
+        let executable = exe_dir.join("lmdv");
+        let get = env(&[("HOME", "/home/user"), ("XDG_DATA_HOME", "/x/data")]);
+
+        let resolved = AppDirs::resolve_from_reported(&get, Some(&executable));
+        assert!(!resolved.dirs.portable, "an unwritable portable root is not selected");
+        assert_eq!(resolved.dirs.instance_id, "main", "the fallback joins the installed instance");
+        assert_eq!(resolved.dirs.data, PathBuf::from("/x/data/md.lmdv"), "the XDG root is used");
+        match &resolved.issues[..] {
+            [DirsIssue::PortableUnavailable { root, reason }] => {
+                assert_eq!(root, &data);
+                assert!(!reason.is_empty(), "the notice has a reason");
+            }
+            other => panic!("expected one portable-unavailable issue, got {other:?}"),
+        }
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "no probe file is written into the folder");
+
+        // Let `TempDir` remove the tree.
+        fs::set_permissions(&data, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     #[test]

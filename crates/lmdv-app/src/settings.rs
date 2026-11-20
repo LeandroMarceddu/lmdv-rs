@@ -536,6 +536,24 @@ impl WindowState {
         }
     }
 
+    /// `Ctrl`+wheel or a pinch over the article changes the reader size (F-21).
+    ///
+    /// One step per gesture notch: trackpads emit many small deltas, so the
+    /// steps accumulate until they pass the same threshold the panes use.
+    pub fn reader_magnify(&mut self, delta: f32) -> bool {
+        if !delta.is_finite() || delta == 0.0 {
+            return true;
+        }
+        self.reader_magnify += delta;
+        if self.reader_magnify.abs() < 0.35 {
+            return true;
+        }
+        let step = if self.reader_magnify > 0.0 { 1 } else { -1 };
+        self.reader_magnify = 0.0;
+        self.bump_reader_size(step);
+        true
+    }
+
     /// Restores the default reader size (16).
     pub fn reset_reader_size(&mut self) {
         self.set_reader_size(DEFAULT_READER_SIZE);

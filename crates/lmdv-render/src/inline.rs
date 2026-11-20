@@ -72,6 +72,9 @@ struct Rep {
     /// Where the U+FFFC sits inside `text`, for an inline image.
     placeholder: Option<usize>,
     image: Option<InlineImage>,
+    /// The source the replacement came from, delimiters and Markdown syntax
+    /// included, so a highlight over any of it paints what is drawn (OI-127).
+    source: Option<Range<usize>>,
     /// The replacement bytes are a code/mono chip.
     chip: bool,
     /// The replacement bytes are secondary text.
@@ -162,6 +165,7 @@ impl<'a> Renderer<'a> {
                 text: String::new(),
                 placeholder: None,
                 image,
+                source: self.formula_source(inline, math.range.start, math.range.end, &math.tex),
                 chip: false,
                 muted: false,
                 uncopied: Vec::new(),
@@ -211,6 +215,7 @@ impl<'a> Renderer<'a> {
                 text: String::new(),
                 placeholder: None,
                 image: None,
+                source: self.object_source(inline, object),
                 chip: false,
                 muted: false,
                 uncopied: Vec::new(),
@@ -413,6 +418,58 @@ impl<'a> Renderer<'a> {
         Built { text, spans, strikes, links, uncopied, highlights }
     }
 
+    /// The source span a formula replaced: its delimiters and its TeX.
+    ///
+    /// The parser's map ties the placeholder to the opening delimiter and leaves
+    /// the TeX itself unmapped, so a highlight over the formula's body would
+    /// paint nothing (OI-127). The closing delimiter is checked before the span
+    /// is trusted; otherwise the gap up to the next mapped run stands in.
+    fn formula_source(&self, inline: &Inline, rendered: usize, rendered_end: usize, tex: &str) -> Option<Range<usize>> {
+        let start = inline.source_map.source_of(rendered)?;
+        let rest = self.doc.source.get(start..)?;
+        let delimiter = if rest.starts_with("$$") {
+            2
+        } else if rest.starts_with('$') {
+            1
+        } else {
+            return None;
+        };
+        let end = start.checked_add(delimiter * 2 + tex.len())?;
+        let slice = self.doc.source.get(start..end)?;
+        let closing = if delimiter == 2 { "$$" } else { "$" };
+        if slice.ends_with(closing) && slice.len() == delimiter * 2 + tex.len() {
+            return Some(start..end);
+        }
+        // A formula whose TeX the scanner trimmed still spans from its opening
+        // delimiter to the mapped run after it; that gap is the whole formula.
+        let end = source_after(&inline.source_map, rendered_end).unwrap_or(start);
+        (start < end).then_some(start..end)
+    }
+
+    /// The source span an inline object replaced, its Markdown/HTML syntax included.
+    fn object_source(&self, inline: &Inline, object: &lmdv_md::InlineObject) -> Option<Range<usize>> {
+        use lmdv_md::InlineObjectKind;
+        let start = inline.source_map.source_of(object.range.start)?;
+        match object.kind {
+            InlineObjectKind::Image => {
+                let rest = self.doc.source.get(start..)?;
+                if rest.starts_with("![") {
+                    markdown_image_end(rest).map(|end| start..start + end)
+                } else if rest.starts_with('<') {
+                    rest.find('>').map(|end| start..start + end + 1)
+                } else {
+                    let end = source_after(&inline.source_map, object.range.end).unwrap_or(start);
+                    (start < end).then_some(start..end)
+                }
+            }
+            InlineObjectKind::TaskCheckbox { .. } => Some(start..start + 3),
+            _ => {
+                let end = source_after(&inline.source_map, object.range.end).unwrap_or(start);
+                (start < end).then_some(start..end)
+            }
+        }
+    }
+
     /// Paints `parts` as paint-only [`rune::TextHighlight`]s over a text element.
     ///
     /// Highlights never reshape or split the text, so selection, copy and line
@@ -426,6 +483,12 @@ impl<'a> Renderer<'a> {
 
     /// Maps the app's source ranges through this inline's source map and the
     /// drawn replacement list, then resolves overlaps to one paint each.
+    ///
+    /// Besides the source map's monotone segments, a range over an inline
+    /// object's own syntax (a formula's TeX, an image's alt text or URL, a task
+    /// marker) paints the object's drawn replacement, and a range over a link's
+    /// destination paints the link's label: those bytes draw nothing themselves
+    /// (OI-127).
     fn inline_highlights(
         &self,
         inline: &Inline,
@@ -437,12 +500,32 @@ impl<'a> Renderer<'a> {
             if highlight.range.is_empty() {
                 continue;
             }
-            let Some(rendered) = rendered_range(&inline.source_map, highlight.range.clone()) else { continue };
-            let Some(drawn) = drawn_range(reps, rendered) else { continue };
-            let drawn = trim_breaks(text, drawn);
-            if drawn.start < drawn.end {
-                parts.push((drawn, highlight.kind, index));
+            let mut pieces: Vec<Range<usize>> = Vec::new();
+            if let Some(rendered) = rendered_range(&inline.source_map, highlight.range.clone())
+                && let Some(drawn) = drawn_range(reps, rendered)
+            {
+                pieces.push(trim_breaks(text, drawn));
             }
+            for rep in reps {
+                if let Some(source) = &rep.source
+                    && overlaps(&highlight.range, source)
+                {
+                    pieces.push(trim_breaks(text, rep.new_start..rep.new_end));
+                }
+            }
+            for link in &inline.links {
+                let Some(label) = inline.source_map.source_range(link.range.clone()) else { continue };
+                let Some(after) = source_after(&inline.source_map, link.range.end) else { continue };
+                if label.end < after && overlaps(&highlight.range, &(label.end..after)) {
+                    pieces.push(trim_breaks(text, link.range.clone()));
+                }
+            }
+            parts.extend(
+                pieces
+                    .into_iter()
+                    .filter(|piece| piece.start < piece.end && piece.end <= text.len())
+                    .map(|piece| (piece, highlight.kind, index)),
+            );
         }
         overlay(parts, text.len())
     }
@@ -558,7 +641,7 @@ fn drawn_range(reps: &[Rep], rendered: Range<usize>) -> Option<Range<usize>> {
 /// range that covers it simply spans the runs on either side. A range over only
 /// unmapped source bytes (a marker, the formula's TeX after its placeholder)
 /// maps to nothing and is ignored.
-fn rendered_range(map: &lmdv_md::SourceMap, source: Range<usize>) -> Option<Range<usize>> {
+pub(crate) fn rendered_range(map: &lmdv_md::SourceMap, source: Range<usize>) -> Option<Range<usize>> {
     let mut start = usize::MAX;
     let mut end = 0;
     for segment in &map.segments {
@@ -584,6 +667,75 @@ fn trim_breaks(text: &str, mut range: Range<usize>) -> Range<usize> {
         range.end -= 1;
     }
     range
+}
+
+/// Whether two source ranges share a byte.
+fn overlaps(a: &Range<usize>, b: &Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
+/// The source byte after drawn byte `rendered`: the next mapped run's first
+/// source byte, or the inline's mapped end.
+///
+/// A Markdown link's destination and an object's syntax sit between two mapped
+/// runs and are not in the map themselves; this is the end of that gap.
+fn source_after(map: &lmdv_md::SourceMap, rendered: usize) -> Option<usize> {
+    if let Some(source) = map.source_of(rendered) {
+        return Some(source);
+    }
+    if let Some(next) = map.segments.iter().find(|segment| segment.rendered.start >= rendered) {
+        return Some(next.source);
+    }
+    map.segments.last().map(|segment| segment.source + segment.rendered.len())
+}
+
+/// The byte length of a Markdown image starting at `source`, its `!` included.
+///
+/// The parser reports the whole `![alt](destination "title")` span, not just the
+/// first character the source map knows, so a highlight over any part of it can
+/// paint the picture (OI-127). Nested brackets in the alt and parentheses in the
+/// destination are balanced; a backslash escapes the next byte.
+fn markdown_image_end(source: &str) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if !source.starts_with("![") {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            b'\\' => index += 1,
+            _ => {}
+        }
+        index += 1;
+    }
+    if depth != 0 || *bytes.get(index)? != b']' || *bytes.get(index + 1)? != b'(' {
+        return None;
+    }
+    let mut depth = 1usize;
+    let mut at = index + 2;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            b'\\' => at += 1,
+            _ => {}
+        }
+        at += 1;
+    }
+    None
 }
 
 /// Splits overlapping paints into non-overlapping segments, each painted with

@@ -305,23 +305,53 @@ pub(crate) fn range_boxes(
                 }
             }
         }
+        // An inline image draws no glyph: its placeholder shapes as zero width and the picture
+        // is painted separately at the room its inline box reserved (see `Span::image`). A
+        // highlight covering the placeholder's byte paints that box, so a find match or a line
+        // highlight over a picture shows the picture's own extent instead of nothing. The
+        // picture's box may reach above and below the line, so it keeps its own vertical bounds.
+        let mut images: Vec<(f64, f64, f64, f64)> = Vec::new();
+        if !pill_boxes {
+            for item in line.items() {
+                let PositionedLayoutItem::InlineBox(ib) = item else { continue };
+                if ib.id & IMAGE_BOX == 0 || ib.width <= 0.0 {
+                    continue;
+                }
+                let Some(b) = layout.inline_boxes().find(|b| b.id == ib.id) else { continue };
+                if range.contains(&b.index) {
+                    images.push((ib.x as f64, (ib.x + ib.width) as f64, ib.y as f64, (ib.y + ib.height) as f64));
+                }
+            }
+        }
         intervals.sort_by(|p, q| p.0.total_cmp(&q.0));
-        let mut merged: Vec<(f64, f64)> = Vec::new();
+        let mut merged: Vec<(f64, f64, Option<(f64, f64)>)> = Vec::new();
         for (x0, x1) in intervals {
             match merged.last_mut() {
                 Some(last) if x0 <= last.1 + 0.5 => last.1 = last.1.max(x1),
-                _ => merged.push((x0, x1)),
+                _ => merged.push((x0, x1, None)),
+            }
+        }
+        for (x0, x1, y0, y1) in images {
+            match merged.iter_mut().find(|(a, b, _)| x0 <= *b + 0.5 && *a <= x1 + 0.5) {
+                Some(slot) => {
+                    slot.0 = slot.0.min(x0);
+                    slot.1 = slot.1.max(x1);
+                    let (top, bottom) = slot.2.unwrap_or((line_min, line_max));
+                    slot.2 = Some((top.min(y0), bottom.max(y1)));
+                }
+                None => merged.push((x0, x1, Some((y0, y1)))),
             }
         }
         if let Some(last) = merged.last_mut() {
             last.1 += newline_ws;
         } else if newline_ws > 0.0 {
             let x0 = (m.inline_min_coord + m.offset + m.advance) as f64;
-            merged.push((x0, x0 + newline_ws));
+            merged.push((x0, x0 + newline_ws, None));
         }
-        for (x0, x1) in merged {
+        for (x0, x1, vertical) in merged {
             if x1 > x0 {
-                rects.push((parley::BoundingBox::new(x0, line_min, x1, line_max), line_ix));
+                let (y0, y1) = vertical.unwrap_or((line_min, line_max));
+                rects.push((parley::BoundingBox::new(x0, y0, x1, y1), line_ix));
             }
         }
     }

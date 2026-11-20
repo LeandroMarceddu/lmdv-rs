@@ -12,12 +12,17 @@
 //! file's folder, the English label in another language): a word found only
 //! among them counts for less, and the bold hits stay in the label.
 //!
-//! Folding is NFKD-like for the Latin letters the app shows: precomposed
-//! accents lose their mark, `ß` becomes `ss`, the ligatures and stroked letters
-//! (`æ œ ø ł đ ð þ ı`) their plain letters, full-width ASCII its half-width
-//! form, and combining marks left alone are dropped. Unicode's full
-//! compatibility decomposition is not embedded (no table, no dependency), so a
-//! rare letter outside Latin-1/Extended-A folds as itself.
+//! Folding is Unicode NFKD plus case: precomposed accents lose their mark,
+//! compatibility forms (`①`, `Ⅳ`, `½`, `㎡`, `™`, the ligatures) take their
+//! plain form, Hangul syllables decompose into jamo arithmetically, `ß` becomes
+//! `ss` and the stroked letters (`ø ł đ ð þ ı`) their plain letters. The table
+//! in [`nfkd`] carries every code point whose NFKD differs from itself (the
+//! algorithmic Hangul syllables excepted), so no new dependency formats the
+//! query. Combining diacritics are then dropped, which is what makes "attivita"
+//! find "Attività"; the kana voicing marks are kept, since they change the
+//! letter.
+
+mod nfkd;
 
 /// A label prepared for matching.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +139,11 @@ fn kind_of(c: char) -> u8 {
 /// One character folded: compatibility forms undone, accents dropped, lower
 /// case, then the letters with no decomposition (`ß` → `ss`).
 fn fold_into(c: char, out: &mut String) {
+    // The common case: ASCII has no decomposition and folds by case alone.
+    if c.is_ascii() {
+        out.push(c.to_ascii_lowercase());
+        return;
+    }
     // Full-width ASCII and the ideographic space have half-width forms.
     let half = match c as u32 {
         0xFF01..=0xFF5E => Some(char::from_u32(c as u32 - 0xFEE0).unwrap_or(c)),
@@ -145,7 +155,7 @@ fn fold_into(c: char, out: &mut String) {
         return;
     }
     let expansion = match c {
-        'ß' => Some("ss"),
+        'ß' | 'ẞ' => Some("ss"),
         'æ' | 'Æ' => Some("ae"),
         'œ' | 'Œ' => Some("oe"),
         'ø' | 'Ø' => Some("o"),
@@ -164,6 +174,32 @@ fn fold_into(c: char, out: &mut String) {
         out.push_str(expansion);
         return;
     }
+    // A Hangul syllable is a compatibility mapping the table leaves out: its
+    // jamo are arithmetic. Both the label and the query reach the same jamo, so
+    // a syllable query and a jamo query match the same way NFKD makes them.
+    if let Some(jamo) = hangul(c) {
+        out.push(jamo[0]);
+        out.push(jamo[1]);
+        // TBase is the filler a syllable without a final consonant carries.
+        if jamo[2] != '\u{11A7}' {
+            out.push(jamo[2]);
+        }
+        return;
+    }
+    // NFKD: the compatibility and canonical decompositions, marks dropped
+    // (accent-insensitive matching) except the kana voicing marks, which are
+    // letters of their own.
+    if let Some(decomposed) = nfkd::lookup(c) {
+        for part in decomposed.chars() {
+            if is_mark(part) {
+                continue;
+            }
+            for lower in part.to_lowercase() {
+                out.push(lower);
+            }
+        }
+        return;
+    }
     // Everything else goes through the table's precomposed Latin folding, which
     // also drops a lone combining mark and lowercases.
     if let Some(folded) = crate::tables::fold_char(c) {
@@ -171,6 +207,25 @@ fn fold_into(c: char, out: &mut String) {
             out.push(lower);
         }
     }
+}
+
+/// The jamo of a precomposed Hangul syllable (NFKD's arithmetic form).
+fn hangul(c: char) -> Option<[char; 3]> {
+    const S_BASE: u32 = 0xAC00;
+    const L_BASE: u32 = 0x1100;
+    const V_BASE: u32 = 0x1161;
+    const T_BASE: u32 = 0x11A7;
+    const V_COUNT: u32 = 21;
+    const T_COUNT: u32 = 28;
+    const N_COUNT: u32 = V_COUNT * T_COUNT;
+    let index = (c as u32).checked_sub(S_BASE)?;
+    if index >= 11_172 {
+        return None;
+    }
+    let lead = char::from_u32(L_BASE + index / N_COUNT)?;
+    let vowel = char::from_u32(V_BASE + (index % N_COUNT) / T_COUNT)?;
+    let tail = char::from_u32(T_BASE + index % T_COUNT)?;
+    Some([lead, vowel, tail])
 }
 
 /// `text` folded for matching (accents and case gone, `ß` as `ss`).
@@ -523,6 +578,23 @@ mod tests {
         assert_eq!(fold("Attività"), "attivita");
         assert_eq!(fold("Straße"), "strasse");
         assert_eq!(fold("Ｈｅｌｌｏ"), "hello");
+    }
+
+    #[test]
+    fn compatibility_forms_and_greek_and_cyrillic_fold() {
+        assert_eq!(fold("\u{2460}"), "1", "circled digits");
+        assert_eq!(fold("\u{2163}"), "iv", "Roman numerals");
+        assert_eq!(fold("\u{33A1}"), "m2", "square metre");
+        assert_eq!(fold("\u{2122}"), "tm", "trademark");
+        assert_eq!(fold("\u{FB01}"), "fi", "the fi ligature");
+        assert_eq!(fold("\u{1E9E}"), "ss", "capital sharp s");
+        assert_eq!(fold("Ἀθήνα"), "αθηνα", "Greek accents are dropped");
+        assert_eq!(fold("Йордан"), "иордан", "Cyrillic breve folds to и");
+        assert_eq!(fold("가"), fold("가"), "a Hangul syllable folds to its jamo");
+        assert!(found("가", "\u{AC00}").is_some(), "a syllable finds itself");
+        assert!(found("\u{AC00}", "가").is_some());
+        assert_eq!(fold("が"), "か\u{3099}", "the kana voicing mark stays a letter");
+        assert_ne!(fold("か"), fold("が"), "か and が are different letters");
     }
 
     #[test]

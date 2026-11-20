@@ -3,10 +3,10 @@
 //! navigation (M-20).
 
 use lmdv_md::{Block, Callout, CalloutKind, FmValue, FrontMatter};
-use rune::{El, Icon, Span, TextStyle, col, icon, rich, row, text};
+use rune::{El, Icon, Span, TextHighlight, TextStyle, col, icon, rich, row, text};
 
 use crate::block::Renderer;
-use crate::theme::DocTheme;
+use crate::inline::overlay;
 use crate::{FOOTNOTES_KEY, FRONT_MATTER_KEY, TOC_KEY};
 
 /// A `NOTE` card's icon: the information mark.
@@ -55,7 +55,7 @@ pub(crate) fn callout_icon(kind: CalloutKind) -> &'static Icon {
     }
 }
 
-/// The paint index of `kind` in [`DocTheme::callouts`].
+/// The paint index of `kind` in [`DocTheme`](crate::DocTheme::callouts).
 pub(crate) fn callout_index(kind: CalloutKind) -> usize {
     match kind {
         CalloutKind::Note => 0,
@@ -68,14 +68,30 @@ pub(crate) fn callout_index(kind: CalloutKind) -> usize {
 
 /// The front-matter card: a summary of the keys, and the flat table when open.
 pub(crate) fn front_matter(r: &Renderer<'_>, front: &FrontMatter) -> El {
+    let sources = entry_sources(r, front);
     let keys = front.entries.iter().map(|(key, _)| key.as_str()).collect::<Vec<_>>().join(" · ");
     let open = r.opts.open_for(FRONT_MATTER_KEY);
     let title = r.theme.labels.front_matter.clone();
     let summary_label = if keys.is_empty() { title.clone() } else { format!("{title} · {keys}") };
+    // The card has no source map of its own: a key's own source bytes paint
+    // its occurrence in the summary while the card is closed (OI-127).
+    let mut summary_marks = Vec::new();
+    let separator = " · ".len();
+    let mut key_at = title.len() + separator;
+    for ((key, _), source) in front.entries.iter().zip(&sources) {
+        for mark in painted_spans(r, key.len(), Some(source.key.clone())) {
+            let range = mark.range();
+            summary_marks.push(mark.with_range(key_at + range.start..key_at + range.end));
+        }
+        key_at += key.len() + separator;
+    }
     let mut summary = rich(summary_label.clone(), vec![Span::new(0, title.len()).weight(600.0).color(r.theme.text)])
         .font(r.theme.small)
         .color(r.theme.muted)
         .link(rune::Link::new(0..summary_label.len(), crate::details_toggle(FRONT_MATTER_KEY)));
+    if !summary_marks.is_empty() {
+        summary = summary.text_highlights(summary_marks);
+    }
     if let Some(wire) = &r.opts.wires.link {
         summary = wire(summary);
     }
@@ -95,37 +111,158 @@ pub(crate) fn front_matter(r: &Renderer<'_>, front: &FrontMatter) -> El {
     if open {
         if front.valid {
             let mut table = col().key("entries").w_full().pt(8.0);
-            for (key, value) in &front.entries {
-                table = table.child(entry_row(r.theme, key, value));
+            for (index, (key, value)) in front.entries.iter().enumerate() {
+                table = table.child(entry_row(r, key, value, sources.get(index)));
             }
             card = card.child(table);
         } else {
-            card = card.child(
-                rich(front.raw.clone(), Vec::new()).key("raw").font(r.theme.code).color(r.theme.text).pt(8.0).w_full(),
-            );
+            let source = front_raw_source(r, front);
+            let raw =
+                rich(front.raw.clone(), Vec::new()).key("raw").font(r.theme.code).color(r.theme.text).pt(8.0).w_full();
+            card = card.child(raw.text_highlights(painted_spans(r, front.raw.len(), source)));
         }
     }
     card
 }
 
+/// The source span each front-matter entry was written in.
+///
+/// `key` is the key's bytes in the source; `values` are the drawn value bytes,
+/// one for a scalar and one per list item. The card is generated chrome with no
+/// source map, so these spans are what let a `--line` flash or a find match
+/// paint a key or a value (OI-127).
+#[derive(Clone, Debug, Default)]
+struct EntrySource {
+    key: std::ops::Range<usize>,
+    values: Vec<std::ops::Range<usize>>,
+}
+
+/// Where the front matter's keys and values sit in the document source.
+///
+/// The walk mirrors the parser's flat subset: one `key: value` line per entry,
+/// a `[a, b]` inline list, or indented `- item` lines. A value the walk cannot
+/// locate is left unpainted instead of guessed at.
+fn entry_sources(r: &Renderer<'_>, front: &FrontMatter) -> Vec<EntrySource> {
+    if !front.valid || front.raw.is_empty() {
+        return Vec::new();
+    }
+    let Some(base) = front_matter_base(r, front) else { return Vec::new() };
+    let lines: Vec<&str> = front.raw.split('\n').collect();
+    let mut offsets = Vec::with_capacity(lines.len());
+    let mut at = base;
+    for line in &lines {
+        offsets.push(at);
+        at += line.len() + 1;
+    }
+    let mut out = Vec::with_capacity(front.entries.len());
+    let mut entry = 0usize;
+    let mut index = 0usize;
+    while index < lines.len() && entry < front.entries.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            index += 1;
+            continue;
+        }
+        let Some(colon) = line.find(':') else {
+            index += 1;
+            continue;
+        };
+        let key = line[..colon].trim_end();
+        let key_span = offsets[index]..offsets[index] + key.len();
+        let rest = line[colon + 1..].trim();
+        index += 1;
+        let mut values = Vec::new();
+        match front.entries.get(entry).map(|(_, value)| value) {
+            Some(FmValue::List(items)) if rest.is_empty() || rest == "|" || rest == ">" => {
+                let mut found = 0usize;
+                while index < lines.len() && found < items.len() {
+                    let item_line = lines[index];
+                    let Some(item) = list_item_text(item_line) else { break };
+                    let from = item_line.find('-').map_or(0, |dash| dash + 1);
+                    let Some(pos) = item_line[from..].find(item) else { break };
+                    let start = offsets[index] + from + pos;
+                    values.push(start..start + item.len());
+                    found += 1;
+                    index += 1;
+                }
+            }
+            Some(FmValue::List(items)) => {
+                let mut cursor = 0usize;
+                for item in items {
+                    let Some(pos) = line[colon + 1 + cursor..].find(item.as_str()) else { break };
+                    let start = offsets[index - 1] + colon + 1 + cursor + pos;
+                    values.push(start..start + item.len());
+                    cursor += pos + item.len();
+                }
+            }
+            Some(FmValue::Scalar(value)) => {
+                if !value.is_empty()
+                    && let Some(pos) = line[colon + 1..].find(value.as_str())
+                {
+                    let start = offsets[index - 1] + colon + 1 + pos;
+                    values.push(start..start + value.len());
+                }
+            }
+            None => break,
+        }
+        out.push(EntrySource { key: key_span, values });
+        entry += 1;
+    }
+    out
+}
+
+/// The front matter's `raw` text inside the document source.
+fn front_matter_base(r: &Renderer<'_>, front: &FrontMatter) -> Option<usize> {
+    let source = r.doc.source.as_ref();
+    let head_end = r.doc.block_spans.first().map_or(source.len(), |span| span.source.start);
+    let head = source.get(..head_end)?;
+    let base = head.find(front.raw.as_str())?;
+    // The block's own draw begins with the opening fence; a raw string that
+    // repeats in a later block must not be painted as front matter.
+    (base < head_end).then_some(base)
+}
+
+/// The source span of a raw, invalid front-matter block.
+fn front_raw_source(r: &Renderer<'_>, front: &FrontMatter) -> Option<std::ops::Range<usize>> {
+    let base = front_matter_base(r, front)?;
+    (!front.raw.is_empty()).then_some(base..base + front.raw.len())
+}
+
+/// The text after a `-` list marker, trimmed, when `line` is a list item.
+fn list_item_text(line: &str) -> Option<&str> {
+    let trimmed = line.trim_start_matches([' ', '\t']);
+    if trimmed.len() == line.len() {
+        return None;
+    }
+    let rest = trimmed.strip_prefix('-')?;
+    Some(rest.trim_start_matches([' ', '\t']))
+}
+
 /// One key/value row of the front-matter table; lists become chips.
-fn entry_row(theme: &DocTheme, key: &str, value: &FmValue) -> El {
+fn entry_row(r: &Renderer<'_>, key: &str, value: &FmValue, source: Option<&EntrySource>) -> El {
+    let theme = r.theme;
     let mut right = row().gap(4.0).flex_wrap().grow(1.0);
     match value {
         FmValue::Scalar(value) => {
-            right = right.child(text(value.clone()).font(theme.small).color(theme.text));
+            let element = text(value.clone()).font(theme.small).color(theme.text).text_highlights(painted_spans(
+                r,
+                value.len(),
+                source.and_then(|s| s.values.first().cloned()),
+            ));
+            right = right.child(element);
         }
         FmValue::List(items) => {
-            for item in items {
-                right = right.child(
-                    text(item.clone())
-                        .font(theme.small)
-                        .color(theme.text)
-                        .px(5.0)
-                        .py(1.0)
-                        .radius(3.0)
-                        .fill(theme.code_bg),
-                );
+            for (index, item) in items.iter().enumerate() {
+                let element = text(item.clone())
+                    .font(theme.small)
+                    .color(theme.text)
+                    .px(5.0)
+                    .py(1.0)
+                    .radius(3.0)
+                    .fill(theme.code_bg)
+                    .text_highlights(painted_spans(r, item.len(), source.and_then(|s| s.values.get(index).cloned())));
+                right = right.child(element);
             }
         }
     }
@@ -135,8 +272,44 @@ fn entry_row(theme: &DocTheme, key: &str, value: &FmValue) -> El {
         .py(3.0)
         .gap(12.0)
         .items_start()
-        .child(text(key.to_owned()).font(theme.small).color(theme.muted).w(110.0).shrink())
+        .child(
+            text(key.to_owned()).font(theme.small).color(theme.muted).w(110.0).shrink().text_highlights(painted_spans(
+                r,
+                key.len(),
+                source.map(|s| s.key.clone()),
+            )),
+        )
         .child(right)
+}
+
+/// The paint-only spans over `len` drawn bytes whose source starts at `source`.
+///
+/// The drawn text is copied byte for byte from that source (a front-matter key or
+/// value), so a highlight's overlap maps by subtraction; `overlay` then resolves
+/// several highlights to one paint each (OI-127).
+fn painted_spans(r: &Renderer<'_>, len: usize, source: Option<std::ops::Range<usize>>) -> Vec<TextHighlight> {
+    let Some(source) = source.filter(|source| !source.is_empty() && !r.opts.highlights.is_empty()) else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    for (index, highlight) in r.opts.highlights.iter().enumerate() {
+        let start = highlight.range.start.max(source.start);
+        let end = highlight.range.end.min(source.end);
+        if start >= end {
+            continue;
+        }
+        let from = start - source.start;
+        let to = (end - source.start).min(len);
+        if from < to {
+            parts.push((from..to, highlight.kind, index));
+        }
+    }
+    overlay(parts, len)
+        .into_iter()
+        .map(|(range, kind, index)| {
+            TextHighlight::new(range, r.highlight_color(kind)).key(crate::highlight_key(index)).pad(2.0)
+        })
+        .collect()
 }
 
 /// A GitHub alert: a tinted card with an icon, a title and ordinary blocks.
@@ -274,6 +447,10 @@ fn toc_entry(r: &Renderer<'_>, depth: usize, heading: usize, label: &str) -> El 
         .py(2.0)
         .w_full()
         .link(rune::Link::new(0..label.len(), dest));
+    let marks = toc_marks(r, heading, label.len());
+    if !marks.is_empty() {
+        e = e.text_highlights(marks);
+    }
     if r.opts.selectable {
         e = e.selectable(true).selection_color(r.theme.selection).copy_breaks(1, 0);
     }
@@ -281,4 +458,65 @@ fn toc_entry(r: &Renderer<'_>, depth: usize, heading: usize, label: &str) -> El 
         e = wire(e);
     }
     e
+}
+
+/// The paint over a generated TOC label whose heading's source a highlight covers.
+///
+/// The label is drawn from the heading's text, which is the only source it has:
+/// mapping the highlight through the heading's own inline source map, then past
+/// the object markers the TOC drops, paints the matching bytes (OI-127). Find
+/// hits are skipped: the search counts one hit per heading and reveals the
+/// heading, so painting the earlier TOC copy would move the reveal there; a
+/// `--line` flash or a landing band still lights both drawn copies.
+fn toc_marks(r: &Renderer<'_>, heading: usize, len: usize) -> Vec<TextHighlight> {
+    if r.opts.highlights.is_empty() {
+        return Vec::new();
+    }
+    let Some(Block::Heading { inline, .. }) = r.doc.blocks.get(r.doc.headings[heading].block) else {
+        return Vec::new();
+    };
+    let mut parts = Vec::new();
+    for (index, highlight) in r.opts.highlights.iter().enumerate() {
+        if matches!(highlight.kind, crate::HighlightKind::Find | crate::HighlightKind::Current) {
+            continue;
+        }
+        let Some(rendered) = crate::inline::rendered_range(&inline.source_map, highlight.range.clone()) else {
+            continue;
+        };
+        let start = label_byte(&inline.text, rendered.start).min(len);
+        let end = label_byte(&inline.text, rendered.end).min(len);
+        if start < end {
+            parts.push((start..end, highlight.kind, index));
+        }
+    }
+    overlay(parts, len)
+        .into_iter()
+        .map(|(range, kind, index)| {
+            TextHighlight::new(range, r.highlight_color(kind)).key(crate::highlight_key(index)).pad(2.0)
+        })
+        .collect()
+}
+
+/// A drawn byte in a TOC label: the heading text without the object markers the
+/// label drops.
+fn label_byte(text: &str, rendered: usize) -> usize {
+    let limit = rendered.min(text.len());
+    let mut out = 0usize;
+    for (index, ch) in text.char_indices() {
+        if index >= limit {
+            break;
+        }
+        if ch == lmdv_md::OBJECT_CHAR {
+            // A range inside the marker still names the object's own position.
+            if limit < index + ch.len_utf8() {
+                break;
+            }
+            continue;
+        }
+        if index + ch.len_utf8() > limit {
+            break;
+        }
+        out += ch.len_utf8();
+    }
+    out
 }

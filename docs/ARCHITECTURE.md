@@ -95,9 +95,10 @@ Rules:
 | `0001-text-inline-object.patch` | `Span::image(InlineImage)` + `Span::rise(f32)`, U+FFFC placeholder, inline-box geometry in `text.rs`, `text/span.rs`, `text/pill_chips.rs`, `runtime/paint/content.rs`, and `InlineImage::label` | Inline formula baseline within 0.5 pt, correct aspect, wraps whole, selection skips it, RTL works |
 | `0002-close-request-veto.patch` | `App::on_close_request`/`WindowSpec::on_close_request` before hiding; programmatic close stays force-close | Alt+F4 on a dirty doc keeps the window and shows the dialog |
 | `0003-a11y-inline-object.patch` | Accessibility text substitutes an inline image's label (TeX or alt) for the U+FFFC marker in node names, values and text runs | No U+FFFC in the accessibility tree; the formula reads as `Math: {tex}`; character lengths and word starts match the spoken value |
-| `0004-text-hit.patch` (if needed) | Text-hit callback with rendered byte under pointer, or double-press variant | Double-click preview places caret; single click still selects |
-| `0005-window-theme.patch` (optional) | Native frame theme where winit supports it | Light/dark frame follows the app; not a release gate |
-| `0006-linux-frame.patch` (deferred) | Interactive edge resize + optional client-side frame | Only if native frame is rejected |
+| `0004-text-highlight-inline-image.patch` | A text highlight whose range holds an inline image's placeholder keeps the picture's box, merged into the glyph intervals | Find/line highlights cover formulas and inline images; text highlights stay unchanged |
+| `0005-text-hit.patch` (if needed) | Text-hit callback with rendered byte under pointer, or double-press variant | Double-click preview places caret; single click still selects |
+| `0006-window-theme.patch` (optional) | Native frame theme where winit supports it | Light/dark frame follows the app; not a release gate |
+| `0007-linux-frame.patch` (deferred) | Interactive edge resize + optional client-side frame | Only if native frame is rejected |
 
 Root `[patch.crates-io]` must repeat Rune's five vendored crates:
 

@@ -1008,3 +1008,30 @@ fn the_best_groups_top_row_starts_the_highlight() {
         "the file group's top ties on score and keeps the later place"
     );
 }
+
+// ---- OI-148: the start list reads the real store ---------------------------
+
+#[test]
+fn the_start_list_reads_recents_from_the_real_store() {
+    use lmdv_io::store::Recent;
+
+    let temp = TempDir::new().unwrap();
+    let dirs = test_support::dirs(&temp);
+    std::fs::create_dir_all(&dirs.data).unwrap();
+    let recents = vec![Recent::new("/docs/newer.md", 30), Recent::new("/docs/older.md", 10)];
+    let envelope = serde_json::json!({
+        "schema": lmdv_io::store::STORE_SCHEMA,
+        "app": lmdv_io::store::APP_NAME,
+        "data": recents,
+    });
+    std::fs::write(dirs.recents_path(), serde_json::to_vec(&envelope).unwrap()).unwrap();
+
+    // The store loads `recents.json` when the app starts; the palette's start
+    // group is built from that list, newest first, not from a test seam.
+    let shared = crate::AppShared::start(dirs);
+    let mut state = WindowState::new(shared);
+    let _tx = opened(&mut state, "");
+    assert_eq!(state.palette.view.mode, PaletteMode::Start);
+    assert_eq!(group_labels(&state, "Files"), ["newer.md", "older.md"]);
+    assert_eq!(group_rows(&state, "Files")[0].opened_at, 30);
+}

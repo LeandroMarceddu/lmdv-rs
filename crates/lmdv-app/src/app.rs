@@ -144,6 +144,8 @@ fn startup_windows(shared: Rc<AppShared>, launch: Launch, test_window: Option<Pa
         .filter(|session| !session.windows.is_empty());
     let drafts =
         session.as_ref().map(|session| crate::session::read_restore_drafts(shared.dirs(), session)).unwrap_or_default();
+    // A draft this version cannot read stays on disk for its writer (OI-169).
+    shared.protect_drafts(&drafts.issues);
     let restore = session.as_ref().map(|session| StartupRestore {
         session,
         drafts: &drafts,

@@ -223,6 +223,8 @@ pub struct RestoredDrafts {
     /// so the normal draft prompt decides, instead of silently entering edit
     /// mode over an unread draft.
     pub files_with_drafts: BTreeSet<PathBuf>,
+    /// Drafts this version cannot read; the store must keep them (OI-169).
+    pub issues: Vec<lmdv_io::store::DraftIssue>,
 }
 
 impl RestoredDrafts {
@@ -244,16 +246,24 @@ pub(crate) fn read_restore_drafts(dirs: &AppDirs, session: &SessionSnapshot) -> 
         for tab in &window.tabs {
             match &tab.source {
                 SessionTabSource::Pasted { id, .. } => {
-                    if !drafts.pasted.contains_key(id)
-                        && let Some(draft) = lmdv_io::store::load_draft(dirs, &pasted_key(*id))
-                    {
-                        drafts.pasted.insert(*id, draft);
+                    if !drafts.pasted.contains_key(id) {
+                        let loaded = lmdv_io::store::load_draft_reported(dirs, &pasted_key(*id));
+                        if let Some(issue) = loaded.issue {
+                            drafts.issues.push(issue);
+                        }
+                        if let Some(draft) = loaded.value {
+                            drafts.pasted.insert(*id, draft);
+                        }
                     }
                 }
-                SessionTabSource::File { path }
-                    if tab.mode == TabMode::Editor && lmdv_io::store::load_draft(dirs, &file_key(path)).is_some() =>
-                {
-                    drafts.files_with_drafts.insert(path.clone());
+                SessionTabSource::File { path } if tab.mode == TabMode::Editor => {
+                    let loaded = lmdv_io::store::load_draft_reported(dirs, &file_key(path));
+                    if let Some(issue) = loaded.issue {
+                        drafts.issues.push(issue);
+                    }
+                    if loaded.value.is_some() {
+                        drafts.files_with_drafts.insert(path.clone());
+                    }
                 }
                 _ => {}
             }
@@ -697,6 +707,7 @@ mod tests {
                 (third_paste_id, Draft::new("# Third\n", "# Third\n", 3)),
             ]),
             files_with_drafts: BTreeSet::new(),
+            issues: Vec::new(),
         };
 
         let restored_shared = test_support::shared(&temp);

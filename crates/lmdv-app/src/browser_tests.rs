@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use lmdv_io::store::UiPrefs;
 use lmdv_io::tree::{SearchHit, TreeError, TreeListing};
-use rune::ElementInfo;
+use rune::{ElementInfo, Tx};
 use tempfile::TempDir;
 
 use crate::browser::{SEARCH_DEBOUNCE, collapse_key, search_prefill};
@@ -116,9 +116,12 @@ fn opening_outside_the_root_reroots_and_opening_inside_keeps_it() {
 
     state.open_path(outside.clone());
     assert_eq!(state.browser.root(), Some(other.as_path()), "a file outside re-roots the pane");
+    // OI-129: the follow is this window's, so it does not rewrite the folder a
+    // new window starts in; only an explicit choice does (see below).
+    assert_eq!(state.shared().ui().tree_root.as_deref(), Some(project.as_path()));
 
-    // Persisted so the next launch shows the same folder (F-07's sibling rule).
-    assert_eq!(state.shared().ui().tree_root.as_deref(), Some(other.as_path()));
+    state.set_browser_root(other.clone());
+    assert_eq!(state.shared().ui().tree_root.as_deref(), Some(other.as_path()), "an explicit root is stored");
 }
 
 #[test]
@@ -812,4 +815,397 @@ fn the_menu_key_opens_it_too_and_an_outside_press_closes_it() {
     runtime.frame(0.0);
     assert!(runtime.state.browser_menu().is_none(), "an outside press closes it");
     assert_eq!(runtime.state.tabs().len(), 1, "and runs nothing");
+}
+
+/* ---- F-18–F-21 and OI-129/OI-130: pane state, shared writes, search → find ---- */
+
+use std::rc::Rc;
+use std::sync::Arc;
+
+use lmdv_core::{Document, DocumentKey, SideSize, SourceBuffer};
+use rune::MagnifyEvent;
+
+use crate::browser::{BROWSER_TREE_KEY, is_watch_limit};
+
+fn show_root(state: &mut WindowState, root: &Path) {
+    show(state, listing(root));
+}
+
+/* ---- F-18: the stored hidden choice ---- */
+
+#[test]
+fn the_stored_hidden_choice_and_width_come_back_with_the_root() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let root = temp.path().join("notes");
+    write(&root, "a.md", "a");
+    shared.set_ui(UiPrefs {
+        tree_root: Some(root.clone()),
+        left_hidden: true,
+        right_hidden: true,
+        left_width: 400.0,
+        right_width: 320.0,
+        ..UiPrefs::default()
+    });
+
+    let mut state = WindowState::new(shared.clone());
+    assert!(!state.left.is_open(), "a stored hidden tree is not opened");
+    assert!(!state.right.is_open(), "a stored hidden outline is not opened");
+    assert_eq!(state.left.width(), 400.0, "F-20: the stored width returns");
+    assert_eq!(state.right.width(), 320.0);
+
+    // Ctrl+B/the toolbar writes the choice; a fresh window reads it back.
+    let mut tx = rune::Tx::default();
+    assert!(state.run_command("view.toggle-browser", &mut tx));
+    assert!(state.left.is_open());
+    assert!(!shared.ui().left_hidden, "showing is stored too (P-09 writes 0 as well)");
+    let second = WindowState::new(shared.clone());
+    assert!(second.left.is_open(), "the next window opens the tree it was shown");
+
+    assert!(state.run_command("view.toggle-browser", &mut tx));
+    assert!(shared.ui().left_hidden);
+    let third = WindowState::new(shared.clone());
+    assert!(!third.left.is_open(), "and a hidden one stays hidden");
+}
+
+#[test]
+fn ctrl_b_toggles_and_remembers_and_a_keyboard_show_focuses_the_tree() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let mut state = WindowState::new(shared.clone());
+    let ctrl_b = rune::KeyEvent {
+        key: rune::Key::Command('b'),
+        mods: rune::Mods { cmd: true, ctrl: true, ..rune::Mods::default() },
+    };
+    let mut tx = rune::Tx::default();
+    assert!(crate::app::on_key(&mut state, &ctrl_b, &mut tx));
+    assert!(state.left.is_open());
+    assert!(!shared.ui().left_hidden, "F-18: the key writes the choice");
+    assert!(crate::app::on_key(&mut state, &ctrl_b, &mut tx));
+    assert!(!state.left.is_open());
+    assert!(shared.ui().left_hidden);
+
+    // Showing from the keyboard focuses the tree; the command path is the
+    // toolbar's and leaves the focus where it was.
+    let root = temp.path().join("notes");
+    write(&root, "a.md", "a");
+    shared.set_ui(UiPrefs { tree_root: Some(root.clone()), left_hidden: true, ..UiPrefs::default() });
+    let mut state = WindowState::new(shared.clone());
+    show_root(&mut state, &root);
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.update(|state: &mut WindowState, tx: &mut rune::Tx| state.toggle_browser_pane(tx, true));
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+    assert!(runtime.state.left.is_open());
+    assert_eq!(focused_key(&runtime).as_deref(), Some(BROWSER_TREE_KEY), "F-18: the keyboard shows and focuses");
+}
+
+/* ---- F-20: resize steps and persistence ---- */
+
+#[test]
+fn ctrl_arrows_resize_the_tree_by_16_and_64_and_persist() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let mut state = WindowState::new(shared.clone());
+    let ctrl = rune::Mods { cmd: true, ctrl: true, ..rune::Mods::default() };
+    let mut tx = rune::Tx::default();
+    let start = state.left.width();
+
+    assert!(state.browser_key(&rune::KeyEvent { key: rune::Key::Right, mods: ctrl }, &mut tx));
+    assert_eq!(state.left.width(), start + 16.0, "an arrow is 16 points");
+    assert_eq!(shared.ui().left_width, start + 16.0, "the key persists at once");
+
+    assert!(
+        state.browser_key(&rune::KeyEvent { key: rune::Key::Right, mods: rune::Mods { shift: true, ..ctrl } }, &mut tx)
+    );
+    assert_eq!(state.left.width(), start + 80.0, "Shift is 64");
+    assert!(
+        state.browser_key(&rune::KeyEvent { key: rune::Key::Left, mods: rune::Mods { shift: true, ..ctrl } }, &mut tx)
+    );
+    assert_eq!(state.left.width(), start + 16.0);
+
+    assert!(state.browser_key(&rune::KeyEvent { key: rune::Key::Home, mods: ctrl }, &mut tx));
+    assert_eq!(state.left.width(), state.left.default_width(), "Home is the default");
+    assert!(state.browser_key(&rune::KeyEvent { key: rune::Key::End, mods: ctrl }, &mut tx));
+    assert_eq!(state.left.width(), state.left.max_width(), "End is the maximum");
+    assert_eq!(shared.ui().left_width, state.left.max_width());
+}
+
+#[test]
+fn the_outline_width_commands_persist_and_need_headings() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let mut state = WindowState::new(shared.clone());
+    let mut tx = rune::Tx::default();
+    assert!(!state.run_command("view.outline-wider", &mut tx), "no document, no outline to size");
+    state.open_synthetic("Notes", "# Notes\n\n## One\n");
+    let start = state.right.width();
+    assert!(state.run_command("view.outline-wider", &mut tx));
+    assert_eq!(state.right.width(), start + 16.0);
+    assert_eq!(shared.ui().right_width, start + 16.0);
+    assert!(state.run_command("view.outline-width-max", &mut tx));
+    assert_eq!(state.right.width(), state.right.max_width());
+    assert!(state.run_command("view.outline-width-default", &mut tx));
+    assert_eq!(state.right.width(), state.right.default_width());
+}
+
+/* ---- F-21: the panel text size ---- */
+
+#[test]
+fn ctrl_wheel_over_the_tree_changes_only_the_panel_size() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let mut state = WindowState::new(shared.clone());
+    state.left.set_open(true);
+    let reader_size = shared.prefs().reader.size;
+    assert!(state.pane_magnify(0.6));
+    assert_eq!(shared.prefs().reader.side_size, SideSize::Large);
+    assert_eq!(shared.prefs().reader.size, reader_size, "never the reader's size");
+    assert!(state.pane_magnify(0.1), "a small delta waits for more");
+    assert!(state.pane_magnify(-0.7));
+    assert_eq!(shared.prefs().reader.side_size, SideSize::Normal);
+
+    // The gesture really reaches the pane's handler.
+    let mut state = WindowState::new(shared.clone());
+    state.left.set_open(true);
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.magnify_event(MagnifyEvent::new(0.6).at(60.0, 300.0));
+    runtime.frame(0.0);
+    assert_eq!(runtime.state.shared().prefs().reader.side_size, SideSize::Large);
+}
+
+/* ---- F-19: auto-fold ---- */
+
+#[test]
+fn the_outline_folds_first_then_the_files_and_both_return_when_widened() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.left.set_open(true);
+    state.right.set_open(true);
+
+    state.browser.shell_width.set(1000.0);
+    assert!(state.apply_pane_fit());
+    assert!(!state.right.is_open(), "the outline folds first");
+    assert!(state.left.is_open(), "the article fits beside the tree");
+
+    state.browser.shell_width.set(760.0);
+    assert!(state.apply_pane_fit());
+    assert!(!state.left.is_open(), "then the files");
+
+    state.browser.shell_width.set(1100.0);
+    assert!(state.apply_pane_fit());
+    assert!(state.right.is_open() && state.left.is_open(), "both return when there is room");
+}
+
+#[test]
+fn a_hidden_pane_is_never_auto_opened_and_a_manual_show_overrides_the_fold() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.left.set_open(false);
+    state.right.set_open(true);
+    state.browser.shell_width.set(760.0);
+    state.apply_pane_fit();
+    assert!(!state.right.is_open());
+    state.browser.shell_width.set(1100.0);
+    state.apply_pane_fit();
+    assert!(state.right.is_open(), "the fit's own fold reopens");
+    assert!(!state.left.is_open(), "the user's hidden choice wins over the fit");
+
+    // F-19's peek needs the shell's `SidebarPeek`; a manual show while folded
+    // stays open instead of being refolded.
+    state.browser.shell_width.set(760.0);
+    state.apply_pane_fit();
+    assert!(!state.left.is_open());
+    let mut tx = rune::Tx::default();
+    state.toggle_browser_pane(&mut tx, false);
+    assert!(state.left.is_open());
+    state.apply_pane_fit();
+    assert!(state.left.is_open(), "the manual show is respected while narrow");
+}
+
+/* ---- OI-129: the shared state across windows ---- */
+
+#[test]
+fn a_collapse_and_a_width_in_one_window_reach_the_other() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let root = temp.path().join("notes");
+    write(&root, "nested/deeper.md", "deep");
+    shared.set_ui(UiPrefs { tree_root: Some(root.clone()), ..UiPrefs::default() });
+    let mut first = WindowState::new(shared.clone());
+    let mut second = WindowState::new(shared.clone());
+    show_root(&mut first, &root);
+    show_root(&mut second, &root);
+    assert!(row_paths(&second).contains(&"deeper.md".to_owned()));
+
+    first.toggle_browser_folder(root.join("nested").to_string_lossy().as_ref());
+    assert_eq!(
+        shared.ui().collapsed_folders,
+        vec![std::path::PathBuf::from(crate::browser::collapse_key(&root.join("nested")))]
+    );
+    let mut tx = rune::Tx::default();
+    second.poll(0.0, &mut tx);
+    assert!(!row_paths(&second).contains(&"deeper.md".to_owned()), "the collapse is broadcast");
+
+    first.nudge_browser_pane(1, false);
+    second.poll(0.0, &mut tx);
+    assert_eq!(second.left.width(), first.left.width(), "the width is broadcast");
+}
+
+#[test]
+fn a_watch_limit_failure_is_reported_once_with_its_own_notice() {
+    assert!(is_watch_limit("No space left on device (os error 28)"));
+    assert!(is_watch_limit("inotify: max_user_watches exhausted"));
+    assert!(!is_watch_limit("Permission denied (os error 13)"));
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.browser.watch_error = Some("No space left on device (os error 28)".to_owned());
+    let mut tx = rune::Tx::default();
+    state.poll(0.0, &mut tx);
+    let text = state.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default();
+    assert!(text.contains("file-watch limit"), "OI-129 names the limit: {text}");
+    state.ui.notice = None;
+    state.poll(0.1, &mut tx);
+    assert!(state.ui.notice.is_none(), "once, not every frame");
+
+    let mut state = window(&temp);
+    state.browser.watch_error = Some("Permission denied (os error 13)".to_owned());
+    state.poll(0.0, &mut tx);
+    assert!(!state.browser.watch_limit_noticed, "another failure keeps the generic notice");
+}
+
+/* ---- OI-130: a folder-search hit opens the reading find bar ---- */
+
+#[test]
+fn a_search_hit_opens_the_reading_find_bar_with_its_query() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    let path = write(&root, "notes.md", "Alpha beta\nbeta again\n");
+    let text = fs::read_to_string(&path).unwrap();
+    // A ready document, as a completed load leaves one.
+    let id = state.shared.docs_mut().allocate_id();
+    let doc = Rc::new(Document::ready(id, DocumentKey::File(path.clone()), "notes.md", SourceBuffer::new(&text)));
+    let revision = doc.revision();
+    state.shared.docs_mut().insert_ready(doc.clone());
+    state.shared.store_parsed(id, revision, Ok(Arc::new(lmdv_md::parse_with_revision(&text, revision))));
+    state.attach_document(doc);
+
+    state.browser.root = Some(root.clone());
+    state.browser.root_name = "notes".to_owned();
+    state.browser.search_query = "beta".to_owned();
+    state.browser.search_open = true;
+    state.browser.results = vec![crate::browser::SearchRow {
+        path: path.clone(),
+        name: "notes.md".to_owned(),
+        line: 2,
+        preview: "beta again".to_owned(),
+    }];
+
+    let mut tx = rune::Tx::default();
+    state.open_search_row(0, rune::Mods::default(), &mut tx);
+    let tab = state.active_tab().expect("the opened tab");
+    assert!(tab.view.reader_find.open, "F-16: the reader's find bar opens");
+    assert_eq!(tab.view.reader_find.query.text, "beta");
+    assert_eq!(tab.view.reader_find.matches.len(), 2, "and its hits are already found");
+    assert_eq!(tab.view.line, Some(2), "the hit's line still applies");
+}
+
+#[test]
+fn a_folded_outline_stays_folded_across_polls() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Notes\n\n## One\n");
+    state.right.set_open(true);
+    state.browser.shell_width.set(700.0);
+    let mut tx = rune::Tx::default();
+    for step in 0..3 {
+        state.poll(step as f64 * 0.1, &mut tx);
+        assert!(!state.right.is_open(), "F-19: the outline stays folded, poll {step}");
+    }
+    // Widening reopens the fit's own fold even with no input.
+    state.browser.shell_width.set(1100.0);
+    state.poll(0.4, &mut tx);
+    assert!(state.right.is_open(), "and returns when there is room");
+}
+
+#[test]
+fn a_hidden_choice_in_one_window_reaches_the_other() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let root = temp.path().join("notes");
+    write(&root, "a.md", "a");
+    shared.set_ui(UiPrefs { tree_root: Some(root.clone()), ..UiPrefs::default() });
+    let mut first = WindowState::new(shared.clone());
+    let mut second = WindowState::new(shared.clone());
+    show_root(&mut first, &root);
+    show_root(&mut second, &root);
+    assert!(first.left.is_open() && second.left.is_open(), "the stored shown choice opens both");
+
+    let mut tx = rune::Tx::default();
+    assert!(first.run_command("view.toggle-browser", &mut tx));
+    second.poll(0.0, &mut tx);
+    assert!(!second.left.is_open(), "the hide is broadcast");
+
+    assert!(first.run_command("view.toggle-browser", &mut tx));
+    second.poll(0.1, &mut tx);
+    assert!(second.left.is_open(), "and so is the show");
+}
+
+#[test]
+fn the_first_folder_applies_the_stored_pane_choice() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let root = temp.path().join("notes");
+    let file = write(&root, "a.md", "a");
+    let mut state = WindowState::new(shared.clone());
+    assert!(!state.left.is_open(), "no folder yet, nothing to show");
+    state.open_path(file.clone());
+    assert!(state.left.is_open(), "F-18: the shown default applies with the first folder");
+
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    shared.set_ui(UiPrefs { left_hidden: true, ..UiPrefs::default() });
+    let root = temp.path().join("notes");
+    let file = write(&root, "a.md", "a");
+    let mut state = WindowState::new(shared);
+    state.open_path(file);
+    assert!(!state.left.is_open(), "and a stored hidden choice stays hidden");
+}
+
+#[test]
+fn a_folded_pane_opens_as_a_peek_over_the_text() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    write(&root, "a.md", "a");
+    show(&mut state, listing(&root));
+    state.left.set_open(true);
+    state.right.set_open(true);
+    state.browser.shell_width.set(600.0);
+    assert!(state.apply_pane_fit());
+    assert!(!state.left.is_open(), "600 px folds the tree away");
+
+    let mut tx = Tx::default();
+    state.toggle_browser_pane(&mut tx, false);
+    assert!(state.left.is_peeking(), "a folded pane opens over the article");
+    assert!(!state.left.is_open(), "the peek takes no layout");
+
+    state.left.end_peek();
+    assert!(!state.left.is_peeking(), "a click or Escape ends it");
+}
+
+#[test]
+fn ctrl_wheel_over_the_article_steps_the_reader_size_only() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let size = state.shared().prefs().reader.size;
+    let side = state.shared().prefs().reader.side_size;
+
+    assert!(state.reader_magnify(0.4));
+    assert_ne!(state.shared().prefs().reader.size, size, "the article grows one step");
+    assert_eq!(state.shared().prefs().reader.side_size, side, "the panels are untouched");
 }

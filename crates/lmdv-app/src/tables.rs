@@ -45,6 +45,10 @@ pub const TABLE_PREVIEW_KEY: &str = "table-preview";
 pub const TABLE_PREVIEW_PANEL: &str = "table-preview-panel";
 /// The preview's close button (V-14).
 pub const TABLE_PREVIEW_CLOSE: &str = "table-preview-close";
+/// The preview's zoom-in button (V-12).
+pub const TABLE_PREVIEW_ZOOM_IN: &str = "table-preview-zoom-in";
+/// The preview's zoom-out button (V-12).
+pub const TABLE_PREVIEW_ZOOM_OUT: &str = "table-preview-zoom-out";
 /// The preview's own copy button (V-16).
 pub const TABLE_PREVIEW_COPY: &str = "table-preview-copy";
 /// How long the filter waits after the last key (V-13).
@@ -83,6 +87,15 @@ pub struct TableTarget {
     pub table: TableRef,
 }
 
+/// The widest the preview's text zooms (V-12).
+pub const MAX_ZOOM: f32 = 2.0;
+/// The smallest the preview's text zooms (V-12).
+pub const MIN_ZOOM: f32 = 0.5;
+/// What `+`/`−`, the preview's zoom buttons and one Ctrl+wheel notch change (V-12).
+pub const ZOOM_STEP: f32 = 1.25;
+/// The wheel travel, in points, that doubles the preview's zoom (V-12).
+const ZOOM_WHEEL_POINTS: f32 = 240.0;
+
 /// One open table preview.
 ///
 /// The table's drawn cells are the source of truth: the preview never re-reads
@@ -98,10 +111,18 @@ pub struct TablePreview {
     pub revision: u64,
     /// The table as drawn.
     pub table: TableRef,
-    /// Column widths in points, planned once at open (V-13/V-18).
+    /// Column widths in points at 100%, planned for the view (V-13/V-18).
     pub widths: Vec<f32>,
-    /// The sum of [`Self::widths`].
+    /// The natural widths the plan started from, kept for a zoom or a resize.
+    natural: Vec<f32>,
+    /// The minimum widths the plan started from, kept for a zoom or a resize.
+    minimum: Vec<f32>,
+    /// The width budget the columns were planned for, so a resize can refit.
+    pub available: f32,
+    /// The sum of [`Self::widths`] at 100%.
     pub table_width: f32,
+    /// The text zoom: 0.5 to 2, 1 at open (V-12).
+    pub zoom: f32,
     /// The table is wider than the view and scrolls sideways.
     pub overflow: bool,
     /// The first column is held to the left edge while scrolling (V-11).
@@ -128,27 +149,30 @@ impl TablePreview {
     /// Plans the preview for `target` in a window body `width` points wide.
     pub fn new(target: TableTarget, width: f32) -> Self {
         let table = target.table;
+        let available = preview_available(width);
         let natural = natural_widths(&table);
         let minimum = minimum_widths(&table);
-        let available = (width - 2.0 * PREVIEW_MARGIN - 2.0 * PREVIEW_PAD - 18.0).max(MIN_COLUMN);
         let widths = plan_widths(&natural, &minimum, available);
         let table_width: f32 = widths.iter().sum();
-        // A table whose minimum widths do not fit opens at 100%; one that
-        // fits is squeezed or grown by its columns, and only the rounding of a
-        // squeezed minimum can still reach the scroller (V-18).
-        let overflow = table_width > available + 0.5;
-        let frozen = overflow && widths.first().is_some_and(|first| *first <= available * FIRST_COLUMN_SHARE);
-        let row_text: Vec<String> = table.rows.iter().map(|row| fold(&row.join(" "))).collect();
+        let row_text: Vec<String> = table
+            .rows
+            .iter()
+            .map(|row| fold(&row.iter().map(|cell| cell.text.as_str()).collect::<Vec<_>>().join(" ")))
+            .collect();
         let order: Vec<usize> = (0..table.rows.len()).collect();
-        Self {
+        let mut preview = Self {
             tab: target.tab,
             doc: target.doc,
             revision: target.revision,
             table,
             widths,
+            natural,
+            minimum,
+            available,
             table_width,
-            overflow,
-            frozen,
+            zoom: 1.0,
+            overflow: false,
+            frozen: false,
             query: TextEdit::default(),
             applied: String::new(),
             due: None,
@@ -157,7 +181,89 @@ impl TablePreview {
             shown: order.clone(),
             order,
             row_text,
+        };
+        preview.fit();
+        preview
+    }
+
+    /// Recomputes the sideways scrolling and frozen column from the drawn width.
+    fn fit(&mut self) {
+        let drawn = self.drawn_width();
+        // A table whose minimum widths do not fit opens at 100%; one that fits
+        // is squeezed or grown by its columns, and only the rounding of a
+        // squeezed minimum can still reach the scroller (V-18).
+        self.overflow = drawn > self.available + 0.5;
+        self.frozen = self.overflow
+            && self.widths.first().is_some_and(|first| first * self.zoom <= self.available * FIRST_COLUMN_SHARE);
+    }
+
+    /// The drawn width of `column` at the current zoom (V-12).
+    pub fn column_width(&self, column: usize) -> f32 {
+        self.widths.get(column).copied().unwrap_or(MIN_COLUMN) * self.zoom
+    }
+
+    /// The whole grid's drawn width at the current zoom.
+    pub fn drawn_width(&self) -> f32 {
+        self.table_width * self.zoom
+    }
+
+    /// The preview's body row height at the current zoom (V-12).
+    pub fn row_height(&self) -> f32 {
+        ROW_HEIGHT * self.zoom
+    }
+
+    /// The preview's header height at the current zoom (V-12).
+    pub fn header_height(&self) -> f32 {
+        HEADER_HEIGHT * self.zoom
+    }
+
+    /// Sets the text zoom, clamped to [`MIN_ZOOM`]..=[`MAX_ZOOM`] (V-12).
+    /// True when it changed.
+    pub fn set_zoom(&mut self, zoom: f32) -> bool {
+        let zoom = if zoom.is_finite() { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { self.zoom };
+        if (zoom - self.zoom).abs() < 0.001 {
+            return false;
         }
+        self.zoom = zoom;
+        self.fit();
+        true
+    }
+
+    /// `+`: one [`ZOOM_STEP`] larger (V-12).
+    pub fn zoom_in(&mut self) -> bool {
+        self.set_zoom(self.zoom * ZOOM_STEP)
+    }
+
+    /// `−`: one [`ZOOM_STEP`] smaller (V-12).
+    pub fn zoom_out(&mut self) -> bool {
+        self.set_zoom(self.zoom / ZOOM_STEP)
+    }
+
+    /// Ctrl+wheel: `dy` points of travel scale the zoom exponentially (V-12).
+    ///
+    /// One [`ZOOM_WHEEL_POINTS`] of travel doubles or halves it, so a trackpad's
+    /// small deltas zoom gradually and a mouse notch moves by a fixed ratio.
+    pub fn zoom_by_wheel(&mut self, dy: f32) -> bool {
+        if !dy.is_finite() || dy == 0.0 {
+            return false;
+        }
+        self.set_zoom(self.zoom * 2f32.powf(-dy / ZOOM_WHEEL_POINTS))
+    }
+
+    /// Replans the columns for a new window body width (V-12/V-18).
+    ///
+    /// Called when the window resizes: the preview keeps its filter and sort and
+    /// refits its columns instead of closing (OI-135).
+    pub fn refit(&mut self, width: f32) -> bool {
+        let available = preview_available(width);
+        if (available - self.available).abs() < 0.5 {
+            return false;
+        }
+        self.available = available;
+        self.widths = plan_widths(&self.natural, &self.minimum, available);
+        self.table_width = self.widths.iter().sum();
+        self.fit();
+        true
     }
 
     /// The body row indices the preview shows, in order.
@@ -209,8 +315,15 @@ impl TablePreview {
 
     /// One cell's drawn text, header or body.
     pub fn cell(&self, header: bool, row: usize, column: usize) -> &str {
+        &self.cell_data(header, row, column).text
+    }
+
+    /// One cell as drawn, with its links and task state (V-17).
+    pub fn cell_data(&self, header: bool, row: usize, column: usize) -> &lmdv_render::TableCell {
+        static EMPTY: lmdv_render::TableCell =
+            lmdv_render::TableCell { text: String::new(), links: Vec::new(), task: None };
         let cells = if header { Some(&self.table.head) } else { self.table.rows.get(row) };
-        cells.and_then(|cells| cells.get(column)).map_or("", String::as_str)
+        cells.and_then(|cells| cells.get(column)).unwrap_or(&EMPTY)
     }
 
     /// Applies [`Self::query`] now, debounce or not.
@@ -389,6 +502,24 @@ impl WindowState {
             self.table_preview_escape(tx);
             return true;
         }
+        let plain = !event.mods.ctrl && !event.mods.cmd && !event.mods.alt && !event.mods.logo;
+        if plain && let Key::Text(text) = &event.key {
+            match text.as_str() {
+                "+" | "=" => {
+                    self.table_preview_zoom(1);
+                    return true;
+                }
+                "-" => {
+                    self.table_preview_zoom(-1);
+                    return true;
+                }
+                "1" => {
+                    self.table_preview_actual_size();
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if event.is_command('f') && !event.mods.alt && !event.mods.shift {
             let length = self.tables.preview.as_ref().map_or(0, |preview| preview.query.text.len());
             if let Some(preview) = self.tables.preview.as_mut() {
@@ -461,6 +592,39 @@ impl WindowState {
         }
     }
 
+    /// `+`/`−` and the preview's zoom buttons: one [`ZOOM_STEP`] at a time
+    /// (V-12). True when the zoom changed.
+    pub(crate) fn table_preview_zoom(&mut self, step: i8) -> bool {
+        let Some(preview) = self.tables.preview.as_mut() else { return false };
+        if step > 0 { preview.zoom_in() } else { preview.zoom_out() }
+    }
+
+    /// `1` and the actual-size control: back to 100% (V-12).
+    pub(crate) fn table_preview_actual_size(&mut self) -> bool {
+        self.tables.preview.as_mut().is_some_and(|preview| preview.set_zoom(1.0))
+    }
+
+    /// Ctrl+wheel over the preview: an exponential zoom (V-12).
+    ///
+    /// A plain wheel keeps Rune's scrolling; the modified one is taken here and
+    /// never scrolls the grid.
+    pub(crate) fn table_preview_wheel(&mut self, event: &rune::WheelEvent, _tx: &mut Tx) -> bool {
+        if !(event.mods.ctrl || event.mods.cmd) || event.dy == 0.0 || !event.dy.is_finite() {
+            return false;
+        }
+        self.tables.preview.as_mut().is_some_and(|preview| preview.zoom_by_wheel(event.dy))
+    }
+
+    /// A link inside the preview: close it and follow the destination (V-17).
+    ///
+    /// The link is the document's own, so the app's ordinary handler opens it
+    /// exactly as a click on the article would; the original dispatches a
+    /// synthetic click on the source for the same result.
+    pub(crate) fn preview_table_link(&mut self, dest: &str, tx: &mut Tx) {
+        self.close_table_preview();
+        self.open_link(dest, tx);
+    }
+
     /// Copies the table the bar points at, or the preview's visible rows in
     /// their shown order, as TSV for a spreadsheet (V-16, X-16).
     pub(crate) fn copy_table(&mut self, tx: &mut Tx) {
@@ -502,11 +666,17 @@ impl WindowState {
             self.tables.preview = None;
             changed = true;
         }
-        if let Some(preview) = self.tables.preview.as_mut()
-            && preview.due.is_some_and(|due| now >= due)
-        {
-            preview.apply_filter();
-            changed = true;
+        if let Some(preview) = self.tables.preview.as_mut() {
+            // OI-135: a window resize refits the columns; the filter and sort
+            // stay, so the preview never has to be reopened.
+            let width = self.tables.viewport.get()[0].max(360.0);
+            if preview.refit(width) {
+                changed = true;
+            }
+            if preview.due.is_some_and(|due| now >= due) {
+                preview.apply_filter();
+                changed = true;
+            }
         }
         let flash = self.tables.flash.borrow().clone();
         if let Some((_, until)) = flash {
@@ -532,8 +702,8 @@ pub fn export_table(table: &TableRef) -> ExportTable {
     }
     ExportTable {
         align: table.align.clone(),
-        head: table.head.iter().map(|cell| run(cell)).collect(),
-        rows: table.rows.iter().map(|row| row.iter().map(|cell| run(cell)).collect()).collect(),
+        head: table.head.iter().map(|cell| run(&cell.text)).collect(),
+        rows: table.rows.iter().map(|row| row.iter().map(|cell| run(&cell.text)).collect()).collect(),
     }
 }
 
@@ -556,6 +726,14 @@ pub fn copy_tsv(table: &TableRef, order: Option<&[usize]>, visible: &[bool]) -> 
 
 // ---- widths ---------------------------------------------------------------
 
+/// The width the preview's grid may use inside a window body `width` wide.
+///
+/// The preview's own margins, its panel padding and the vertical scrollbar are
+/// taken out; `TablePreview::refit` plans for the same number (V-18).
+pub fn preview_available(width: f32) -> f32 {
+    (width - 2.0 * PREVIEW_MARGIN - 2.0 * PREVIEW_PAD - 18.0).max(MIN_COLUMN)
+}
+
 /// Each column's natural width in points: its widest cell, clamped (V-18).
 pub fn natural_widths(table: &TableRef) -> Vec<f32> {
     let head = TextStyle::new(MEASURE_SIZE, 600.0);
@@ -564,11 +742,11 @@ pub fn natural_widths(table: &TableRef) -> Vec<f32> {
         .map(|column| {
             let mut widest = MIN_COLUMN;
             if let Some(cell) = table.head.get(column) {
-                widest = widest.max(measure_cell(cell, head));
+                widest = widest.max(measure_cell(&cell.text, head));
             }
             for row in &table.rows {
                 if let Some(cell) = row.get(column) {
-                    widest = widest.max(measure_cell(cell, body));
+                    widest = widest.max(measure_cell(&cell.text, body));
                 }
             }
             widest.clamp(MIN_COLUMN, MAX_COLUMN)
@@ -590,11 +768,11 @@ pub fn minimum_widths(table: &TableRef) -> Vec<f32> {
         .map(|column| {
             let mut widest = MIN_COLUMN;
             if let Some(cell) = table.head.get(column) {
-                widest = widest.max(measure_word(cell, head));
+                widest = widest.max(measure_word(&cell.text, head));
             }
             for row in &table.rows {
                 if let Some(cell) = row.get(column) {
-                    widest = widest.max(measure_word(cell, body));
+                    widest = widest.max(measure_word(&cell.text, body));
                 }
             }
             widest.clamp(MIN_COLUMN, MAX_COLUMN)
@@ -749,7 +927,7 @@ fn compare_for(a: &SortKey, b: &SortKey, dir: SortDir) -> Ordering {
 
 /// Whether a column reads as numbers or dates, then builds one key per row.
 fn column_keys(table: &TableRef, column: usize, lang: &str) -> Vec<SortKey> {
-    let raw: Vec<&str> = table.rows.iter().map(|row| row.get(column).map_or("", String::as_str)).collect();
+    let raw: Vec<&str> = table.rows.iter().map(|row| row.get(column).map_or("", |cell| cell.text.as_str())).collect();
     let filled: Vec<&str> = raw.iter().copied().filter(|cell| !cell.trim().is_empty()).collect();
     let need = ((filled.len() as f64) * 0.8).ceil().max(1.0) as usize;
     let decimal = decimal_mark(&filled, lang);

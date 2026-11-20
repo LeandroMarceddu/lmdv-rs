@@ -601,6 +601,16 @@ impl AppShared {
         }
     }
 
+    /// Keeps a crash draft that a load found unreadable (OI-169).
+    ///
+    /// A newer version's or another application's draft is never overwritten
+    /// or removed for the rest of the session.
+    pub fn protect_drafts(&self, issues: &[lmdv_io::store::DraftIssue]) {
+        if let Some(store) = &self.store {
+            store.protect_drafts(issues);
+        }
+    }
+
     /// Records a state issue found after [`Self::start`], for the startup
     /// notice and the writer's protection.
     pub fn note_store_issue(&self, issue: StoreIssue) {

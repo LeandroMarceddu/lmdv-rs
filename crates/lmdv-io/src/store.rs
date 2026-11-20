@@ -10,11 +10,13 @@
 //! Loading is explicit and happens on a worker: [`load_recents`],
 //! [`load_positions`], [`load_ui`], [`load_session`], [`load_prefs`],
 //! [`load_drafts`] and [`load_draft`]. Each `*_reported` variant returns the
-//! same value plus a [`StoreIssue`]: a corrupt or oversized file was
-//! quarantined, while a future-schema or foreign-app file is still on disk.
-//! Pass those issues to [`StoreHandle::start_with`] (or
-//! [`StoreHandle::protect_files`] after a late load) so the writer never
-//! overwrites settings it cannot read.
+//! same value plus a [`StoreIssue`] (a [`DraftIssue`] for the two draft
+//! loaders): a corrupt or oversized file was quarantined, while a
+//! future-schema or foreign-app file is still on disk. Pass those issues to
+//! [`StoreHandle::start_with`] / [`StoreHandle::start_with_drafts`] (or
+//! [`StoreHandle::protect_files`] / [`StoreHandle::protect_drafts`] after a
+//! late load) so the writer never overwrites settings or drafts it cannot
+//! read.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
@@ -135,6 +137,98 @@ pub struct LoadedState<T> {
     pub value: T,
     /// The file problem, if any.
     pub issue: Option<StoreIssue>,
+}
+
+/// Why a draft file could not be loaded normally.
+///
+/// Drafts follow the singleton state files' rules even though each one is its
+/// own file: every variant means the draft was not restored. A corrupt or
+/// oversized draft is quarantined; a future-schema or foreign-app draft is
+/// left exactly where it is and must survive the session untouched.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DraftIssue {
+    /// Written by a newer lmdv with a schema this version cannot read.
+    FutureSchema {
+        /// The draft file that was ignored.
+        file: PathBuf,
+        /// The key recorded in the file, when it could still be read.
+        key: Option<String>,
+        /// The schema version found in the file.
+        schema: u64,
+    },
+    /// Written by another application that happens to use the same folder.
+    ForeignApp {
+        /// The draft file that was ignored.
+        file: PathBuf,
+        /// The key recorded in the file, when it could still be read.
+        key: Option<String>,
+        /// The `app` value found in the file.
+        app: String,
+    },
+    /// Larger than the state-size limit, so it was quarantined.
+    Oversized {
+        /// The draft file that was quarantined.
+        file: PathBuf,
+    },
+    /// Unreadable JSON or payload, so it was quarantined.
+    Corrupt {
+        /// The draft file that was quarantined.
+        file: PathBuf,
+    },
+}
+
+impl DraftIssue {
+    /// The draft file the issue belongs to.
+    pub fn file(&self) -> &Path {
+        match self {
+            Self::FutureSchema { file, .. }
+            | Self::ForeignApp { file, .. }
+            | Self::Oversized { file }
+            | Self::Corrupt { file } => file,
+        }
+    }
+
+    /// The draft key recorded in the file, when it was still readable.
+    ///
+    /// A newer schema may have moved the key, and another application may not
+    /// have one at all, so this is a hint for the notice rather than the
+    /// protection itself; [`Self::file`] names the file either way.
+    pub fn key(&self) -> Option<&str> {
+        match self {
+            Self::FutureSchema { key, .. } | Self::ForeignApp { key, .. } => key.as_deref(),
+            Self::Oversized { .. } | Self::Corrupt { .. } => None,
+        }
+    }
+
+    /// Whether this file must survive the session untouched.
+    ///
+    /// A newer version's or another application's draft is still on disk; this
+    /// version did not load it, and writing a same-key draft back would erase
+    /// what it cannot read. Pass the issues to
+    /// [`StoreHandle::start_with_drafts`] (or [`StoreHandle::protect_drafts`]
+    /// for a late load) so the writer skips them. A quarantine issue is not
+    /// protected: the original was already moved aside.
+    pub fn is_read_only(&self) -> bool {
+        matches!(self, Self::FutureSchema { .. } | Self::ForeignApp { .. })
+    }
+}
+
+/// One loaded draft plus what happened to its file.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedDraft {
+    /// The restored draft, or `None` when it was missing, ignored or corrupt.
+    pub value: Option<Draft>,
+    /// The file problem, if any.
+    pub issue: Option<DraftIssue>,
+}
+
+/// Every restorable draft plus the files that were ignored or quarantined.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoadedDrafts {
+    /// Drafts newest first, capped at the entry and character limits.
+    pub value: Vec<(String, Draft)>,
+    /// One entry per draft file that was ignored or quarantined.
+    pub issues: Vec<DraftIssue>,
 }
 
 /// A recently opened document.
@@ -507,11 +601,25 @@ impl StoreHandle {
     /// application. Corrupt and oversized issues stay writable — their file
     /// was quarantined, so fresh defaults are the intended result.
     pub fn start_with(dirs: AppDirs, issues: &[StoreIssue]) -> io::Result<Self> {
+        Self::start_with_drafts(dirs, issues, &[])
+    }
+
+    /// Starts the writer, never writing the state files or drafts that `issues`
+    /// and `drafts` mark read-only.
+    ///
+    /// This is [`Self::start_with`] plus the draft files that a newer version
+    /// or another application owns; the five singleton state files keep their
+    /// existing entry point. A draft that is protected this way is neither
+    /// overwritten nor removed by the writer for the rest of the session.
+    pub fn start_with_drafts(dirs: AppDirs, issues: &[StoreIssue], drafts: &[DraftIssue]) -> io::Result<Self> {
         dirs.ensure()?;
         let _ = enforce_draft_caps(&dirs);
         let read_only = read_only_keys(issues);
+        let read_only_drafts = read_only_draft_paths(drafts).into_iter().collect();
         let (tx, rx) = mpsc::channel();
-        thread::Builder::new().name("lmdv-store".to_owned()).spawn(move || Writer::new(dirs, read_only, rx).run())?;
+        thread::Builder::new()
+            .name("lmdv-store".to_owned())
+            .spawn(move || Writer::new(dirs, read_only, read_only_drafts, rx).run())?;
         Ok(Self { tx })
     }
 
@@ -534,6 +642,20 @@ impl StoreHandle {
         }
     }
 
+    /// Marks the draft files named by `issues` as read-only for the rest of the
+    /// session, for a load that happened after [`Self::start_with`], such as a
+    /// draft opened from the file browser.
+    ///
+    /// Send this before the first patch for that key; the writer also drops a
+    /// draft that is still pending when the message arrives. It has no effect
+    /// on drafts already written.
+    pub fn protect_drafts(&self, issues: &[DraftIssue]) {
+        let files = read_only_draft_paths(issues);
+        if !files.is_empty() {
+            let _ = self.tx.send(StoreMsg::ProtectDrafts(files));
+        }
+    }
+
     /// Writes every pending value and waits for the writer to acknowledge.
     ///
     /// Use only on close/quit, never in a frame. Returns `false` on timeout,
@@ -551,11 +673,16 @@ impl StoreHandle {
 enum StoreMsg {
     Patch(StorePatch),
     Protect(Vec<StateFile>),
+    ProtectDrafts(Vec<PathBuf>),
     Flush(SyncSender<bool>),
 }
 
 fn read_only_keys(issues: &[StoreIssue]) -> HashSet<Key> {
     issues.iter().filter(|issue| issue.is_read_only()).map(|issue| issue.file().key()).collect()
+}
+
+fn read_only_draft_paths(issues: &[DraftIssue]) -> Vec<PathBuf> {
+    issues.iter().filter(|issue| issue.is_read_only()).map(|issue| issue.file().to_path_buf()).collect()
 }
 
 #[derive(Clone, Debug)]
@@ -604,18 +731,22 @@ struct Writer {
     /// Files left in place for a newer version or another application; patches
     /// for them are dropped for the rest of the session.
     read_only: HashSet<Key>,
+    /// Draft files left in place for a newer version or another application,
+    /// keyed by path because a newer schema may spell the key differently.
+    read_only_drafts: HashSet<PathBuf>,
     coalesce: Duration,
     failed: bool,
 }
 
 impl Writer {
-    fn new(dirs: AppDirs, read_only: HashSet<Key>, rx: Receiver<StoreMsg>) -> Self {
+    fn new(dirs: AppDirs, read_only: HashSet<Key>, read_only_drafts: HashSet<PathBuf>, rx: Receiver<StoreMsg>) -> Self {
         Self {
             dirs,
             rx,
             pending: HashMap::new(),
             last_write: HashMap::new(),
             read_only,
+            read_only_drafts,
             coalesce: COALESCE,
             failed: false,
         }
@@ -643,6 +774,7 @@ impl Writer {
             match message {
                 Some(StoreMsg::Patch(patch)) => self.apply(patch),
                 Some(StoreMsg::Protect(files)) => self.protect(files),
+                Some(StoreMsg::ProtectDrafts(files)) => self.protect_drafts(files),
                 Some(StoreMsg::Flush(ack)) => {
                     self.write_all();
                     let ok = self.pending.is_empty() && !self.failed;
@@ -684,8 +816,20 @@ impl Writer {
                 ui.normalize();
                 (Key::Ui, Value::Ui(ui))
             }
-            StorePatch::Draft { key, draft } => (Key::Draft(key), Value::Draft(draft)),
+            StorePatch::Draft { key, draft } => {
+                let key = Key::Draft(key);
+                if self.is_protected_draft(&key) {
+                    // A newer version's or another application's draft stays.
+                    self.pending.remove(&key);
+                    return;
+                }
+                (key, Value::Draft(draft))
+            }
             StorePatch::RemoveDraft(key) => {
+                if self.is_protected_draft(&Key::Draft(key.clone())) {
+                    // Never delete a draft this version cannot read.
+                    return;
+                }
                 self.pending.remove(&Key::Draft(key.clone()));
                 let _ = fs::remove_file(draft_path(&self.dirs, &key));
                 return;
@@ -706,6 +850,26 @@ impl Writer {
             let key = file.key();
             self.read_only.insert(key.clone());
             self.pending.remove(&key);
+        }
+    }
+
+    fn protect_drafts(&mut self, files: Vec<PathBuf>) {
+        for path in files {
+            self.read_only_drafts.insert(path.clone());
+            // A draft still waiting to be written would replace the protected
+            // file; drop it before it reaches the writer.
+            self.pending.retain(|key, _| match key {
+                Key::Draft(name) => draft_path(&self.dirs, name) != path,
+                _ => true,
+            });
+        }
+    }
+
+    /// Whether `key` names a draft file that must not be written or removed.
+    fn is_protected_draft(&self, key: &Key) -> bool {
+        match key {
+            Key::Draft(name) => self.read_only_drafts.contains(&draft_path(&self.dirs, name)),
+            _ => false,
         }
     }
 
@@ -742,7 +906,7 @@ impl Writer {
     }
 
     fn write_key(&mut self, key: &Key) {
-        if self.read_only.contains(key) {
+        if self.read_only.contains(key) || self.is_protected_draft(key) {
             self.pending.remove(key);
             return;
         }
@@ -832,33 +996,53 @@ fn ensure_private_parent(path: &Path) -> io::Result<()> {
 
 enum EnvelopeRead<T> {
     Data(T),
-    FutureSchema(u64),
-    ForeignApp(String),
+    /// A newer schema. The raw payload rides along so a draft issue can still
+    /// name the key it records.
+    FutureSchema {
+        schema: u64,
+        data: Option<serde_json::Value>,
+    },
+    /// Another application's file; the raw payload is kept for the same reason.
+    ForeignApp {
+        app: String,
+        data: Option<serde_json::Value>,
+    },
     Corrupt,
 }
 
 /// Inspects the envelope before deserializing the payload, so a future schema
 /// or another application's file is ignored without being treated as corrupt.
 fn read_envelope<T: DeserializeOwned>(bytes: &[u8]) -> EnvelopeRead<T> {
+    match read_envelope_value(bytes) {
+        EnvelopeRead::Data(data) => match serde_json::from_value(data) {
+            Ok(data) => EnvelopeRead::Data(data),
+            Err(_) => EnvelopeRead::Corrupt,
+        },
+        EnvelopeRead::FutureSchema { schema, data } => EnvelopeRead::FutureSchema { schema, data },
+        EnvelopeRead::ForeignApp { app, data } => EnvelopeRead::ForeignApp { app, data },
+        EnvelopeRead::Corrupt => EnvelopeRead::Corrupt,
+    }
+}
+
+/// The envelope header plus the still-untyped `data` payload.
+fn read_envelope_value(bytes: &[u8]) -> EnvelopeRead<serde_json::Value> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
         return EnvelopeRead::Corrupt;
     };
     let schema = value.get("schema").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let data = value.get("data").cloned();
     if schema > u64::from(STORE_SCHEMA) {
-        return EnvelopeRead::FutureSchema(schema);
+        return EnvelopeRead::FutureSchema { schema, data };
     }
     if let Some(app) = value.get("app").and_then(serde_json::Value::as_str)
         && !app.is_empty()
         && app != APP_NAME
     {
-        return EnvelopeRead::ForeignApp(app.to_owned());
+        return EnvelopeRead::ForeignApp { app: app.to_owned(), data };
     }
-    let Some(data) = value.get("data") else {
-        return EnvelopeRead::Corrupt;
-    };
-    match serde_json::from_value(data.clone()) {
-        Ok(data) => EnvelopeRead::Data(data),
-        Err(_) => EnvelopeRead::Corrupt,
+    match data {
+        Some(data) => EnvelopeRead::Data(data),
+        None => EnvelopeRead::Corrupt,
     }
 }
 
@@ -886,10 +1070,10 @@ where
     }
     match read_envelope(&bytes) {
         EnvelopeRead::Data(value) => LoadedState { value, issue: None },
-        EnvelopeRead::FutureSchema(schema) => {
+        EnvelopeRead::FutureSchema { schema, .. } => {
             LoadedState { value: T::default(), issue: Some(StoreIssue::FutureSchema { file, schema }) }
         }
-        EnvelopeRead::ForeignApp(app) => {
+        EnvelopeRead::ForeignApp { app, .. } => {
             LoadedState { value: T::default(), issue: Some(StoreIssue::ForeignApp { file, app }) }
         }
         EnvelopeRead::Corrupt => {
@@ -1024,8 +1208,20 @@ fn write_draft(dirs: &AppDirs, key: &str, draft: &Draft) -> io::Result<()> {
 }
 
 /// Loads every draft, newest first, capped at the entry and character limits.
+///
+/// A future-schema or foreign-app draft is skipped; use
+/// [`load_drafts_reported`] to see why and keep it read-only.
 pub fn load_drafts(dirs: &AppDirs) -> Vec<(String, Draft)> {
-    let mut drafts = read_all_drafts(dirs);
+    load_drafts_reported(dirs).value
+}
+
+/// Loads every draft and reports each file that was ignored or quarantined.
+///
+/// A future-schema or foreign-app draft is not returned and stays on disk;
+/// pass the issues to [`StoreHandle::start_with_drafts`] or
+/// [`StoreHandle::protect_drafts`] so a same-key draft never replaces it.
+pub fn load_drafts_reported(dirs: &AppDirs) -> LoadedDrafts {
+    let (mut drafts, issues) = read_all_drafts(dirs);
     drafts.sort_by_key(|entry| std::cmp::Reverse(entry.1.at));
     let mut kept = Vec::new();
     let mut total = 0usize;
@@ -1037,61 +1233,122 @@ pub fn load_drafts(dirs: &AppDirs) -> Vec<(String, Draft)> {
         total += chars;
         kept.push((key, draft));
     }
-    kept
+    LoadedDrafts { value: kept, issues }
 }
 
 /// Loads one draft by key.
+///
+/// A future-schema or foreign-app draft is `None`; use [`load_draft_reported`]
+/// to see why and keep it read-only.
 pub fn load_draft(dirs: &AppDirs, key: &str) -> Option<Draft> {
-    let path = draft_path(dirs, key);
-    let record = read_draft_file(&path)?;
-    (record.key == key).then_some(record.draft)
+    load_draft_reported(dirs, key).value
 }
 
-fn read_all_drafts(dirs: &AppDirs) -> Vec<(String, Draft, PathBuf)> {
+/// Loads one draft by key and reports a future-schema, foreign, oversized or
+/// corrupt file.
+pub fn load_draft_reported(dirs: &AppDirs, key: &str) -> LoadedDraft {
+    let path = draft_path(dirs, key);
+    match read_draft_file(&path) {
+        DraftFileRead::Data(record) if record.key == key => LoadedDraft { value: Some(record.draft), issue: None },
+        DraftFileRead::Data(_) | DraftFileRead::Absent => LoadedDraft { value: None, issue: None },
+        other => LoadedDraft { value: None, issue: draft_issue(&path, other) },
+    }
+}
+
+fn read_all_drafts(dirs: &AppDirs) -> (Vec<(String, Draft, PathBuf)>, Vec<DraftIssue>) {
     let Ok(entries) = fs::read_dir(dirs.drafts_dir()) else {
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     };
     let mut drafts = Vec::new();
+    let mut issues = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_none_or(|extension| extension != std::ffi::OsStr::new("json")) {
             continue;
         }
-        if let Some(record) = read_draft_file(&path)
-            && !record.key.is_empty()
-        {
-            drafts.push((record.key, record.draft, path));
+        match read_draft_file(&path) {
+            DraftFileRead::Data(record) if !record.key.is_empty() => {
+                drafts.push((record.key, record.draft, path));
+            }
+            DraftFileRead::Data(_) | DraftFileRead::Absent => {}
+            other => issues.extend(draft_issue(&path, other)),
         }
     }
-    drafts
+    (drafts, issues)
 }
 
-fn read_draft_file(path: &Path) -> Option<DraftRecord> {
-    let metadata = fs::metadata(path).ok()?;
-    if !metadata.is_file() {
-        return None;
+enum DraftFileRead {
+    Data(DraftRecord),
+    FutureSchema {
+        schema: u64,
+        key: Option<String>,
+    },
+    ForeignApp {
+        app: String,
+        key: Option<String>,
+    },
+    Oversized,
+    Corrupt,
+    /// Missing, unreadable or not a regular file; not a problem to report.
+    Absent,
+}
+
+fn draft_issue(path: &Path, read: DraftFileRead) -> Option<DraftIssue> {
+    let file = path.to_path_buf();
+    match read {
+        DraftFileRead::Data(_) | DraftFileRead::Absent => None,
+        DraftFileRead::FutureSchema { schema, key } => Some(DraftIssue::FutureSchema { file, key, schema }),
+        DraftFileRead::ForeignApp { app, key } => Some(DraftIssue::ForeignApp { file, key, app }),
+        DraftFileRead::Oversized => Some(DraftIssue::Oversized { file }),
+        DraftFileRead::Corrupt => Some(DraftIssue::Corrupt { file }),
     }
+}
+
+/// The key a draft envelope records, when its payload is still an object with
+/// a `key` string. A newer schema or another application may not have one;
+/// protection uses the file path anyway.
+fn draft_key_of(data: Option<&serde_json::Value>) -> Option<String> {
+    data?.get("key")?.as_str().filter(|key| !key.is_empty()).map(str::to_owned)
+}
+
+fn read_draft_file(path: &Path) -> DraftFileRead {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        _ => return DraftFileRead::Absent,
+    };
     if metadata.len() > MAX_STATE_BYTES {
         quarantine(path);
-        return None;
+        return DraftFileRead::Oversized;
     }
-    let bytes = fs::read(path).ok()?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(_) => return DraftFileRead::Absent,
+    };
     if bytes.len() as u64 > MAX_STATE_BYTES {
         quarantine(path);
-        return None;
+        return DraftFileRead::Oversized;
     }
-    match read_envelope(&bytes) {
-        EnvelopeRead::Data(data) => Some(data),
-        EnvelopeRead::FutureSchema(_) | EnvelopeRead::ForeignApp(_) => None,
+    match read_envelope_value(&bytes) {
+        EnvelopeRead::Data(data) => match serde_json::from_value::<DraftRecord>(data) {
+            Ok(record) => DraftFileRead::Data(record),
+            Err(_) => {
+                quarantine(path);
+                DraftFileRead::Corrupt
+            }
+        },
+        EnvelopeRead::FutureSchema { schema, data } => {
+            DraftFileRead::FutureSchema { schema, key: draft_key_of(data.as_ref()) }
+        }
+        EnvelopeRead::ForeignApp { app, data } => DraftFileRead::ForeignApp { app, key: draft_key_of(data.as_ref()) },
         EnvelopeRead::Corrupt => {
             quarantine(path);
-            None
+            DraftFileRead::Corrupt
         }
     }
 }
 
 fn enforce_draft_caps(dirs: &AppDirs) -> io::Result<()> {
-    let mut drafts = read_all_drafts(dirs);
+    let (mut drafts, _) = read_all_drafts(dirs);
     drafts.sort_by_key(|entry| std::cmp::Reverse(entry.1.at));
     let mut kept = 0usize;
     let mut total = 0usize;
@@ -1366,6 +1623,101 @@ mod tests {
         assert_eq!(drafts[0].0, "/tmp/big2.md", "the newest large draft is kept");
         assert!(total <= DRAFT_MAX_CHARS, "the total stays within the 2M character cap, got {total}");
         assert_eq!(drafts.iter().filter(|(_, draft)| draft.char_count() > 100_000).count(), 1);
+    }
+
+    #[test]
+    fn a_future_schema_draft_is_reported_and_survives_a_same_key_write() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let key = "/tmp/future-draft.md";
+        let path = draft_path(&dirs, key);
+        let future = serde_json::json!({
+            "schema": 99,
+            "app": "lmdv",
+            "data": {"key": key, "draft": {"text": "from a newer version", "base": "", "at": 1}}
+        });
+        let bytes = serde_json::to_vec(&future).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        let loaded = load_draft_reported(&dirs, key);
+        assert!(loaded.value.is_none(), "an unknown future schema reads as no draft");
+        assert_eq!(
+            loaded.issue,
+            Some(DraftIssue::FutureSchema { file: path.clone(), key: Some(key.to_owned()), schema: 99 })
+        );
+        assert!(loaded.issue.as_ref().unwrap().is_read_only());
+
+        // The unreported loaders keep their behavior.
+        assert!(load_draft(&dirs, key).is_none());
+        let all = load_drafts_reported(&dirs);
+        assert!(all.value.is_empty());
+        assert_eq!(all.issues.len(), 1);
+        assert!(path.exists(), "a future draft is not corrupt and is left alone");
+
+        let issue = all.issues.into_iter().next().expect("reported");
+        let handle = StoreHandle::start_with_drafts(dirs.clone(), &[], &[issue]).unwrap();
+        handle.patch(StorePatch::Draft { key: key.to_owned(), draft: Draft::new("this version", "", 2) });
+        handle.patch(StorePatch::RemoveDraft(key.to_owned()));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(fs::read(&path).unwrap(), bytes, "a newer version's draft is untouched");
+    }
+
+    #[test]
+    fn a_foreign_draft_is_reported_and_a_late_load_can_protect_it() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let key = "/tmp/shared-name.md";
+        let path = draft_path(&dirs, key);
+        let foreign = serde_json::json!({
+            "schema": 1,
+            "app": "other-app",
+            "data": {"key": key, "text": "not lmdv's draft"}
+        });
+        let bytes = serde_json::to_vec(&foreign).unwrap();
+        fs::write(&path, &bytes).unwrap();
+
+        // Drafts are loaded per document, after the writer started.
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        let loaded = load_draft_reported(&dirs, key);
+        assert!(loaded.value.is_none());
+        assert_eq!(
+            loaded.issue,
+            Some(DraftIssue::ForeignApp { file: path.clone(), key: Some(key.to_owned()), app: "other-app".to_owned() })
+        );
+        handle.protect_drafts(&[loaded.issue.expect("reported")]);
+        handle.patch(StorePatch::Draft { key: key.to_owned(), draft: Draft::new("lmdv text", "", 3) });
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert_eq!(fs::read(&path).unwrap(), bytes, "the other app's draft is untouched");
+    }
+
+    #[test]
+    fn a_corrupt_draft_is_reported_and_quarantined() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        dirs.ensure().unwrap();
+        let good_key = "/tmp/good.md";
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Draft { key: good_key.to_owned(), draft: Draft::new("keep", "", 1) });
+        assert!(handle.flush(Duration::from_secs(2)));
+        drop(handle);
+
+        let bad_key = "/tmp/bad.md";
+        let bad_path = draft_path(&dirs, bad_key);
+        fs::write(&bad_path, b"{ not json").unwrap();
+
+        let loaded = load_draft_reported(&dirs, bad_key);
+        assert!(loaded.value.is_none());
+        assert_eq!(loaded.issue, Some(DraftIssue::Corrupt { file: bad_path.clone() }));
+        assert!(!loaded.issue.unwrap().is_read_only(), "a quarantined draft may be written fresh");
+        assert!(!bad_path.exists());
+        assert_eq!(load_drafts(&dirs).len(), 1, "other drafts still load");
+        let quarantined = fs::read_dir(dirs.drafts_dir())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| entry.file_name().to_string_lossy().contains(".bad-"));
+        assert!(quarantined, "the unreadable draft is kept aside");
     }
 
     #[test]

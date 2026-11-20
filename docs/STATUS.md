@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck and the math a11y patch are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0/v0.5.5 releases are complete. Remaining: OI-104 (PDF papercuts, held), OI-165 (help links, blocked), panes/export extras and the P7 audit. P0–P5 and P6-01 complete.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch and P6 batch 5 (reader highlights/tables, pane behaviors, palette, draft diagnostics) are complete; the OI-167 viewport-restore fix and the OI-168 watcher reload loop are complete. P7-SEC, the Rune `cca5df6` bump and the v0.5.0/v0.5.5 releases are complete. Remaining: OI-104 (PDF papercuts, held), OI-165 (help links, blocked), panes/export extras and the P7 audit. P0–P5 and P6-01 complete.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -406,15 +406,26 @@
 - Patch 0003 substitutes that label for U+FFFC in a11y names, values and text runs, with per-character lengths and word starts that still match the spoken value.
 - `--tree` on `tests/fixtures/commonmark-math.md` reads `Math: E = mc^2` (and `Math: \sqrt{a^2 + b^2}`) where it used to read the object marker; the real `accessibility_tree()` regression test asserts no U+FFFC. `scripts/test-rune-patches.sh` passes with three patches.
 
+## P6 batch 5 — reader, tables, panes — complete
+
+- OI-127: Rune patch 0004 keeps an inline image's box when a text highlight covers its placeholder, so find/line highlights paint over formulas and inline pictures. The renderer also maps formula TeX, link destinations, front-matter keys/values and generated TOC labels.
+- OI-135: table preview zoom (buttons, `1`, Ctrl+wheel, 0.5–2) with re-laid-out text, link-aware cells followed on click, task glyphs, and a resize that replans columns.
+- OI-138: the reader passes the column width to tables, so a table wider than the 760 pt column scrolls inside it instead of overflowing.
+- OI-162: footnote and back-reference jumps use the heading glide and landing when the target is on screen.
+- OI-128/129/130: persisted pane visibility, auto-fold plus `SidebarPeek` overlay, widths with keyboard/palette commands, shared-vs-per-window browser state with broadcast, visible-only watchers, watch-limit notices, and the search→viewer-find regression test.
+- OI-148: full NFKD folding table, real-store palette recents; Rune still has no `aria-autocomplete`/`aria-controls`.
+- OI-169/170: draft diagnostics and protection in `lmdv-io` plus the app wiring; portable roots are checked for write access before selection.
+- Four Rune patches; 617 i18n keys; full gate and patch proof tests green. New follow-ups: OI-178 (inotify overflow), OI-179 (pane grip arrows, accepted substitute).
+
 ## Next up
 
-Batch A (P6-I18N spellcheck + math a11y) is complete; v0.5.5 is tagged. OI-104 is held at the user's request, so PDF papercuts are not in this release.
+P6 wave 2 is queued.
 
 **Next when work resumes:**
 
-1. OI-104 (PDF local date, “Show in folder” selection, Print temp cleanup) when the user unholds it.
-2. P6-PANES/P5-EXPORT extras (MathML/OMML, DOCX TOC field/compression, PDF page splits, Mermaid raster, export benchmark).
-3. P7 audit and packaging hardening (OI-153, OI-155), then the 342-row parity audit.
+1. P6 wave 2: lightbox (OI-140), 8 px rule/menu (OI-151), SAFE app follow-ups (OI-171–173), spellcheck suggestions (OI-174), then the decisions OI-141/161/163/166/175.
+2. P5 extras: MathML/OMML, DOCX TOC field/compression/SVG, PDF page splits, Mermaid raster, export benchmark; OI-104 stays held.
+3. P7 audit and packaging hardening (OI-153, OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

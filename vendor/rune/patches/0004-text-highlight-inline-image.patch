@@ -1,0 +1,92 @@
+--- a/crates/rune/src/text/cursor.rs
++++ b/crates/rune/src/text/cursor.rs
+@@ -305,23 +305,53 @@
+                 }
+             }
+         }
++        // An inline image draws no glyph: its placeholder shapes as zero width and the picture
++        // is painted separately at the room its inline box reserved (see `Span::image`). A
++        // highlight covering the placeholder's byte paints that box, so a find match or a line
++        // highlight over a picture shows the picture's own extent instead of nothing. The
++        // picture's box may reach above and below the line, so it keeps its own vertical bounds.
++        let mut images: Vec<(f64, f64, f64, f64)> = Vec::new();
++        if !pill_boxes {
++            for item in line.items() {
++                let PositionedLayoutItem::InlineBox(ib) = item else { continue };
++                if ib.id & IMAGE_BOX == 0 || ib.width <= 0.0 {
++                    continue;
++                }
++                let Some(b) = layout.inline_boxes().find(|b| b.id == ib.id) else { continue };
++                if range.contains(&b.index) {
++                    images.push((ib.x as f64, (ib.x + ib.width) as f64, ib.y as f64, (ib.y + ib.height) as f64));
++                }
++            }
++        }
+         intervals.sort_by(|p, q| p.0.total_cmp(&q.0));
+-        let mut merged: Vec<(f64, f64)> = Vec::new();
++        let mut merged: Vec<(f64, f64, Option<(f64, f64)>)> = Vec::new();
+         for (x0, x1) in intervals {
+             match merged.last_mut() {
+                 Some(last) if x0 <= last.1 + 0.5 => last.1 = last.1.max(x1),
+-                _ => merged.push((x0, x1)),
++                _ => merged.push((x0, x1, None)),
++            }
++        }
++        for (x0, x1, y0, y1) in images {
++            match merged.iter_mut().find(|(a, b, _)| x0 <= *b + 0.5 && *a <= x1 + 0.5) {
++                Some(slot) => {
++                    slot.0 = slot.0.min(x0);
++                    slot.1 = slot.1.max(x1);
++                    let (top, bottom) = slot.2.unwrap_or((line_min, line_max));
++                    slot.2 = Some((top.min(y0), bottom.max(y1)));
++                }
++                None => merged.push((x0, x1, Some((y0, y1)))),
+             }
+         }
+         if let Some(last) = merged.last_mut() {
+             last.1 += newline_ws;
+         } else if newline_ws > 0.0 {
+             let x0 = (m.inline_min_coord + m.offset + m.advance) as f64;
+-            merged.push((x0, x0 + newline_ws));
++            merged.push((x0, x0 + newline_ws, None));
+         }
+-        for (x0, x1) in merged {
++        for (x0, x1, vertical) in merged {
+             if x1 > x0 {
+-                rects.push((parley::BoundingBox::new(x0, line_min, x1, line_max), line_ix));
++                let (y0, y1) = vertical.unwrap_or((line_min, line_max));
++                rects.push((parley::BoundingBox::new(x0, y0, x1, y1), line_ix));
+             }
+         }
+     }
+--- a/crates/rune/src/text/tests.rs
++++ b/crates/rune/src/text/tests.rs
+@@ -567,3 +567,28 @@ fn run_lookups_off_a_grapheme_start_find_nothing() {
+     rt.frame(0.0);
+     assert_eq!(rt.instances.iter().filter(|i| i.params[1] == crate::render::KIND_GLYPH).count(), 2);
+ }
++
++/// A range over an inline image's placeholder paints the picture's drawn box: the placeholder
++/// itself shapes as zero width and the picture draws at the room its inline box reserved.
++#[test]
++fn a_range_over_an_inline_image_keeps_the_picture_box() {
++    let mut ts = TextSystem::default();
++    let content = format!("before {OBJECT_REPLACEMENT} after");
++    let at = content.find(OBJECT_REPLACEMENT).unwrap();
++    let pixels = crate::Pixels::new();
++    pixels.set(4, 2, vec![255; 32]);
++    let image = InlineImage::new(pixels, 40.0, 12.0).ascent(10.0).descent(2.0);
++    let span = Span::new(at, at + OBJECT_REPLACEMENT.len_utf8()).image(image);
++    let layout = ts.layout_rich(&content, &[span], TextStyle::new(16.0, 400.0).lh(22.0), 1.0, None);
++
++    let boxes = range_boxes(&layout, at, at + OBJECT_REPLACEMENT.len_utf8(), false);
++    assert_eq!(boxes.len(), 1, "the picture is one box: {boxes:?}");
++    let (bb, _) = boxes[0];
++    assert!((bb.x1 - bb.x0 - 40.0).abs() < 0.5, "as wide as the picture: {bb:?}");
++    assert!((bb.y1 - bb.y0 - 12.0).abs() < 0.5, "as tall as the picture: {bb:?}");
++
++    // The prose before it keeps the line's own box, and no image box bleeds into it.
++    let prose = range_boxes(&layout, 0, 6, false);
++    assert_eq!(prose.len(), 1, "one line box for the prose: {prose:?}");
++    assert!(prose[0].0.x1 <= bb.x0 + 0.5, "the prose stops before the picture: {prose:?} {bb:?}");
++}

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use lmdv_core::DocumentKey;
 use lmdv_md::{Block, MdDoc};
-use lmdv_render::{DetailsState, LinkWire, footnote_key, footnote_link, heading_key};
+use lmdv_render::{DetailsState, LinkWire, heading_key};
 use rune::Tx;
 
 use crate::commands::MARKDOWN_EXTENSIONS;
@@ -128,13 +128,10 @@ impl WindowState {
     pub fn open_link(&mut self, dest: &str, tx: &mut Tx) {
         match self.classify_link(dest) {
             LinkTarget::Fragment(fragment) => self.jump_fragment(&fragment, tx),
-            LinkTarget::Footnote(label) => {
-                tx.scroll_key_to(footnote_key(&label), 12.0);
-            }
-            LinkTarget::FootnoteRef(label) => {
-                // The inline reference is keyed by its own destination.
-                tx.scroll_key_to(footnote_link(&label), 12.0);
-            }
+            // OI-162: a footnote jump glides like a heading when its target is
+            // already on screen and stays instant when it is out of view.
+            LinkTarget::Footnote(label) => self.jump_to_footnote(&label, false, tx),
+            LinkTarget::FootnoteRef(label) => self.jump_to_footnote(&label, true, tx),
             LinkTarget::CopyCode(key) => match self.code_text(&key) {
                 Some(code) => {
                     tx.copy(code);

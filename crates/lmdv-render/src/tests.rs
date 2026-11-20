@@ -27,6 +27,7 @@ struct Scene {
     width: f32,
     open_details: bool,
     with_math: bool,
+    with_images: bool,
     link_calls: Option<Rc<Cell<usize>>>,
     highlights: Vec<Highlight>,
 }
@@ -52,6 +53,23 @@ fn square() -> InlineImage {
 
 static SQUARE: SquareMath = SquareMath;
 static CLOSED: AllClosed = AllClosed;
+static SQUARE_IMAGES: SquareImages = SquareImages;
+
+/// Resolves every picture to an 8 by 4 square, so an inline image draws.
+struct SquareImages;
+
+impl crate::ImageResolver for SquareImages {
+    fn resolve(&self, _src: &str, _alt: &str, _title: &str) -> Option<rune::Image> {
+        static PICTURE: std::sync::OnceLock<std::sync::Arc<rune::Image>> = std::sync::OnceLock::new();
+        let picture = PICTURE.get_or_init(|| {
+            let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+            let handle = cache.rgba(8, 4, vec![0x80; 8 * 4 * 4]);
+            handle.wait().expect("the fixture decodes");
+            std::sync::Arc::new(handle)
+        });
+        Some((**picture).clone())
+    }
+}
 
 struct AllOpen;
 
@@ -72,6 +90,7 @@ impl Scene {
             width: 760.0,
             open_details: false,
             with_math: false,
+            with_images: false,
             link_calls: None,
             highlights: Vec::new(),
         }
@@ -79,6 +98,12 @@ impl Scene {
 
     fn math(mut self) -> Self {
         self.with_math = true;
+        self
+    }
+
+    /// Resolves every picture to a small square, so an inline image draws.
+    fn images(mut self) -> Self {
+        self.with_images = true;
         self
     }
 
@@ -107,11 +132,9 @@ impl Scene {
 
     fn runtime(&self) -> rune::Runtime<Scene> {
         fn view(scene: &Scene, _: &mut Cx<Scene>) -> rune::El {
-            let mut opts = if scene.with_math {
-                RenderOptions::new(scene.width, &scene.style, &SQUARE, &NoImages)
-            } else {
-                RenderOptions::new(scene.width, &scene.style, &NoMath, &NoImages)
-            };
+            let math: &dyn MathResolver = if scene.with_math { &SQUARE } else { &NoMath };
+            let images: &dyn crate::ImageResolver = if scene.with_images { &SQUARE_IMAGES } else { &NoImages };
+            let mut opts = RenderOptions::new(scene.width, &scene.style, math, images);
             opts.details = Some(if scene.open_details { &OPEN } else { &CLOSED });
             opts = opts.highlights(scene.highlights.clone());
             if let Some(calls) = &scene.link_calls {
@@ -132,6 +155,7 @@ impl Scene {
                 width: self.width,
                 open_details: self.open_details,
                 with_math: self.with_math,
+                with_images: self.with_images,
                 link_calls: self.link_calls.clone(),
                 highlights: self.highlights.clone(),
             },
@@ -820,11 +844,11 @@ fn a_highlight_inside_a_link_or_a_code_span_paints_only_drawn_text() {
     let tree = Scene::new(source).highlights([Highlight::new(docs..docs + "docs".len(), HighlightKind::Find)]).render();
     assert_eq!(tree.mark_labels(), ["docs"], "the link's text is drawn; its URL is not");
 
-    // Only the URL: nothing maps, so nothing is painted.
+    // Only the URL: it draws no text, so the link's label stands in for it (OI-127).
     let url = source.find("example.com").unwrap();
     let tree =
         Scene::new(source).highlights([Highlight::new(url..url + "example.com".len(), HighlightKind::Find)]).render();
-    assert!(tree.marks().is_empty());
+    assert_eq!(tree.mark_labels(), ["the docs"], "a highlight over the destination paints the label");
 
     // A code span including its backticks still paints the code text alone.
     let open = source.find('`').unwrap();
@@ -849,14 +873,27 @@ fn a_highlight_in_a_table_cell_or_a_list_item_paints_that_text() {
 }
 
 #[test]
-fn a_formula_placeholder_maps_without_painting_alone() {
+fn a_highlight_over_a_formula_paints_its_drawn_picture() {
     let source = "Before $x+y$ after.\n";
     let open = source.find('$').unwrap();
     let close = source[open + 1..].find('$').unwrap() + open + 1;
-    // The object glyph is zero-width, so a range over just the formula paints
-    // nothing; that is the documented formula/image limitation.
+
+    // The whole formula maps to the object's drawn box: patch 0004 paints the
+    // picture where the placeholder takes no width (OI-127).
     let formula = Scene::new(source).math().highlights([Highlight::new(open..close + 1, HighlightKind::Find)]).render();
-    assert!(formula.marks().is_empty(), "the placeholder draws no glyph box");
+    let marks = formula.marks();
+    assert_eq!(marks.len(), 1, "one paint over the formula: {:?}", formula.mark_labels());
+    assert!(
+        (marks[0].rect[2] - 24.0).abs() < 0.6 && (marks[0].rect[3] - 12.0).abs() < 0.6,
+        "the picture's own box, 24 by 12: {:?}",
+        marks[0].rect
+    );
+
+    // The TeX after the opening delimiter is unmapped by the parser, so the
+    // renderer maps it to the same object.
+    let tex = Scene::new(source).math().highlights([Highlight::new(open + 1..close, HighlightKind::Find)]).render();
+    assert_eq!(tex.marks().len(), 1, "a range over the TeX paints the formula");
+    assert!(tex.marks()[0].rect[2] > 1.0, "and paints the picture, not an empty glyph box");
 
     // The prose before it stops at the object: a formula is never part of a
     // highlight that ends where its placeholder begins.
@@ -873,14 +910,78 @@ fn a_formula_placeholder_maps_without_painting_alone() {
 }
 
 #[test]
-fn an_image_placeholder_paints_its_drawn_alt_fallback() {
+fn a_highlight_over_an_inline_image_paints_its_drawn_box() {
     let source = "A ![diagram](./pic.png) here.\n";
     let from = source.find("![").unwrap();
     let to = source.find(')').unwrap() + 1;
-    // Without an image resolver the alt text is drawn in the object's place, so
-    // the whole image's source bytes paint that fallback text.
+
+    // A resolved picture draws where the placeholder takes no width; a range
+    // over any of the image's syntax paints the picture's box (OI-127).
+    let tree = Scene::new(source).images().highlights([Highlight::new(from..to, HighlightKind::Find)]).render();
+    let marks = tree.marks();
+    assert_eq!(marks.len(), 1, "one paint over the picture: {:?}", tree.mark_labels());
+    assert!(
+        (marks[0].rect[2] - 80.0).abs() < 0.6 && (marks[0].rect[3] - 40.0).abs() < 0.6,
+        "the picture's own box, 80 by 40: {:?}",
+        marks[0].rect
+    );
+
+    // Without a resolver the alt text is drawn in the object's place, so the
+    // whole image's source bytes paint that fallback text.
     let tree = Scene::new(source).highlights([Highlight::new(from..to, HighlightKind::Find)]).render();
     assert_eq!(tree.mark_labels(), ["diagram"]);
+}
+
+#[test]
+fn a_highlight_over_front_matter_paints_the_key_value_or_item() {
+    let source = "---\ntitle: A quiet page\ntags:\n  - alpha\n  - beta\n---\n\n# A quiet page\n\nBody.\n";
+
+    // A value in the open card.
+    let value = source.find("A quiet page").unwrap();
+    let tree =
+        Scene::new(source).details(true).highlights([Highlight::new(value..value + 12, HighlightKind::Line)]).render();
+    assert!(tree.mark_labels().contains(&"A quiet page"), "the value paints: {:?}", tree.mark_labels());
+
+    // The key paints in the card and in the closed summary; the summary is the
+    // only drawn copy while the card is closed.
+    let key = source.find("title").unwrap();
+    let open =
+        Scene::new(source).details(true).highlights([Highlight::new(key..key + 5, HighlightKind::Find)]).render();
+    assert_eq!(open.mark_labels().iter().filter(|label| **label == "title").count(), 2, "{:?}", open.mark_labels());
+    let closed = Scene::new(source).highlights([Highlight::new(key..key + 5, HighlightKind::Find)]).render();
+    assert_eq!(closed.mark_labels(), ["title"], "the collapsed card's summary carries the key");
+
+    // A list item paints its own chip, not the whole list.
+    let alpha = source.find("alpha").unwrap();
+    let tree =
+        Scene::new(source).details(true).highlights([Highlight::new(alpha..alpha + 5, HighlightKind::Find)]).render();
+    assert_eq!(tree.mark_labels(), ["alpha"]);
+
+    // An invalid block draws verbatim; its bytes paint the raw text.
+    let raw = "---\n{not flat}\n---\n\nBody.\n";
+    let at = raw.find("{not flat}").unwrap();
+    let tree = Scene::new(raw).details(true).highlights([Highlight::new(at..at + 10, HighlightKind::Line)]).render();
+    assert_eq!(tree.mark_labels(), ["{not flat}"]);
+}
+
+#[test]
+fn a_highlight_over_a_heading_also_paints_its_generated_toc_label() {
+    let source = "# Intro\n\n[TOC]\n\n## Second section\n\nBody.\n";
+    let heading = source.find("Second section").unwrap();
+    let tree = Scene::new(source).highlights([Highlight::new(heading..heading + 14, HighlightKind::Landing)]).render();
+    let labels = tree.mark_labels();
+    assert_eq!(labels.iter().filter(|label| **label == "Second section").count(), 2, "heading and TOC: {labels:?}");
+    assert!(tree.has_key("toc-1"), "the generated row is keyed");
+
+    // A find hit is counted once and revealed at the heading, so its earlier
+    // TOC copy is not painted as well.
+    let find = Scene::new(source).highlights([Highlight::new(heading..heading + 14, HighlightKind::Find)]).render();
+    assert_eq!(
+        find.mark_labels().iter().filter(|label| **label == "Second section").count(),
+        1,
+        "find paints the heading only: {:?}",
+        find.mark_labels()
+    );
 }
 
 #[test]
@@ -1008,6 +1109,53 @@ fn a_changed_highlight_repaints_through_the_block_memo() {
 // ---------------------------------------------------------------------------
 
 #[test]
+fn table_cells_keep_their_links_and_drawn_text() {
+    let source = "| Name | Site |\n| :--- | ---: |\n| Docs | [site](https://example.com/x) |\n";
+    let doc = lmdv_md::parse(source);
+    let table = crate::table_refs(&doc).into_iter().next().expect("one table");
+    assert_eq!(table.head[0].text, "Name");
+    assert_eq!(table.head[1].text, "Site");
+    let cell = &table.rows[0][1];
+    assert_eq!(cell.text, "site", "the link's label is the cell's drawn text");
+    assert_eq!(cell.links.len(), 1);
+    assert_eq!(&cell.text[cell.links[0].range.clone()], "site");
+    assert_eq!(cell.links[0].dest, "https://example.com/x");
+    assert!(table.rows[0][0].links.is_empty() && table.rows[0][0].task.is_none());
+}
+
+#[test]
+fn table_cells_collapse_whitespace_and_keep_their_link_offsets() {
+    let source = "| A |\n| - |\n|  [the   docs](page.md)  |\n";
+    let doc = lmdv_md::parse(source);
+    let table = crate::table_refs(&doc).into_iter().next().expect("one table");
+    let cell = &table.rows[0][0];
+    assert_eq!(cell.text, "the docs", "runs of whitespace collapse");
+    assert_eq!(&cell.text[cell.links[0].range.clone()], "the docs");
+    assert_eq!(cell.links[0].dest, "page.md");
+}
+
+#[test]
+fn a_table_keeps_its_formula_text_in_a_cell() {
+    let source = "| A |\n| - |\n| $x^2$ |\n";
+    let doc = lmdv_md::parse(source);
+    let table = crate::table_refs(&doc).into_iter().next().expect("one table");
+    assert_eq!(table.rows[0][0].text, "x^2");
+    assert!(table.rows[0][0].links.is_empty());
+}
+
+#[test]
+fn a_table_cell_shows_a_task_glyph_and_keeps_its_state() {
+    use lmdv_md::{Inline, InlineObject, InlineObjectKind, Table};
+
+    let mut cell = Inline { text: format!("{} item", lmdv_md::OBJECT_CHAR), ..Inline::default() };
+    cell.objects.push(InlineObject { range: 0..3, kind: InlineObjectKind::TaskCheckbox { checked: true }, html: None });
+    let table = Table { head: vec![cell], rows: Vec::new(), ..Table::default() };
+    let drawn = crate::table::table_ref_for("b0", 0, &table);
+    assert_eq!(drawn.head[0].text, "☑ item", "the preview shows the disabled box as a glyph");
+    assert_eq!(drawn.head[0].task, Some(true), "and knows its state, so it stays inert");
+}
+
+#[test]
 fn the_table_wire_sees_every_table_and_changes_no_tree() {
     use std::cell::RefCell;
 
@@ -1066,10 +1214,13 @@ fn the_table_wire_sees_every_table_and_changes_no_tree() {
     assert_eq!(top.index, 0);
     assert_eq!(top.columns, 3);
     assert_eq!(top.align, [lmdv_md::Align::Left, lmdv_md::Align::Right, lmdv_md::Align::None]);
-    assert_eq!(top.head, ["Name", "Qty", "Notes"]);
+    fn cell_texts(cells: &[crate::TableCell]) -> Vec<&str> {
+        cells.iter().map(|cell| cell.text.as_str()).collect()
+    }
+    assert_eq!(cell_texts(&top.head), ["Name", "Qty", "Notes"]);
     assert_eq!(top.rows.len(), 2);
-    assert_eq!(top.rows[0], ["Alpha", "2", "x^2"], "a formula keeps its TeX");
-    assert_eq!(top.rows[1], ["Beta", "10", "bold text"], "markup disappears");
+    assert_eq!(cell_texts(&top.rows[0]), ["Alpha", "2", "x^2"], "a formula keeps its TeX");
+    assert_eq!(cell_texts(&top.rows[1]), ["Beta", "10", "bold text"], "markup disappears");
     assert_eq!(
         &source[top.source.clone()],
         source[..source.find("\n\n>").unwrap()].to_owned() + "\n",
@@ -1082,8 +1233,9 @@ fn the_table_wire_sees_every_table_and_changes_no_tree() {
     let quoted = &seen[1];
     assert_eq!(quoted.block, "b1", "the nested table names its top-level block");
     assert_eq!(quoted.index, 1);
-    assert_eq!(quoted.head, ["In", "Quote"]);
-    assert_eq!(quoted.rows, [["one".to_owned(), "two".to_owned()]]);
+    assert_eq!(cell_texts(&quoted.head), ["In", "Quote"]);
+    assert_eq!(cell_texts(&quoted.rows[0]), ["one", "two"]);
+    assert_eq!(quoted.rows.len(), 1);
     assert!(quoted.source.start > top.source.end, "each table keeps its own source range");
 
     // A wire that adds chrome changes only the wired tree.

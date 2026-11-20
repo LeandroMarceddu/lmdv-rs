@@ -1873,7 +1873,17 @@ impl WindowState {
     }
 
     /// Handles a draft read: identical drafts vanish, differing ones are offered.
-    pub(crate) fn handle_draft_loaded(&mut self, doc: DocumentId, key: String, draft: Option<Draft>) -> bool {
+    pub(crate) fn handle_draft_loaded(
+        &mut self,
+        doc: DocumentId,
+        key: String,
+        draft: Option<Draft>,
+        issue: Option<lmdv_io::store::DraftIssue>,
+    ) -> bool {
+        // A newer version's or another app's draft stays on disk (OI-169).
+        if let Some(issue) = issue {
+            self.shared.protect_drafts(std::slice::from_ref(&issue));
+        }
         let Some(draft) = draft else { return false };
         let Some(document) = self.shared.docs().get(doc) else { return false };
         if self.tabs.iter().any(|tab| tab.document_id() == Some(doc) && tab.view.editor.is_some()) {

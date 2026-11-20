@@ -2,7 +2,7 @@
 //! M-06, X-16, V-11–V-18).
 
 use lmdv_core::DocumentId;
-use lmdv_render::TableRef;
+use lmdv_render::{TableCell, TableRef};
 use rune::{ElementInfo, Tx};
 use rune_kit::SortDir;
 use tempfile::TempDir;
@@ -23,8 +23,8 @@ fn drawn_table(head: &[&str], rows: &[&[&str]]) -> TableRef {
     let pad = |cells: &[&str]| {
         cells
             .iter()
-            .map(|cell| (*cell).to_owned())
-            .chain(std::iter::repeat_n(String::new(), columns))
+            .map(|cell| TableCell::plain(*cell))
+            .chain(std::iter::repeat_with(TableCell::default).take(columns))
             .take(columns)
             .collect::<Vec<_>>()
     };
@@ -533,8 +533,11 @@ fn the_first_column_sticks_when_the_preview_scrolls_sideways() {
         line: 0,
         end_line: 3,
         align: vec![lmdv_md::Align::None; columns],
-        head: head.clone(),
-        rows: vec![cells.clone(), cells],
+        head: head.iter().map(|cell| TableCell::plain(cell.as_str())).collect(),
+        rows: vec![
+            cells.iter().map(|cell| TableCell::plain(cell.as_str())).collect(),
+            cells.iter().map(|cell| TableCell::plain(cell.as_str())).collect(),
+        ],
         columns,
     };
     state.tables.viewport.set([500.0, 760.0]);
@@ -577,8 +580,8 @@ fn the_header_sticks_to_the_top_while_the_rows_scroll() {
         line: 0,
         end_line: 42,
         align: vec![lmdv_md::Align::None; 2],
-        head: vec!["Name".to_owned(), "Value".to_owned()],
-        rows,
+        head: vec![TableCell::plain("Name"), TableCell::plain("Value")],
+        rows: rows.iter().map(|row| row.iter().map(|cell| TableCell::plain(cell.as_str())).collect()).collect(),
         columns: 2,
     };
     state.select_table(table);
@@ -600,4 +603,199 @@ fn the_header_sticks_to_the_top_while_the_rows_scroll() {
         .find(|element| element.key.as_deref() == Some("table-preview-head-0"))
         .expect("the first column header");
     assert!(first.rect[1] >= header.rect[1] - 0.5, "the header and its cells stay together");
+}
+
+// ---- zoom (V-12) ----------------------------------------------------------
+
+#[test]
+fn the_preview_zooms_in_steps_and_by_ctrl_wheel() {
+    use crate::tables::{MAX_ZOOM, MIN_ZOOM, ROW_HEIGHT, ZOOM_STEP};
+
+    let table = drawn_table(&["Name"], &[&["alpha"], &["beta"]]);
+    let mut preview = preview_of(table, 1000.0);
+    let planned = preview.widths.clone();
+    let table_width = preview.table_width;
+
+    assert!(preview.zoom_in());
+    assert!((preview.zoom - ZOOM_STEP).abs() < 0.001);
+    assert!((preview.drawn_width() - table_width * ZOOM_STEP).abs() < 0.01, "the grid scales with the text");
+    assert!((preview.row_height() - ROW_HEIGHT * ZOOM_STEP).abs() < 0.01, "rows grow with the text");
+    assert!(preview.column_width(0) > planned[0], "columns grow with the text");
+
+    for _ in 0..10 {
+        preview.zoom_in();
+    }
+    assert!((preview.zoom - MAX_ZOOM).abs() < 0.001, "never past 200%");
+    for _ in 0..10 {
+        preview.zoom_out();
+    }
+    assert!((preview.zoom - MIN_ZOOM).abs() < 0.001, "never below 50%");
+
+    // Ctrl+wheel is exponential: 240 points of travel doubles or halves.
+    preview.set_zoom(MIN_ZOOM);
+    assert!(preview.zoom_by_wheel(-240.0));
+    assert!((preview.zoom - 1.0).abs() < 0.001, "one turn doubles: {}", preview.zoom);
+    assert!(preview.zoom_by_wheel(240.0));
+    assert!((preview.zoom - MIN_ZOOM).abs() < 0.001, "and back");
+
+    assert_eq!(preview.widths, planned, "the planned 100% columns are kept; only drawing scales");
+    assert!(!preview.zoom_by_wheel(0.0), "no travel, no change");
+}
+
+#[test]
+fn the_preview_zoom_keys_and_buttons_work_through_the_window() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    crate::table_ui::scene_table_preview(&mut state);
+    assert!(state.table_preview_actual_size(), "the scene's zoom resets for the key test");
+    assert!((state.table_preview().expect("preview").zoom - 1.0).abs() < 0.001);
+
+    let key = |text: &str| rune::KeyEvent { key: rune::Key::Text(text.to_owned()), mods: rune::Mods::default() };
+    let mut tx = Tx::default();
+    assert!(state.table_preview_key(&key("+"), &mut tx));
+    assert!((state.table_preview().expect("preview").zoom - 1.25).abs() < 0.001);
+    assert!(state.table_preview_key(&key("-"), &mut tx));
+    assert!((state.table_preview().expect("preview").zoom - 1.0).abs() < 0.001);
+    assert!(state.table_preview_key(&key("1"), &mut tx), "actual size is a no-op at 100%");
+    assert!(state.table_preview_zoom(1));
+    assert!((state.table_preview().expect("preview").zoom - 1.25).abs() < 0.001);
+    assert!(state.table_preview_actual_size());
+    assert!((state.table_preview().expect("preview").zoom - 1.0).abs() < 0.001);
+
+    // A plain wheel over the preview is Rune's scroll, not a zoom.
+    let plain = rune::WheelEvent::default();
+    assert!(!state.table_preview_wheel(&plain, &mut tx));
+    let mut ctrl = rune::WheelEvent::default();
+    ctrl.dy = -120.0;
+    ctrl.mods.ctrl = true;
+    assert!(state.table_preview_wheel(&ctrl, &mut tx), "Ctrl+wheel zooms");
+    assert!(state.table_preview().expect("preview").zoom > 1.0);
+}
+
+#[test]
+fn a_resize_refits_the_columns_without_reopening() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Fitting", "# Fitting\n\nA page with a table.\n");
+    let table = drawn_table(
+        &["A", "B", "C", "D"],
+        &[
+            &["alpha beta gamma", "one two three", "four five six", "seven eight nine"],
+            &["beta gamma", "two three", "five six", "eight nine"],
+        ],
+    );
+    state.select_table(table);
+    let mut tx = Tx::default();
+    state.open_table_preview(&mut tx);
+    state.set_table_filter("alpha");
+    state.cycle_table_sort(0);
+    let before = state.table_preview().expect("preview").widths.clone();
+    assert!(
+        (state.table_preview().expect("preview").available - crate::tables::preview_available(1100.0)).abs() < 0.01
+    );
+
+    state.tables.viewport.set([700.0, 760.0]);
+    assert!(state.poll_tables(0.0, &mut tx), "the resize replans the columns");
+    let preview = state.table_preview().expect("the preview stays open");
+    assert!((preview.available - crate::tables::preview_available(700.0)).abs() < 0.01);
+    assert_ne!(preview.widths, before, "the columns fit the new width");
+    assert_eq!(preview.query.text, "alpha", "the filter survives");
+    assert!(preview.sort.is_some(), "the sort survives");
+
+    // The same width again is not a change.
+    assert!(!state.poll_tables(0.0, &mut tx));
+}
+
+// ---- links in the preview (V-17) -----------------------------------------
+
+#[test]
+fn a_link_in_the_preview_closes_it_and_follows_the_destination() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Links", "# Links\n\n## Target\n\n| A |\n| - |\n| [jump](#target) |\n");
+    let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("the model");
+    let table = lmdv_render::table_refs(&model).into_iter().next().expect("one table");
+    state.select_table(table);
+    let mut tx = Tx::default();
+    state.open_table_preview(&mut tx);
+
+    let cell = state.table_preview().expect("preview").cell_data(false, 0, 0).clone();
+    assert_eq!(cell.text, "jump");
+    assert_eq!(cell.links.len(), 1);
+    assert_eq!(cell.links[0].dest, "#target");
+
+    state.preview_table_link("#target", &mut tx);
+    assert!(state.table_preview().is_none(), "the preview closes before the link acts");
+    assert!(state.reading.landing.is_some(), "the fragment jump ran as an article link would");
+}
+
+// ---- the reading column (OI-138) -----------------------------------------
+
+#[test]
+fn a_table_wider_than_the_reading_column_fits_the_column() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let long = "word".repeat(40);
+    let source = format!("| A | B | C | D |\n| - | - | - | - |\n| {long} | {long} | {long} | {long} |\n");
+    state.open_synthetic("Wide", &source);
+    let elements = render(state);
+    let scroll = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some("scroll"))
+        .expect("a table that cannot wrap scrolls inside the column");
+    // R-02's 760 pt column keeps 48 pt a side: the scroller is the column's,
+    // not the 1100 pt window's.
+    assert!(scroll.rect[2] <= 664.5, "the scroller fits the reading column: {} wide", scroll.rect[2]);
+    let table = elements.iter().find(|element| element.key.as_deref() == Some("table")).expect("the article's table");
+    assert!(
+        table.rect[2] > scroll.rect[2] + 0.5,
+        "the table overflows that column and scrolls: {} in {}",
+        table.rect[2],
+        scroll.rect[2]
+    );
+    // Its longest word must not run over the next column.
+    assert!(table.rect[2] >= 4.0 * 360.0 - 1.0, "unbreakable columns keep their width: {}", table.rect[2]);
+}
+
+#[test]
+fn the_plus_and_minus_keys_zoom_the_open_preview() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    crate::table_ui::scene_table_preview(&mut state);
+    let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.frame(0.0);
+    let before = runtime.state.table_preview().expect("preview").zoom;
+    runtime.key(rune::KeyEvent { key: rune::Key::Text("+".to_owned()), mods: rune::Mods::default() });
+    runtime.frame(0.0);
+    let zoomed = runtime.state.table_preview().expect("preview").zoom;
+    assert!((zoomed - before * 1.25).abs() < 0.001, "the key reaches the preview: {before} -> {zoomed}");
+    runtime.key(rune::KeyEvent { key: rune::Key::Text("-".to_owned()), mods: rune::Mods::default() });
+    runtime.frame(0.0);
+    assert!((runtime.state.table_preview().expect("preview").zoom - before).abs() < 0.001);
+}
+
+#[test]
+fn clicking_a_link_in_a_preview_cell_follows_it_and_closes_the_preview() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Links", "# Links\n\n## Target\n\n| A | B |\n| - | - |\n| [jump](#target) | plain |\n");
+    let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("the model");
+    let table = lmdv_render::table_refs(&model).into_iter().next().expect("one table");
+    state.select_table(table);
+    let mut tx = Tx::default();
+    state.open_table_preview(&mut tx);
+    let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.frame(0.0);
+    let cell = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("table-preview-c0") && element.role == "gridcell")
+        .expect("the link's cell");
+    let (x, y) = (cell.rect[0] + 12.0, cell.rect[1] + cell.rect[3] * 0.5);
+    runtime.pointer_move(x, y);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(0.0);
+    assert!(runtime.state.table_preview().is_none(), "the preview closes on its link");
+    assert!(runtime.state.reading.landing.is_some(), "and the destination was followed");
 }

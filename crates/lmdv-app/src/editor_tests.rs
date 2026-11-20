@@ -278,7 +278,7 @@ fn a_draft_equal_to_the_file_is_dropped_silently() {
     let doc = state.active_document_id().expect("document");
     let key = path.to_string_lossy().into_owned();
 
-    assert!(!state.handle_draft_loaded(doc, key.clone(), Some(Draft::new("same\n", "older\n", 1))));
+    assert!(!state.handle_draft_loaded(doc, key.clone(), Some(Draft::new("same\n", "older\n", 1)), None));
     assert!(state.prompt().is_none(), "an identical draft is not offered");
     flush_store(&state);
     assert!(lmdv_io::store::load_draft(&test_support::dirs(&temp), &key).is_none(), "and it is removed");

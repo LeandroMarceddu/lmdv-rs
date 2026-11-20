@@ -25,6 +25,23 @@
 //! and a Markdown link relative to the open document; folders only the last
 //! two. A menu is a `rune_kit::Menu`, so A-08's roles and keys (Up/Down wrap,
 //! Home/End, Escape/Tab, focus return) are the kit's.
+//!
+//! # The pane's state across windows (F-18–F-21, OI-129)
+//!
+//! The pane's visibility and width, the collapsed set and the browser's root seed
+//! live in `ui.json`; P-09 stores `tree-hidden`/`toc-hidden` as one choice, so
+//! every window shares them. The **root follows each window's own document**
+//! (F-01): the stored root is only the folder the next launch starts in, and an
+//! automatic follow never rewrites it, so two windows on two projects do not
+//! overwrite each other's state. A window that writes `ui.json` asks every other
+//! window to redraw, and each window pulls the changed fields on its next poll:
+//! a collapse, a resize or a hidden choice reaches the others without a
+//! per-field message.
+//!
+//! Only a **visible** pane runs the recursive watcher: a hidden pane needs no
+//! live updates, and a process with several windows then keeps at most one
+//! inotify watch per visible root. A watcher that fails because the system's
+//! watch limit was reached says so once, instead of only the generic failure.
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -32,6 +49,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 
 use lmdv_io::Launch;
+use lmdv_io::store::UiPrefs;
 use lmdv_io::tree::{SearchHit, TreeListing};
 use lmdv_io::watch::TreeWatcher;
 use rune::{
@@ -44,9 +62,19 @@ use rune_kit::{TreeItem, TreeRow, TreeStyle, file_icon};
 
 use crate::icons;
 use crate::jobs::{JobMsg, WorkerMailbox};
-use crate::window::WindowState;
+use crate::shared::UiMsg;
+use crate::window::{Mode, WindowState};
 use crate::windows::{WindowKind, WindowOpenRequest};
 
+/// The article width below which panes auto-fold, outline first (F-19).
+pub const ARTICLE_MIN_WIDTH: f32 = 520.0;
+/// What the shell's frame, the panel padding and the pane gaps take from the
+/// width the article would otherwise get, in points.
+pub const PANE_GUTTER: f32 = 24.0;
+/// A resize arrow's step (F-20).
+pub const PANE_STEP: f32 = 16.0;
+/// Shift with a resize arrow (F-20).
+pub const PANE_STEP_LARGE: f32 = 64.0;
 /// The tree's element key, stable across rebuilds so focus stays in it.
 pub const BROWSER_TREE_KEY: &str = "browser-tree";
 /// The search field's element key (`Ctrl+Shift+F` focuses it).
@@ -353,7 +381,13 @@ impl TreeWatch {
                     }
                     WatchMsg::Rearm => {
                         if let Some(watcher) = watcher.as_mut() {
-                            let _ = watcher.rearm();
+                            let root = watcher.root().to_path_buf();
+                            if let Err(error) = watcher.rearm() {
+                                // A dropped watch that cannot come back is a
+                                // change the pane will not see; say so once
+                                // (OI-129). `rearm` used to lose this.
+                                mailbox.post(JobMsg::TreeWatchFailed { root, error: error.to_string() });
+                            }
                         }
                     }
                 }
@@ -406,9 +440,42 @@ pub struct BrowserState {
     pub(crate) results: Vec<SearchRow>,
     pub(crate) search_selected: Option<usize>,
     pub(crate) watch: Option<TreeWatch>,
+    /// The root the watch thread follows, so a poll does not send the same
+    /// root every frame.
+    pub(crate) watched_root: Option<PathBuf>,
     pub(crate) watch_error: Option<String>,
+    /// The watch limit was reported once (OI-129).
+    pub(crate) watch_limit_noticed: bool,
     /// The open context menu (F-12).
     pub(crate) menu: Option<BrowserMenu>,
+    /// The stored pane choices this window last pulled from `ui.json`
+    /// (F-18/F-20, OI-129). `None` until the first poll has read them.
+    pub(crate) seen_ui: Option<SeenUi>,
+    /// Which pane's edge was dragged on the previous poll, so its release
+    /// persists the width (F-20).
+    pub(crate) resizing: [bool; 2],
+    /// The panes F-19's auto-fit folded, so only its own folds are reopened.
+    pub(crate) auto_folded: [bool; 2],
+    /// The user opened a folded pane anyway; auto-fit leaves it alone until the
+    /// whole shell fits again (F-19's peek is not wired yet).
+    pub(crate) fit_override: [bool; 2],
+    /// The shell's width, as the last drawn frame measured it, for the auto-fold
+    /// decision the next poll makes (F-19).
+    pub(crate) shell_width: std::cell::Cell<f32>,
+    /// The magnify gesture's accumulated delta over the pane (F-21).
+    pub(crate) magnify: f32,
+}
+
+/// The shared `ui.json` fields a window applies when another window writes
+/// them (OI-129). The root is not here: it follows each window's document.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SeenUi {
+    pub(crate) left_hidden: bool,
+    pub(crate) right_hidden: bool,
+    pub(crate) left_width: f32,
+    pub(crate) right_width: f32,
+    /// The stored collapsed set's size: equal sizes plus membership is the set.
+    pub(crate) collapsed_len: usize,
 }
 
 impl BrowserState {
@@ -473,6 +540,17 @@ pub fn collapse_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
+/// Whether a watcher error is the system's watch limit (OI-129): inotify's
+/// "No space left on device" (`ENOSPC`), a descriptor limit or an explicit
+/// `max_user_watches` message. Those have one remedy the user can act on; every
+/// other failure keeps the generic notice.
+pub fn is_watch_limit(error: &str) -> bool {
+    let error = error.to_lowercase();
+    ["no space left", "os error 28", "too many open files", "os error 24", "max_user_watches", "watch limit"]
+        .iter()
+        .any(|hint| error.contains(hint))
+}
+
 /// The first line of an article selection, trimmed and capped, for `Ctrl+Shift+F`
 /// (R-17, F-13).
 pub fn search_prefill(text: &str) -> String {
@@ -491,12 +569,26 @@ impl WindowState {
     }
 
     /// Restores the stored root on startup without rewriting `ui.json`.
+    ///
+    /// F-18/F-20: the pane's stored visibility and width come back with it, so
+    /// a hidden tree stays hidden and a widened one keeps its width.
     pub(crate) fn adopt_browser_root_for_startup(&mut self, root: PathBuf) {
+        // The first root a window adopts also restores the pane choices it
+        // stored (F-18/F-20); a window born without a saved root reaches this
+        // as soon as its first document gives it one.
         self.adopt_browser_root(root, false);
+        if self.browser.seen_ui.is_none() {
+            self.restore_pane_choices();
+        }
     }
 
     /// Makes the pane follow an opened document (F-01): a document outside the
     /// root moves it to the document's folder; one inside keeps the root.
+    ///
+    /// The follow is this window's own view of the document and is not written
+    /// back: `ui.json`'s root is the folder a new window starts in, chosen
+    /// explicitly (F-18/OI-129), so two windows on two projects do not
+    /// overwrite each other's folder.
     pub(crate) fn follow_document_root(&mut self, path: &Path) {
         let Some(parent) = path.parent() else { return };
         let inside = self.browser.root.as_deref().is_some_and(|root| path.starts_with(root))
@@ -507,7 +599,7 @@ impl WindowState {
         if self.browser.root.as_deref() == Some(parent) {
             return;
         }
-        self.adopt_browser_root(parent.to_path_buf(), true);
+        self.adopt_browser_root(parent.to_path_buf(), false);
     }
 
     fn adopt_browser_root(&mut self, root: PathBuf, persist: bool) {
@@ -516,6 +608,11 @@ impl WindowState {
         self.close_browser_menu();
         if self.browser.root.as_deref() == Some(root.as_path()) {
             // Same root: keep the rows and scroll, just refresh what is on disk.
+            // An explicit choice of that same root still records it as the
+            // folder a new window starts in (OI-129).
+            if persist {
+                self.persist_root_seed(&root);
+            }
             self.refresh_browser();
             return;
         }
@@ -529,14 +626,26 @@ impl WindowState {
         self.browser.focus = None;
         self.clear_browser_search();
         if persist {
-            let mut ui = self.shared.ui().clone();
-            if ui.tree_root.as_deref() != Some(root.as_path()) {
-                ui.tree_root = Some(root.clone());
-                self.shared.set_ui(ui);
-            }
+            self.persist_root_seed(&root);
         }
-        self.ensure_tree_watch();
+        // F-18/F-20: the first folder a window gets applies the stored pane
+        // visibility and width, so `lmdv file.md` shows the tree when the last
+        // session had it shown.
+        if self.browser.seen_ui.is_none() {
+            self.restore_pane_choices();
+        }
+        self.sync_tree_watch();
         self.request_tree_listing();
+    }
+
+    /// Records the folder a new window starts in (OI-129); the follow never
+    /// calls this, only an explicit Open folder/Up/folder-link choice.
+    fn persist_root_seed(&mut self, root: &Path) {
+        let mut ui = self.shared.ui().clone();
+        if ui.tree_root.as_deref() != Some(root) {
+            ui.tree_root = Some(root.to_path_buf());
+            self.write_ui(ui);
+        }
     }
 
     /// Returns to “no folder open” after a failed folder link (L-05).
@@ -553,11 +662,12 @@ impl WindowState {
         if let Some(watch) = &self.browser.watch {
             watch.set_root(None);
         }
+        self.browser.watched_root = None;
         self.clear_browser_search();
         let mut ui = self.shared.ui().clone();
         if ui.tree_root.is_some() {
             ui.tree_root = None;
-            self.shared.set_ui(ui);
+            self.write_ui(ui);
         }
     }
 
@@ -596,21 +706,35 @@ impl WindowState {
         self.shared.jobs().list_tree(self.worker().clone(), root, generation);
     }
 
-    fn ensure_tree_watch(&mut self) {
+    /// Points this window's recursive watch at the root, but only while the pane
+    /// is visible (OI-129): a hidden pane needs no live updates, and a process
+    /// with several windows then keeps inotify watches only for visible roots.
+    fn sync_tree_watch(&mut self) {
         if self.shared.is_headless() {
             // A one-frame gate does not need inotify; tests drive listings by hand.
+            return;
+        }
+        let wanted = if self.left.is_open() || self.left.is_peeking() { self.browser.root.clone() } else { None };
+        if wanted.is_none() && self.browser.watch.is_none() {
             return;
         }
         if self.browser.watch.is_none() {
             self.browser.watch = TreeWatch::start(self.worker().clone());
         }
+        if self.browser.watched_root == wanted {
+            return;
+        }
+        self.browser.watched_root = wanted.clone();
         if let Some(watch) = &self.browser.watch {
-            watch.set_root(self.browser.root.clone());
+            watch.set_root(wanted);
         }
     }
 
     /// Reinstalls the recursive watch (the window regained focus).
     pub(crate) fn rearm_browser_watch(&mut self) {
+        if !self.left.is_open() && !self.left.is_peeking() {
+            return;
+        }
         if let Some(watch) = &self.browser.watch {
             watch.rearm();
         }
@@ -633,6 +757,8 @@ impl WindowState {
         query: Option<&str>,
         tx: &mut Tx,
     ) {
+        // F-19: choosing an item ends a peeking pane.
+        self.left.end_peek();
         if mods.shift && !mods.ctrl {
             self.open_path_in_new_window(path, line);
             return;
@@ -696,10 +822,430 @@ impl WindowState {
     fn persist_collapsed(&mut self) {
         let folders: Vec<PathBuf> = self.browser.collapsed.iter().map(PathBuf::from).collect();
         let mut ui = self.shared.ui().clone();
+        if let Some(seen) = self.browser.seen_ui.as_mut() {
+            seen.collapsed_len = folders.len();
+        }
         if ui.collapsed_folders != folders {
             ui.collapsed_folders = folders;
-            self.shared.set_ui(ui);
+            self.write_ui(ui);
         }
+    }
+
+    // ---- shared pane state (F-18–F-21, OI-129) -----------------------------
+
+    /// Writes `ui.json` and asks every other window to redraw, so it pulls the
+    /// change on its next poll (OI-129). One writer, one broadcast.
+    fn write_ui(&mut self, ui: UiPrefs) {
+        self.shared.set_ui(ui);
+        let me = self.id();
+        let others: Vec<_> = self.shared.windows().iter().map(|entry| entry.id).filter(|id| *id != me).collect();
+        for id in others {
+            // `PrefsChanged` is the existing "shared state changed, draw again"
+            // message; the window's `poll_browser` rereads what it needs.
+            let _ = self.shared.try_post_window(id, UiMsg::PrefsChanged);
+        }
+    }
+
+    /// Restores the stored pane visibility and width once, when a window starts
+    /// with a saved root (F-18/F-20).
+    fn restore_pane_choices(&mut self) {
+        let (left_hidden, right_hidden, left_width, right_width) = {
+            let ui = self.shared.ui();
+            (ui.left_hidden, ui.right_hidden, ui.left_width, ui.right_width)
+        };
+        self.left.set_open(!left_hidden);
+        self.left.set_width(left_width);
+        self.right.set_width(right_width);
+        if right_hidden {
+            for tab in &mut self.tabs {
+                tab.view.outline_hidden = true;
+            }
+            if !self.is_editing() {
+                self.right.set_open(false);
+            }
+        }
+        let collapsed_len = self.shared.ui().collapsed_folders.len();
+        self.browser.seen_ui = Some(SeenUi { left_hidden, right_hidden, left_width, right_width, collapsed_len });
+    }
+
+    /// Applies what other windows wrote to `ui.json` and notices this window's
+    /// own geometry changes (OI-129). Returns whether anything was redrawn.
+    ///
+    /// The root is not synced: F-01 makes it per window. The collapsed set, the
+    /// pane widths, the hidden choices and the panel's text size are global
+    /// (F-18/F-21, P-09), so one window's change reaches all of them.
+    pub(crate) fn sync_browser_ui(&mut self) -> bool {
+        let (left_hidden, right_hidden, left_width, right_width, collapsed_len) = {
+            let ui = self.shared.ui();
+            (ui.left_hidden, ui.right_hidden, ui.left_width, ui.right_width, ui.collapsed_folders.len())
+        };
+        let editing = self.is_editing();
+        let mut changed = false;
+
+        // F-20: a drag that ended since the last poll is a choice.
+        let resizing = [self.left.is_resizing(), self.right.is_resizing()];
+        if (self.browser.resizing[0] && !resizing[0]) || (self.browser.resizing[1] && !resizing[1]) {
+            self.persist_widths();
+        }
+        self.browser.resizing = resizing;
+
+        let seen = match self.browser.seen_ui {
+            Some(seen) => seen,
+            None => {
+                // A window without a saved root has nothing to restore into;
+                // snapshot the choices and apply only the widths, which every
+                // pane can take without showing anything.
+                self.left.set_width(left_width);
+                self.right.set_width(right_width);
+                let seen = SeenUi { left_hidden, right_hidden, left_width, right_width, collapsed_len };
+                self.browser.seen_ui = Some(seen);
+                seen
+            }
+        };
+
+        // F-18/P-09: the tree's hidden choice is one shared value, so a toggle
+        // in another window shows or hides this one too. Auto-fit may fold a
+        // shown pane again at once if the shell is narrow.
+        if left_hidden != seen.left_hidden && !editing {
+            if left_hidden {
+                if self.left.is_peeking() {
+                    self.left.end_peek();
+                }
+                self.left.set_open(false);
+            } else {
+                self.left.set_open(true);
+                self.refresh_browser();
+            }
+            changed = true;
+            self.browser.seen_ui = Some(SeenUi { left_hidden, right_hidden, ..seen });
+        }
+        if right_hidden != seen.right_hidden {
+            // Hiding is global; showing clears the flag and `sync_outline`
+            // opens the pane in this same poll, so the shared choice travels.
+            self.set_outline_tabs_hidden(right_hidden);
+            if right_hidden && !editing && self.right.is_open() {
+                self.right.set_open(false);
+            }
+            changed = true;
+            if !right_hidden {
+                self.browser.auto_folded[1] = false;
+            }
+            self.browser.seen_ui = Some(SeenUi { right_hidden, left_hidden, ..seen });
+        }
+        // A stored "hidden" stays true for tabs created after the choice.
+        if right_hidden && !editing {
+            changed |= self.set_outline_tabs_hidden(true);
+        }
+
+        // F-20: widths are global; a resize in another window is applied unless
+        // this one is dragging its own edge.
+        if left_width != seen.left_width && !resizing[0] {
+            self.left.set_width(left_width);
+            changed = true;
+        }
+        if right_width != seen.right_width && !resizing[1] {
+            self.right.set_width(right_width);
+            changed = true;
+        }
+        let mut current = self.browser.seen_ui.unwrap_or(seen);
+        current.left_width = left_width;
+        current.right_width = right_width;
+        current.collapsed_len = collapsed_len;
+        self.browser.seen_ui = Some(current);
+
+        // F-07/F-18: a collapse or expansion in another window rebuilds here.
+        if collapsed_len != seen.collapsed_len {
+            let folders: BTreeSet<String> =
+                self.shared.ui().collapsed_folders.iter().map(|folder| collapse_key(folder)).collect();
+            if folders != self.browser.collapsed {
+                self.browser.collapsed = folders;
+                self.rebuild_browser_rows();
+                changed = true;
+            }
+        }
+
+        // OI-129: a watch that hit the system's limit says so once.
+        if self.browser.watch_error.is_some() {
+            if let Some(error) = self.browser.watch_error.clone()
+                && is_watch_limit(&error)
+                && !self.browser.watch_limit_noticed
+            {
+                self.notice(lmdv_i18n::t!("msg.watchLimit"));
+                self.browser.watch_limit_noticed = true;
+                changed = true;
+            }
+        } else {
+            self.browser.watch_limit_noticed = false;
+        }
+        changed
+    }
+
+    /// Sets every tab's outline flag (F-18/P-09's global `toc-hidden`).
+    fn set_outline_tabs_hidden(&mut self, hidden: bool) -> bool {
+        let mut changed = false;
+        for tab in &mut self.tabs {
+            if tab.view.outline_hidden != hidden {
+                tab.view.outline_hidden = hidden;
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Writes this window's pane widths to `ui.json` (F-20).
+    fn persist_widths(&mut self) {
+        let left = self.left.width();
+        let right = self.right.width();
+        if let Some(seen) = self.browser.seen_ui.as_mut() {
+            seen.left_width = left;
+            seen.right_width = right;
+        }
+        let mut ui = self.shared.ui().clone();
+        if ui.left_width != left || ui.right_width != right {
+            ui.left_width = left;
+            ui.right_width = right;
+            self.write_ui(ui);
+        }
+    }
+
+    /// Writes the browser pane's hidden choice to `ui.json` (F-18/P-09).
+    ///
+    /// The outline's choice is written by [`Self::persist_outline_visibility`]:
+    /// it follows the active tab's outline state, which a document without
+    /// headings can close without that being a choice.
+    fn persist_browser_visibility(&mut self) {
+        let left_hidden = !self.left.is_open() && !self.left.is_peeking();
+        if let Some(seen) = self.browser.seen_ui.as_mut() {
+            seen.left_hidden = left_hidden;
+        }
+        let mut ui = self.shared.ui().clone();
+        if ui.left_hidden != left_hidden {
+            ui.left_hidden = left_hidden;
+            self.write_ui(ui);
+        }
+    }
+
+    /// Writes the outline's hidden choice, which is global (F-18/P-09): every
+    /// tab takes the same choice, so a new tab cannot pop the pane open.
+    pub(crate) fn persist_outline_visibility(&mut self) {
+        let hidden = self.active_tab().is_some_and(|tab| tab.view.outline_hidden);
+        // The user showed the outline: keep it, as F-19's peek would, until
+        // the whole shell fits again. A hide clears both.
+        self.browser.fit_override[1] = !hidden;
+        self.browser.auto_folded[1] = false;
+        for tab in &mut self.tabs {
+            tab.view.outline_hidden = hidden;
+        }
+        if let Some(seen) = self.browser.seen_ui.as_mut() {
+            seen.right_hidden = hidden;
+        }
+        let mut ui = self.shared.ui().clone();
+        if ui.right_hidden != hidden {
+            ui.right_hidden = hidden;
+            self.write_ui(ui);
+        }
+    }
+
+    /// Whether the document in front is in edit mode (E-02 hides the panes
+    /// while editing, and that is not a visibility choice).
+    fn is_editing(&self) -> bool {
+        self.active_tab().is_some_and(|tab| tab.view.mode == Mode::Editor)
+    }
+
+    // ---- pane operations (F-18–F-21) ---------------------------------------
+
+    /// `Ctrl+B`, the toolbar's tree button and the palette's toggle (F-18).
+    ///
+    /// A pane the keyboard opens takes the keyboard; a pointer press leaves the
+    /// focus where it was. The choice is written to `ui.json`, so the next
+    /// launch restores it. While editing, E-02 keeps both panes hidden: the
+    /// command only records the choice.
+    pub(crate) fn toggle_browser_pane(&mut self, tx: &mut Tx, keyboard: bool) {
+        if self.is_editing() {
+            let hidden = !self.shared.ui().left_hidden;
+            if let Some(seen) = self.browser.seen_ui.as_mut() {
+                seen.left_hidden = hidden;
+            }
+            let mut ui = self.shared.ui().clone();
+            ui.left_hidden = hidden;
+            self.write_ui(ui);
+            return;
+        }
+        if self.left.is_peeking() {
+            self.left.end_peek();
+        } else if self.left.is_open() {
+            self.left.set_open(false);
+            self.browser.auto_folded[0] = false;
+            self.browser.fit_override[0] = false;
+        } else {
+            // F-19: a pane auto-fit folded opens over the text as a peek; one
+            // the user closed docks. Either way auto-fit leaves it alone until
+            // the whole shell fits.
+            let folded = self.browser.auto_folded[0];
+            self.browser.auto_folded[0] = false;
+            self.browser.fit_override[0] = true;
+            if folded {
+                self.left.peek();
+            } else {
+                self.left.set_open(true);
+            }
+            self.refresh_browser();
+            if keyboard {
+                // The pane slides in and its content mounts with it: wait for
+                // the focusable element rather than dropping the request on the
+                // closed frame (F-18).
+                let key = self.browser_pane_focus_key();
+                tx.focus_when_shown(key, true);
+            }
+        }
+        self.persist_browser_visibility();
+        self.sync_tree_watch();
+    }
+
+    /// The pane element a keyboard open should focus (F-18): the tree when it
+    /// is drawn, else the search box, else the empty state's Open folder.
+    fn browser_pane_focus_key(&self) -> &'static str {
+        if !self.browser.search_open && !self.browser.rows.is_empty() {
+            BROWSER_TREE_KEY
+        } else if self.browser.root.is_some() {
+            BROWSER_SEARCH_KEY
+        } else {
+            "browser-open-folder"
+        }
+    }
+
+    /// Shows the browser pane because the app is using it (Open folder, folder
+    /// search, a folder link); the choice is stored like a toggle's (F-13).
+    pub(crate) fn show_browser_pane(&mut self) {
+        let folded = self.browser.auto_folded[0];
+        if folded {
+            self.left.peek();
+        } else {
+            self.left.set_open(true);
+        }
+        self.browser.auto_folded[0] = false;
+        self.browser.fit_override[0] = true;
+        self.persist_browser_visibility();
+        self.sync_tree_watch();
+    }
+
+    /// F-20's arrow step; `large` is Shift+arrow.
+    pub(crate) fn nudge_browser_pane(&mut self, direction: i32, large: bool) {
+        let step = if large { PANE_STEP_LARGE } else { PANE_STEP };
+        self.left.set_open(true);
+        self.left.set_width(self.left.width() + direction as f32 * step);
+        self.persist_widths();
+    }
+
+    /// F-20's Home: the width the pane was made with.
+    pub(crate) fn reset_browser_pane_width(&mut self) {
+        self.left.reset_width();
+        self.left.set_open(true);
+        self.persist_widths();
+    }
+
+    /// F-20's End: the widest the pane may get.
+    pub(crate) fn maximize_browser_pane(&mut self) {
+        let max = self.left.max_width();
+        self.left.set_width(max);
+        self.left.set_open(true);
+        self.persist_widths();
+    }
+
+    /// The outline's arrow step (F-20).
+    pub(crate) fn nudge_outline_pane(&mut self, direction: i32, large: bool) {
+        let step = if large { PANE_STEP_LARGE } else { PANE_STEP };
+        self.right.set_open(true);
+        self.right.set_width(self.right.width() + direction as f32 * step);
+        self.persist_widths();
+    }
+
+    /// The outline's Home (F-20).
+    pub(crate) fn reset_outline_pane_width(&mut self) {
+        self.right.reset_width();
+        self.right.set_open(true);
+        self.persist_widths();
+    }
+
+    /// The outline's End (F-20).
+    pub(crate) fn maximize_outline_pane(&mut self) {
+        let max = self.right.max_width();
+        self.right.set_width(max);
+        self.right.set_open(true);
+        self.persist_widths();
+    }
+
+    /// `Ctrl`+wheel or a pinch over the file browser changes the side panels'
+    /// text size (F-21), never the reader's. One step per gesture notch.
+    pub(crate) fn pane_magnify(&mut self, delta: f32) -> bool {
+        if !delta.is_finite() || delta == 0.0 {
+            return true;
+        }
+        self.browser.magnify += delta;
+        if self.browser.magnify.abs() < 0.35 {
+            return true;
+        }
+        let direction = if self.browser.magnify > 0.0 { 1 } else { -1 };
+        self.browser.magnify = 0.0;
+        let sizes = crate::settings::SIDE_SIZES;
+        let current = self.shared.prefs().reader.side_size;
+        let index = sizes.iter().position(|size| *size == current).unwrap_or(1) as i32 + direction;
+        if let Some(size) = usize::try_from(index).ok().and_then(|index| sizes.get(index)).copied() {
+            self.set_side_size(size);
+        }
+        true
+    }
+
+    /// F-19: folds the outline, then the files, when the article would fall
+    /// below [`ARTICLE_MIN_WIDTH`], and reopens only what it folded once the
+    /// shell fits again. The stored hidden choice always wins.
+    ///
+    /// The width is the last drawn `kit-root` (the whole content), so opening a
+    /// pane never makes the next frame believe there is less room than there is.
+    pub(crate) fn apply_pane_fit(&mut self) -> bool {
+        if self.is_editing() {
+            return false;
+        }
+        let width = self.browser.shell_width.get();
+        if !width.is_finite() || width <= 0.0 {
+            return false;
+        }
+        let left_width = self.left.width();
+        let right_width = self.right.width();
+        let room = |left: bool, right: bool| {
+            let panes = if left { left_width } else { 0.0 } + if right { right_width } else { 0.0 };
+            width - panes - PANE_GUTTER >= ARTICLE_MIN_WIDTH
+        };
+        let mut changed = false;
+        if self.right.is_open() && !room(self.left.is_open(), true) && !self.browser.fit_override[1] {
+            self.browser.auto_folded[1] = true;
+            // `sync_outline` would reopen a tab whose flag still says shown, so
+            // the fold sets the flag too; it is a display state here, and only
+            // an explicit toggle writes `toc-hidden`.
+            self.set_outline_tabs_hidden(true);
+            self.right.set_open(false);
+            changed = true;
+        }
+        if self.left.is_open() && !room(true, self.right.is_open()) && !self.browser.fit_override[0] {
+            self.browser.auto_folded[0] = true;
+            self.left.set_open(false);
+            changed = true;
+        }
+        if self.browser.auto_folded[1] && !self.right.is_open() && room(self.left.is_open(), true) {
+            self.browser.auto_folded[1] = false;
+            self.set_outline_tabs_hidden(false);
+            self.right.set_open(true);
+            changed = true;
+        }
+        if self.browser.auto_folded[0] && !self.left.is_open() && room(true, self.right.is_open()) {
+            self.browser.auto_folded[0] = false;
+            self.left.set_open(true);
+            changed = true;
+        }
+        if room(true, true) {
+            self.browser.fit_override = [false, false];
+        }
+        changed
     }
 
     /// Rebuilds the visible rows from the last listing and the collapsed set.
@@ -830,7 +1376,10 @@ impl WindowState {
     /// The browser's frame work: follow the active document, run a due search,
     /// and settle async work inline in a headless gate.
     pub(crate) fn poll_browser(&mut self, now: f64, tx: &mut Tx) -> bool {
-        let mut changed = self.follow_browser_active();
+        let mut changed = self.sync_browser_ui();
+        changed |= self.apply_pane_fit();
+        self.sync_tree_watch();
+        changed |= self.follow_browser_active();
         // A menu whose pane (and row) is gone has nothing to act on.
         if self.browser.menu.is_some() && !self.left.is_open() {
             self.browser.menu = None;
@@ -988,8 +1537,36 @@ impl WindowState {
     }
 
     /// The tree's keyboard: arrows, Home/End, Left/Right, Return/Space
-    /// (F-11).
+    /// (F-11), plus F-20's resize steps while the tree has focus: `Ctrl+←`/`→`
+    /// 16 points, with Shift 64, `Ctrl+Home` the default width and `Ctrl+End`
+    /// the maximum. Plain arrows stay the tree's, since its rows use them.
     pub(crate) fn browser_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
+        if event.mods.ctrl && !event.mods.alt && !event.mods.logo && !event.mods.shift {
+            match event.key {
+                Key::Home => {
+                    self.reset_browser_pane_width();
+                    return true;
+                }
+                Key::End => {
+                    self.maximize_browser_pane();
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        if event.mods.ctrl && !event.mods.alt && !event.mods.logo {
+            match event.key {
+                Key::Left => {
+                    self.nudge_browser_pane(-1, event.mods.shift);
+                    return true;
+                }
+                Key::Right => {
+                    self.nudge_browser_pane(1, event.mods.shift);
+                    return true;
+                }
+                _ => {}
+            }
+        }
         if event.mods.alt || event.mods.logo || (event.mods.ctrl && !matches!(&event.key, Key::Enter)) {
             return false;
         }
@@ -1092,7 +1669,7 @@ impl WindowState {
     /// The palette's “Search the folder for …” (C-07): shows the pane, fills the
     /// field, starts the search at once and puts the keyboard in it.
     pub(crate) fn search_folder_for(&mut self, query: &str, tx: &mut Tx) {
-        self.left.set_open(true);
+        self.show_browser_pane();
         self.browser_search.replace_text(query.to_owned());
         self.browser.search_query = query.trim().to_owned();
         if self.browser.search_query.is_empty() {
@@ -1107,6 +1684,7 @@ impl WindowState {
 
     /// A row press: a folder opens or closes, a file opens in a tab (F-01).
     pub(crate) fn browser_row_pressed(&mut self, path: &str, dir: bool, mods: Mods, tx: &mut Tx) {
+        self.left.end_peek();
         self.browser.focus = Some(path.to_owned());
         self.browser.row_epoch += 1;
         if dir {
@@ -1227,7 +1805,7 @@ impl WindowState {
         };
         tx.open_folder(options, |state: &mut WindowState, result, _| match result {
             Ok(Some(path)) => {
-                state.left.set_open(true);
+                state.show_browser_pane();
                 state.set_browser_root(path);
             }
             Ok(None) => {}
@@ -1238,7 +1816,7 @@ impl WindowState {
     /// `Ctrl+Shift+F`: show the pane, focus the search box and search the
     /// selection when there is one (F-13).
     pub(crate) fn open_folder_search(&mut self, tx: &mut Tx) {
-        self.left.set_open(true);
+        self.show_browser_pane();
         let selected = tx.text_selection().map(|selection| search_prefill(selection.text())).unwrap_or_default();
         if !selected.is_empty() {
             self.browser_search.replace_text(selected.clone());
@@ -1257,7 +1835,7 @@ impl WindowState {
     /// the previous root when the target is not a folder.
     pub(crate) fn open_folder_link(&mut self, folder: PathBuf) {
         let previous = self.browser.root.clone();
-        self.left.set_open(true);
+        self.show_browser_pane();
         self.adopt_browser_root(folder, true);
         self.browser.link_revert = Some(previous);
     }
@@ -1316,6 +1894,14 @@ fn group_hits(hits: Vec<SearchHit>) -> Vec<SearchRow> {
 
 /// The file-browser pane: folder header, search box, tree or results.
 pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
+    // F-19: remember the whole content's width for the next poll's auto-fold.
+    // The value is the last drawn frame's, so a pane that opens never makes the
+    // fit believe the article has less room than it does.
+    if let Some([width, _]) = cx.layout_size("kit-root")
+        && width > 0.0
+    {
+        state.browser.shell_width.set(width);
+    }
     if !state.left.is_open() {
         // The closed pane is clipped; building a 2,000-row tree every frame
         // would be wasted work. Opening it builds the real pane next frame.
@@ -1415,6 +2001,10 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
         .w_full()
         .h_full()
         .min_h(0.0)
+        // F-21: Ctrl+wheel (a pinch on Linux) over the pane changes the side
+        // panels' text size, never the reader's. The outline and the article
+        // need the same handler in their own views.
+        .on_magnify(|state: &mut WindowState, event, _: &mut Tx| state.pane_magnify(event.delta))
         .child(header)
         .child(el().key("browser-separator").w_full().h(1.0).fill(c.border_muted))
         .child(row().key("browser-search-row").w_full().px(8.0).py(6.0).child(search))

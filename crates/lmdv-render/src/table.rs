@@ -7,12 +7,12 @@
 //! `rune-kit`'s data-table component is deliberately not used: a document table
 //! is content, not a grid with sorting and selection state.
 
-use lmdv_md::{Align as MdAlign, Inline, Table};
+use lmdv_md::{Align as MdAlign, Inline, InlineObjectKind, Table};
 use rune::{Align, El, col, row};
 
-use crate::TableRef;
 use crate::block::Renderer;
 use crate::inline::InlineOptions;
+use crate::{TableCell, TableLink, TableRef};
 
 /// The narrowest a column may shrink to while fitting the reading column.
 const MIN_COLUMN: f32 = 56.0;
@@ -40,14 +40,35 @@ impl Renderer<'_> {
         }
         let available = (self.opts.width - 2.0).max(MIN_COLUMN);
         let total: f32 = widths.iter().sum();
-        let wide = total > available;
-        if wide {
-            let scale = (available / total).max(0.0);
-            for width in &mut widths {
-                *width = (*width * scale).max(MIN_COLUMN);
+        if total > available {
+            // Shrink toward the column, but never below a column's longest
+            // word: text must not overlap itself. A table whose minimum widths
+            // still do not fit keeps its natural widths and scrolls sideways
+            // inside the column (OI-138).
+            let minimums: Vec<f32> = (0..columns)
+                .map(|column| {
+                    let mut narrowest = MIN_COLUMN;
+                    if let Some(cell) = table.head.get(column) {
+                        narrowest = narrowest.max(self.cell_min_width(cell, true));
+                    }
+                    for row in &table.rows {
+                        if let Some(cell) = row.get(column) {
+                            narrowest = narrowest.max(self.cell_min_width(cell, false));
+                        }
+                    }
+                    narrowest.clamp(MIN_COLUMN, MAX_COLUMN)
+                })
+                .collect();
+            let minimum_total: f32 = minimums.iter().sum();
+            if minimum_total <= available {
+                let scale = available / total;
+                for (width, floor) in widths.iter_mut().zip(&minimums) {
+                    *width = (*width * scale).max(*floor);
+                }
             }
         }
         let drawn_width: f32 = widths.iter().sum();
+        let wide = drawn_width > available + 0.5;
 
         let mut body = col().key("rows").w_full();
         for (index, cells) in table.rows.iter().enumerate() {
@@ -57,10 +78,11 @@ impl Renderer<'_> {
         if self.opts.sticky_tables {
             head = head.sticky_top(self.opts.sticky_inset);
         }
+        let heading_cells = padded_cells(&table.head, columns);
         let table_el = col()
             .key("table")
             .role("table")
-            .label(table_heading_label(&table.head, &self.theme.labels.table))
+            .label(table_heading_label(&heading_cells, &self.theme.labels.table))
             .w(drawn_width)
             .radius(self.theme.radius)
             .border(0.5, self.theme.table_border)
@@ -132,17 +154,104 @@ impl Renderer<'_> {
         let text = if inline.text.is_empty() { " " } else { inline.text.as_str() };
         rune::text::measure(text, &[], style, None).0 + PAD_X * 2.0 + 2.0
     }
+
+    /// The narrowest a cell may draw without breaking a word, in points.
+    ///
+    /// A table that has to shrink stops at its longest word rather than letting
+    /// the text run over its neighbours; the whole table scrolls instead.
+    fn cell_min_width(&self, inline: &Inline, header: bool) -> f32 {
+        let style = if header { rune::TextStyle { weight: 600.0, ..self.theme.body } } else { self.theme.body };
+        inline
+            .text
+            .split_whitespace()
+            .map(|word| rune::text::measure(word, &[], style, None).0 + PAD_X * 2.0 + 2.0)
+            .fold(MIN_COLUMN, f32::max)
+    }
 }
 
 /// The table's accessible name: its header cells joined by commas.
-fn table_heading_label(head: &[Inline], fallback: &str) -> String {
+fn table_heading_label(head: &[TableCell], fallback: &str) -> String {
     let cells: Vec<&str> = head.iter().map(|cell| cell.text.trim()).filter(|cell| !cell.is_empty()).collect();
     if cells.is_empty() { fallback.to_owned() } else { format!("{fallback}: {}", cells.join(", ")) }
 }
 
+/// One cell as the app previews and copies it (V-13, V-17).
+///
+/// Markup disappears because the parser's text already excludes it, a formula
+/// keeps its TeX so a spreadsheet paste is useful, a task box draws its glyph and
+/// records its state, and every object that draws no glyph contributes a space at
+/// most. Whitespace is collapsed in one pass that also keeps link ranges aligned
+/// with the collapsed text.
+fn cell_from_inline(inline: &Inline) -> TableCell {
+    let mut text = String::with_capacity(inline.text.len());
+    let mut offsets = vec![0usize; inline.text.len() + 1];
+    let mut task = None;
+    let mut space = true;
+    for (start, character) in inline.text.char_indices() {
+        offsets[start] = text.len();
+        if character == lmdv_md::OBJECT_CHAR {
+            if let Some(math) = inline.math.iter().find(|math| math.range.contains(&start)) {
+                push_words(&mut text, &math.tex, &mut space);
+            } else if let Some(object) = inline.objects.iter().find(|object| object.range.contains(&start)) {
+                match &object.kind {
+                    InlineObjectKind::TaskCheckbox { checked } => {
+                        task.get_or_insert(*checked);
+                        push_char(&mut text, if *checked { '\u{2611}' } else { '\u{2610}' }, &mut space);
+                    }
+                    InlineObjectKind::LineBreak => push_space(&mut text, &mut space),
+                    _ => {}
+                }
+            }
+            continue;
+        }
+        if character.is_whitespace() {
+            push_space(&mut text, &mut space);
+        } else {
+            text.push(character);
+            space = false;
+        }
+    }
+    offsets[inline.text.len()] = text.len();
+    text.truncate(text.trim_end().len());
+    let len = text.len();
+    let links = inline
+        .links
+        .iter()
+        .filter_map(|link| {
+            let start = offsets.get(link.range.start).copied().unwrap_or(len).min(len);
+            let end = offsets.get(link.range.end).copied().unwrap_or(len).min(len);
+            (start < end).then(|| TableLink { range: start..end, dest: link.dest.clone() })
+        })
+        .collect();
+    TableCell { text, links, task }
+}
+
+fn push_char(text: &mut String, character: char, space: &mut bool) {
+    text.push(character);
+    *space = false;
+}
+
+fn push_space(text: &mut String, space: &mut bool) {
+    if !*space && !text.is_empty() {
+        text.push(' ');
+    }
+    *space = true;
+}
+
+/// `words` with every whitespace run collapsed to one space, as a cell draws it.
+fn push_words(text: &mut String, words: &str, space: &mut bool) {
+    for character in words.chars() {
+        if character.is_whitespace() {
+            push_space(text, space);
+        } else {
+            push_char(text, character, space);
+        }
+    }
+}
+
 /// One row's cells as the app copies and previews them, padded to `columns`.
-fn padded_cells(cells: &[Inline], columns: usize) -> Vec<String> {
-    (0..columns).map(|column| cells.get(column).map_or_else(String::new, cell_text)).collect()
+fn padded_cells(cells: &[Inline], columns: usize) -> Vec<TableCell> {
+    (0..columns).map(|column| cells.get(column).map_or_else(TableCell::default, cell_from_inline)).collect()
 }
 
 /// The [`TableRef`] for `table`, drawn inside the top-level block `block`/`index`.
@@ -202,29 +311,4 @@ fn collect_tables(doc: &lmdv_md::MdDoc, block: &lmdv_md::Block, index: usize, ke
         }
         _ => {}
     }
-}
-
-/// A cell's drawn text with whitespace collapsed (X-16, V-13).
-///
-/// Markup disappears because the parser's text already excludes it, a formula
-/// keeps its TeX so a spreadsheet paste is useful, and every object that draws
-/// no glyph (a task box, a picture, a hard break) contributes a space at most.
-fn cell_text(inline: &Inline) -> String {
-    let mut out = String::with_capacity(inline.text.len());
-    for (start, character) in inline.text.char_indices() {
-        if character != lmdv_md::OBJECT_CHAR {
-            out.push(character);
-            continue;
-        }
-        if let Some(math) = inline.math.iter().find(|math| math.range.contains(&start)) {
-            out.push_str(&math.tex);
-        } else if inline
-            .objects
-            .iter()
-            .any(|object| matches!(object.kind, lmdv_md::InlineObjectKind::LineBreak) && object.range.start == start)
-        {
-            out.push(' ');
-        }
-    }
-    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }

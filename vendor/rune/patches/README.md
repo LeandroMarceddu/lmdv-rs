@@ -18,12 +18,15 @@ Applied:
 - `0003-a11y-inline-object.patch` — the accessibility text speaks an inline
   image's label instead of the U+FFFC object marker; character lengths and word
   starts stay consistent with the spoken value.
+- `0004-text-highlight-inline-image.patch` — a `TextHighlight` covering an
+  inline image's placeholder paints the picture's drawn box, so a find match or
+  `--line` flash over a formula or inline picture is visible.
 
 Planned:
 
-- `0004-text-hit.patch` — only if preview double-click needs a text hit callback.
-- `0005-window-theme.patch` — optional native frame theme.
-- `0006-linux-frame.patch` — deferred client-side decorations/resize.
+- `0005-text-hit.patch` — only if preview double-click needs a text hit callback.
+- `0006-window-theme.patch` — optional native frame theme.
+- `0007-linux-frame.patch` — deferred client-side decorations/resize.
 
 Generate a patch from a pristine tree and the working vendor tree:
 
