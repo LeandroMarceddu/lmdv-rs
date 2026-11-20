@@ -68,6 +68,13 @@ pub(crate) struct PendingTravel {
     pub(crate) tab: Option<TabId>,
     /// The document being opened.
     pub(crate) doc: Option<DocumentId>,
+    /// Whether the move's journey continues in the tab that lands (the keys),
+    /// or belongs only to its origin tab (a background tab's menu, where the
+    /// destination tab keeps its own history).
+    pub(crate) follow: bool,
+    /// The tab that was in front when the move started; a failed move returns
+    /// there, so a background tab's menu does not bring that tab forward.
+    pub(crate) front: Option<TabId>,
 }
 
 /// Back/Forward bookkeeping that is not per tab: the move in flight and the
@@ -145,6 +152,22 @@ impl WindowState {
         self.tab(tab).and_then(Tab::document).and_then(|document| Self::place_key(document))
     }
 
+    /// The place a background tab shows, from its stored anchor.
+    ///
+    /// Only the front tab reports a live scroll; a tab that is not in front
+    /// keeps the position it was left at (T-26), and the start page,
+    /// loading/error cards and parsed-less documents are not places.
+    fn tab_place(&self, tab: TabId) -> Option<Place> {
+        let tab = self.tab(tab)?;
+        let document = tab.document()?;
+        if !matches!(*document.status.borrow(), DocStatus::Ready) {
+            return None;
+        }
+        let key = Self::place_key(document)?;
+        tab.view.reader.as_ref()?;
+        Some(Place::new(key, tab.view.anchor.clone()))
+    }
+
     /// The tab showing the document `place` names, if this window has one.
     fn tab_for_place(&self, place: &Place) -> Option<TabId> {
         if let Some(paste) = place.path.strip_prefix(PASTED_PREFIX) {
@@ -216,22 +239,50 @@ impl WindowState {
 
     /// Back through this tab's places.
     pub fn nav_back(&mut self, tx: &mut Tx) {
-        self.travel(-1, tx);
+        let Some(tab) = self.active_tab().map(|tab| tab.id) else { return };
+        self.nav_back_in_tab(tab, tx);
     }
 
     /// Forward through this tab's places.
     pub fn nav_forward(&mut self, tx: &mut Tx) {
-        self.travel(1, tx);
+        let Some(tab) = self.active_tab().map(|tab| tab.id) else { return };
+        self.nav_forward_in_tab(tab, tx);
     }
 
     /// Whether Back has a place to go.
     pub fn nav_can_back(&self) -> bool {
-        self.active_tab().is_some_and(|tab| tab.view.nav.can_back())
+        self.active_tab().is_some_and(|tab| self.nav_can_back_in(tab.id))
     }
 
     /// Whether Forward has a place to go.
     pub fn nav_can_forward(&self) -> bool {
-        self.active_tab().is_some_and(|tab| tab.view.nav.can_forward())
+        self.active_tab().is_some_and(|tab| self.nav_can_forward_in(tab.id))
+    }
+
+    /// Back through `tab`'s places, for its context menu (O-14).
+    ///
+    /// The menu belongs to the tab it was opened on: its own lists and enabled
+    /// state, never whatever is in front. A place of that tab's own document
+    /// moves its lists and stored reading position without bringing the tab
+    /// forward; a place of another document belongs to the window (one tab per
+    /// document, T-11) and reaches it the way the keys do.
+    pub(crate) fn nav_back_in_tab(&mut self, tab: TabId, tx: &mut Tx) {
+        self.travel_in(tab, -1, tx);
+    }
+
+    /// Forward through `tab`'s places, for its context menu (O-14).
+    pub(crate) fn nav_forward_in_tab(&mut self, tab: TabId, tx: &mut Tx) {
+        self.travel_in(tab, 1, tx);
+    }
+
+    /// Whether `tab` has a place Back would go to, for its menu row.
+    pub(crate) fn nav_can_back_in(&self, tab: TabId) -> bool {
+        self.tab(tab).is_some_and(|tab| tab.view.nav.can_back())
+    }
+
+    /// Whether `tab` has a place Forward would go to, for its menu row.
+    pub(crate) fn nav_can_forward_in(&self, tab: TabId) -> bool {
+        self.tab(tab).is_some_and(|tab| tab.view.nav.can_forward())
     }
 
     /// The mouse's side buttons: Back and Forward (O-14).
@@ -250,35 +301,57 @@ impl WindowState {
 
     // ---- travel (O-13/O-14) ----------------------------------------------
 
-    /// Goes to the place Back (`dir < 0`) or Forward (`dir > 0`) names.
+    /// Goes to a place in `origin`'s history.
     ///
     /// The move belongs to the tab it is made in: that tab loses the place from
     /// its list and keeps the place it was showing for the other direction. The
     /// destination document comes forward in its own tab when the window has it,
     /// so a move between documents switches tabs (O-13/requirement 4).
-    fn travel(&mut self, dir: i8, tx: &mut Tx) {
+    ///
+    /// A tab that is not in front has no live scroll of its own, so a place of
+    /// its own document is stored as its reading position and applied when the
+    /// tab next comes forward; the front tab and the article do not move.
+    fn travel_in(&mut self, origin: TabId, dir: i8, tx: &mut Tx) {
         // One move at a time: another place is already being opened.
         if self.navigation.pending.is_some() {
             return;
         }
-        let Some(origin) = self.active_tab().map(|tab| tab.id) else { return };
         let Some(place) = self
             .tab(origin)
             .and_then(|tab| if dir < 0 { tab.view.nav.peek_back() } else { tab.view.nav.peek_forward() })
+            .cloned()
         else {
             return;
         };
-        let place = place.clone();
-        let here = self.current_place();
-        // The same document: the place is reached without a load.
-        if here.as_ref().is_some_and(|here| here.path == place.path) {
-            self.commit_travel(origin, dir, here, place, tx);
+        let front = self.active_tab().map(|tab| tab.id) == Some(origin);
+        let here = if front { self.current_place() } else { self.tab_place(origin) };
+        // The tab's own document: the place is reached without a load and
+        // without needing the model a background tab might not have yet.
+        let own = self.tab_place_key(origin);
+        if own.as_deref() == Some(place.path.as_str()) {
+            if front {
+                self.commit_travel(origin, dir, here, place, tx, true);
+            } else {
+                self.commit_stored(origin, dir, here, place);
+            }
             return;
         }
         // Another tab of this window already shows it.
         if let Some(tab) = self.tab_for_place(&place) {
-            self.activate_tab_with_tx(tab, tx);
-            self.commit_travel(origin, dir, here, place, tx);
+            if front {
+                self.activate_tab_with_tx(tab, tx);
+                self.commit_travel(origin, dir, here, place, tx, true);
+            } else {
+                // A background tab cannot show another document itself: its
+                // own lists still move, and the destination comes forward
+                // without taking over that tab's history.
+                self.commit_lists_in(origin, dir, here);
+                self.activate_tab_with_tx(tab, tx);
+                if let Some(active) = self.active_tab_mut() {
+                    active.view.anchor = place.pos.clone();
+                }
+                self.restore_place(&place, tx);
+            }
             return;
         }
         // Pasted text has no file to look for: a place without its document is
@@ -287,17 +360,19 @@ impl WindowState {
             self.drop_place_in(Some(origin), dir);
             return;
         }
-        self.open_place(origin, dir, place, here, tx);
+        self.open_place(origin, dir, place, here, front, tx);
     }
 
     /// Opens a file place, suppressing the open's own record: the move commits
     /// itself once the document is on screen.
-    fn open_place(&mut self, origin: TabId, dir: i8, place: Place, here: Option<Place>, tx: &mut Tx) {
+    fn open_place(&mut self, origin: TabId, dir: i8, place: Place, here: Option<Place>, follow: bool, tx: &mut Tx) {
         self.navigation.suppress();
+        let front = self.active_tab().map(|tab| tab.id);
         let tab = self.open_path(PathBuf::from(&place.path));
         self.navigation.unsuppress();
         let doc = self.tab(tab).and_then(Tab::document_id);
-        self.navigation.pending = Some(PendingTravel { dir, place, here, origin: Some(origin), tab: Some(tab), doc });
+        self.navigation.pending =
+            Some(PendingTravel { dir, place, here, origin: Some(origin), tab: Some(tab), doc, follow, front });
         // A document another window already read needs no load job of its own:
         // the place is on screen at once.
         let ready = self
@@ -329,15 +404,18 @@ impl WindowState {
             return;
         }
         // Another document came first: the move was overtaken, so it is not
-        // committed. Its tab still remembers the place.
+        // committed. Its tab still remembers the place when the move was the
+        // front tab's; a background menu move leaves that tab's position alone.
         if self.active_tab().map(|active| active.id) != Some(tab) {
-            if let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+            if pending.follow
+                && let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab)
+            {
                 tab.view.anchor = pending.place.pos.clone();
             }
             return;
         }
         let Some(origin) = pending.origin else { return };
-        self.commit_travel(origin, pending.dir, pending.here, pending.place, tx);
+        self.commit_travel(origin, pending.dir, pending.here, pending.place, tx, pending.follow);
     }
 
     /// A Back/Forward move whose file is gone: drop the place, close the tab the
@@ -352,10 +430,11 @@ impl WindowState {
             // one Ctrl+Shift+T should reopen.
             self.close_tab_without_history(tab);
         }
-        if let Some(origin) = origin
-            && self.tab(origin).is_some()
-        {
-            self.activate_tab_with_tx(origin, tx);
+        // Return to whichever tab was in front when the move started: a failed
+        // background menu move must not bring its own tab forward.
+        let front = pending.front.or(origin).filter(|tab| self.tab(*tab).is_some());
+        if let Some(front) = front {
+            self.activate_tab_with_tx(front, tx);
         }
         let name = Path::new(&pending.place.path)
             .file_name()
@@ -373,12 +452,13 @@ impl WindowState {
     /// Takes `here` into `tab`'s other list and puts `place` on screen, without
     /// a landing highlight and without recording the move (O-14).
     ///
-    /// The journey follows the reader: when the place is in another tab, that tab
-    /// continues it — the updated lists are copied there, so Forward on the
-    /// landing tab returns to the place just left, and a later switch back keeps
-    /// the trail. The tab the move was made in keeps its own (already updated)
-    /// lists.
-    fn commit_travel(&mut self, tab: TabId, dir: i8, here: Option<Place>, place: Place, tx: &mut Tx) {
+    /// When `follow` is set the journey follows the reader: the place is in
+    /// another tab, which continues it — the updated lists are copied there, so
+    /// Forward on the landing tab returns to the place just left, and a later
+    /// switch back keeps the trail. A background tab's menu moves with
+    /// `follow` off: its own lists change and the destination tab keeps its
+    /// own history.
+    fn commit_travel(&mut self, tab: TabId, dir: i8, here: Option<Place>, place: Place, tx: &mut Tx, follow: bool) {
         let updated = self.tabs.iter_mut().find(|candidate| candidate.id == tab).map(|tab| {
             if dir < 0 {
                 tab.view.nav.commit_back(here);
@@ -391,12 +471,37 @@ impl WindowState {
         // The destination tab keeps the place it was brought to, so a later
         // switch to it lands there; the restore below shows it now.
         if let Some(active) = self.active_tab_mut() {
-            if active.id != tab {
+            if follow && active.id != tab {
                 active.view.nav = updated;
             }
             active.view.anchor = place.pos.clone();
         }
         self.restore_place(&place, tx);
+    }
+
+    /// Moves a background tab's own lists and stores the place as its reading
+    /// position, for when the tab next comes forward.
+    fn commit_stored(&mut self, tab: TabId, dir: i8, here: Option<Place>, place: Place) {
+        if let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+            if dir < 0 {
+                tab.view.nav.commit_back(here);
+            } else {
+                tab.view.nav.commit_forward(here);
+            }
+            tab.view.anchor = place.pos;
+        }
+    }
+
+    /// Moves a background tab's lists only: the destination is shown by
+    /// another tab, which keeps its own history.
+    fn commit_lists_in(&mut self, tab: TabId, dir: i8, here: Option<Place>) {
+        if let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+            if dir < 0 {
+                tab.view.nav.commit_back(here);
+            } else {
+                tab.view.nav.commit_forward(here);
+            }
+        }
     }
 
     /// Restores a place's anchor in the active tab (O-13).
@@ -443,11 +548,21 @@ impl WindowState {
     }
 
     /// Makes every tab's history follow a renamed file (O-15).
+    ///
+    /// Every window drains the same watcher event, but only the first one still
+    /// finds the document under its old path: the rekey is process-wide, so the
+    /// later windows would skip the rename and keep the old spelling in their
+    /// Back/Forward places. The window that moved the document broadcasts it,
+    /// exactly as Save as does (OI-173/OI-180).
     pub(crate) fn rename_history_paths(&mut self, from: &Path, to: &Path) {
-        let from = from.to_string_lossy();
-        let to = to.to_string_lossy();
+        let from_key = from.to_string_lossy();
+        let to_key = to.to_string_lossy();
         for tab in &mut self.tabs {
-            tab.view.nav.rename_path(&from, &to);
+            tab.view.nav.rename_path(&from_key, &to_key);
+        }
+        let doc = self.shared.docs().find_path(to).map(|document| document.id);
+        if let Some(doc) = doc {
+            self.broadcast_window_rename(doc, from, to);
         }
     }
 

@@ -608,6 +608,7 @@
   "link.notLocal": "No se puede abrir {name}: no es un archivo local",
   "msg.noWindowHost": "este proceso no tiene un host de ventanas",
   "msg.watcherStopped": "la vigilancia de archivos se detuvo",
+  "msg.watchOverflow": "Se perdieron algunos cambios de archivos; los documentos abiertos se volvieron a comprobar.",
   "msg.headlessWindows": "las ventanas nuevas no están disponibles en modo sin interfaz",
   "transfer.sameWindow": "la pestaña ya está en esta ventana",
   "transfer.cannotMove": "esta pestaña no se puede mover ahora",

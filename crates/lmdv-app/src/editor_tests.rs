@@ -2250,3 +2250,23 @@ fn the_app_discovers_a_dictionary_beside_its_data_and_checks_with_it() {
     }
     assert_eq!(state.editor.spell.ranges(tab), Some(spell_ranges(&[(6, 10)]).as_slice()));
 }
+
+#[test]
+fn a_watch_overflow_is_one_notice_and_the_documents_reload() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("overflow.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+
+    assert!(state.apply_file_event(FileEvent::Overflow), "the overflow redraws");
+    let notice = state.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default();
+    assert!(notice.contains("Some file changes were missed"), "OI-178 surfaces it: {notice}");
+
+    // The re-probe events that follow still reload on the normal path.
+    std::fs::write(&path, "two\n").unwrap();
+    assert!(state.apply_file_event(FileEvent::Changed { path: path.clone() }));
+    poll_until(&mut state, "the re-probe reload", |state| {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
+    });
+}

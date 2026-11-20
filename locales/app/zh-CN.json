@@ -608,6 +608,7 @@
   "link.notLocal": "无法打开 {name}：不是本地文件",
   "msg.noWindowHost": "此进程没有窗口宿主",
   "msg.watcherStopped": "文件监视已停止",
+  "msg.watchOverflow": "遗漏了部分文件变更；已重新检查打开的文档。",
   "msg.headlessWindows": "无头工具中无法打开新窗口",
   "transfer.sameWindow": "标签页已在此窗口中",
   "transfer.cannotMove": "此标签页当前无法移动",

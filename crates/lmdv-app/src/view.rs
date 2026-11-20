@@ -209,24 +209,25 @@ fn tab_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
         let pasted =
             current.document().is_some_and(|doc| matches!(*doc.key.borrow(), lmdv_core::DocumentKey::Untitled(_)));
         let can_reopen = state.can_reopen_tab();
-        // First, as in a browser (O-14): the places this window's active tab
-        // can go back or forward to. They act on the window, like the keys.
-        let can_back = state.nav_can_back();
-        let can_forward = state.nav_can_forward();
+        // First, as in a browser (O-14): the places this tab can go back or
+        // forward to. The menu acts on the tab it was opened on; the keys keep
+        // acting on the tab in front (OI-151).
+        let can_back = state.nav_can_back_in(tab);
+        let can_forward = state.nav_can_forward_in(tab);
         menu = menu
             .item(MenuItem::new(lmdv_i18n::t!("ctx.back")).shortcut("Alt+\u{2190}").disabled(!can_back).on_select_tx(
-                |state: &mut WindowState, tx: &mut Tx| {
+                move |state: &mut WindowState, tx: &mut Tx| {
                     state.close_tab_menu();
-                    state.nav_back(tx);
+                    state.nav_back_in_tab(tab, tx);
                 },
             ))
             .item(
                 MenuItem::new(lmdv_i18n::t!("ctx.forward"))
                     .shortcut("Alt+\u{2192}")
                     .disabled(!can_forward)
-                    .on_select_tx(|state: &mut WindowState, tx: &mut Tx| {
+                    .on_select_tx(move |state: &mut WindowState, tx: &mut Tx| {
                         state.close_tab_menu();
-                        state.nav_forward(tx);
+                        state.nav_forward_in_tab(tab, tx);
                     }),
             )
             .separator()

@@ -608,6 +608,7 @@
   "link.notLocal": "Impossibile aprire {name}: non è un file locale",
   "msg.noWindowHost": "questo processo non ha un host per le finestre",
   "msg.watcherStopped": "il controllo dei file si è fermato",
+  "msg.watchOverflow": "Alcune modifiche ai file sono andate perse; i documenti aperti sono stati ricontrollati.",
   "msg.headlessWindows": "le nuove finestre non sono disponibili negli strumenti headless",
   "transfer.sameWindow": "la scheda è già in questa finestra",
   "transfer.cannotMove": "questa scheda non può essere spostata ora",

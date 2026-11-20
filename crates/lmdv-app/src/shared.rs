@@ -818,7 +818,7 @@ impl AppShared {
         }
     }
 
-    fn sync_watch_files(&self) {
+    pub(crate) fn sync_watch_files(&self) {
         if self.watcher.borrow().is_none() {
             return;
         }
@@ -1425,8 +1425,9 @@ pub enum UiMsg {
     /// A merge adopted a newer disk read into `doc`, or found the disk newer
     /// while its buffer is dirty (`disk_changed`) (OI-172).
     DocumentRefreshed { doc: DocumentId, disk_changed: bool },
-    /// Another window's Save as gave `doc` a new path (OI-173): this window's
-    /// Back/Forward places and tab titles follow it.
+    /// Another window's Save as or the watcher gave `doc` a new path
+    /// (OI-173/OI-180): this window's Back/Forward places and tab titles follow
+    /// it.
     DocumentRenamed { doc: DocumentId, from: PathBuf, to: PathBuf },
     /// Focus the window (P4).
     FocusWindow(WindowId),

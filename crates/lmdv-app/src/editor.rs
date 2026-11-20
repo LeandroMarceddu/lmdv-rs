@@ -1700,6 +1700,14 @@ impl WindowState {
             FileEvent::Changed { path } => self.on_file_changed(&path),
             FileEvent::Renamed { from, to } => self.on_file_renamed(&from, &to),
             FileEvent::Removed { path } => self.on_file_removed(&path),
+            // OI-178: window-level, not a document. The watcher already
+            // re-probed every followed document, and its Changed/Removed
+            // events follow this one, so one notice + a watch reinstall.
+            FileEvent::Overflow => {
+                self.shared.sync_watch_files();
+                self.notice(lmdv_i18n::t!("msg.watchOverflow"));
+                true
+            }
         }
     }
 
@@ -2254,13 +2262,7 @@ impl WindowState {
     /// Positions and recents live on [`crate::shared::AppShared`] and were
     /// renamed once by the saving window; a watch is process-wide too.
     fn broadcast_document_rename(&self, doc: DocumentId, from: &Path, to: &Path) {
-        let ids: Vec<lmdv_core::WindowId> =
-            self.shared.windows().iter().map(|entry| entry.id).filter(|id| *id != self.id()).collect();
-        for id in ids {
-            let _ = self
-                .shared
-                .try_post_window(id, UiMsg::DocumentRenamed { doc, from: from.to_path_buf(), to: to.to_path_buf() });
-        }
+        self.broadcast_window_rename(doc, from, to);
     }
 
     /// The draft key of a document: its path, or `pasted:<id>` (E-16/E-39).

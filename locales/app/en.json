@@ -608,6 +608,7 @@
   "link.notLocal": "Cannot open {name}: not a local file",
   "msg.noWindowHost": "this process has no window host",
   "msg.watcherStopped": "the file watcher stopped",
+  "msg.watchOverflow": "Some file changes were missed; open documents were re-checked.",
   "msg.headlessWindows": "new windows are unavailable in headless tooling",
   "transfer.sameWindow": "the tab is already in this window",
   "transfer.cannotMove": "this tab cannot move right now",

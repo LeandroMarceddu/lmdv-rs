@@ -5,10 +5,15 @@
 //! The debounced batch is classified by `stat` after it settles. The tree
 //! watcher watches a folder recursively and reports only listing changes;
 //! content writes are ignored.
+//!
+//! A lost batch — the kernel queue overflowed, or the backend errored — is
+//! reported as [`FileEvent::Overflow`] instead of being dropped, and every
+//! followed document is re-probed in the same batch (OI-178).
 
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -32,6 +37,13 @@ pub enum FileEvent {
     Renamed { from: PathBuf, to: PathBuf },
     /// The path was deleted or moved somewhere that is not a file.
     Removed { path: PathBuf },
+    /// Events were lost: the kernel queue overflowed or the backend errored.
+    ///
+    /// Not tied to a document. It precedes the re-probe of every followed
+    /// document in the same batch, so an owner that reloads on `Changed` and
+    /// `Removed` needs no further recovery; it should surface one notice and
+    /// reinstall the watch with [`DocWatcher::rearm`] (OI-178).
+    Overflow,
 }
 
 /// A change that may affect a folder listing.
@@ -58,11 +70,16 @@ pub enum WatchError {
 ///
 /// The callback runs on the debouncer thread and must be quick; the app should
 /// forward the event to its own channel. It is called once per touched
-/// document per batch.
+/// document per batch, preceded by [`FileEvent::Overflow`] when the batch lost
+/// events.
 pub struct DocWatcher {
     debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
     dirs: Vec<PathBuf>,
     files: Arc<Mutex<Vec<PathBuf>>>,
+    /// Set on the debouncer thread when a batch lost events; the next
+    /// `set_files` or `rearm` reinstalls every folder watch (OI-178).
+    stale: Arc<AtomicBool>,
+    reinstalls: u64,
 }
 
 impl DocWatcher {
@@ -73,28 +90,28 @@ impl DocWatcher {
     {
         let files: Arc<Mutex<Vec<PathBuf>>> = Arc::default();
         let watched = Arc::clone(&files);
+        let stale: Arc<AtomicBool> = Arc::default();
+        let lost = Arc::clone(&stale);
         let mut on_event = on_event;
         let debouncer = new_debouncer(DOC_DEBOUNCE, None, move |result: DebounceEventResult| {
-            let Ok(events) = result else {
-                return;
-            };
             let files = lock(&watched).clone();
-            let mut reported = HashSet::new();
-            for file in files {
-                if !reported.insert(file.clone()) || !touched(&file, &events) {
-                    continue;
-                }
-                on_event(classify(&file, &events));
-            }
+            deliver(&files, &result, &lost, &mut on_event);
         })
         .map_err(WatchError::Create)?;
-        Ok(Self { debouncer, dirs: Vec::new(), files })
+        Ok(Self { debouncer, dirs: Vec::new(), files, stale, reinstalls: 0 })
     }
 
     /// Follows exactly these documents now. Each distinct parent folder is
     /// watched once and non-recursively. A folder that cannot be watched is
     /// returned as an error, while the remaining folders stay watched.
+    ///
+    /// A list that arrives after an overflow reinstalls every folder: the
+    /// overflow can drop the watch itself as well as its events (OI-178).
     pub fn set_files(&mut self, files: &[PathBuf]) -> Result<(), WatchError> {
+        if self.stale.swap(false, Ordering::SeqCst) {
+            self.drop_watches();
+        }
+
         let mut wanted: Vec<PathBuf> = Vec::new();
         for dir in files.iter().filter_map(|file| file.parent()) {
             if !wanted.iter().any(|existing| existing == dir) {
@@ -130,9 +147,53 @@ impl DocWatcher {
         }
     }
 
+    /// Reinstalls every folder watch, dropping and re-adding each descriptor.
+    ///
+    /// Call this after [`FileEvent::Overflow`]: the lost events cannot be
+    /// replayed and some platforms drop the watch along with them. The
+    /// documents themselves were already re-probed by the overflow batch, so
+    /// this only makes sure later writes are seen again. A folder that cannot
+    /// be reinstalled is dropped from [`Self::dirs`] and reported, while the
+    /// rest stay watched; a later `set_files` adds it back.
+    pub fn rearm(&mut self) -> Result<(), WatchError> {
+        self.stale.store(false, Ordering::SeqCst);
+        self.reinstalls = self.reinstalls.saturating_add(1);
+        let dirs = std::mem::take(&mut self.dirs);
+        let mut failed = None;
+        for dir in dirs {
+            let _ = self.debouncer.unwatch(&dir);
+            match self.debouncer.watch(&dir, RecursiveMode::NonRecursive) {
+                Ok(()) => self.dirs.push(dir),
+                Err(source) => {
+                    if failed.is_none() {
+                        failed = Some(WatchError::Watch { path: dir, source });
+                    }
+                }
+            }
+        }
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
     /// The folders watched now.
     pub fn dirs(&self) -> &[PathBuf] {
         &self.dirs
+    }
+
+    /// How many times every folder watch was dropped and installed again, for
+    /// diagnostics.
+    pub fn reinstalls(&self) -> u64 {
+        self.reinstalls
+    }
+
+    /// Drops every folder watch; the next install adds the wanted ones again.
+    fn drop_watches(&mut self) {
+        self.reinstalls = self.reinstalls.saturating_add(1);
+        for dir in std::mem::take(&mut self.dirs) {
+            let _ = self.debouncer.unwatch(&dir);
+        }
     }
 }
 
@@ -219,6 +280,54 @@ fn is_access(kind: &EventKind) -> bool {
     matches!(kind, EventKind::Access(_))
 }
 
+/// One settled batch, decided for the followed documents.
+struct Batch {
+    /// Events were lost: report it and re-probe every document (OI-178).
+    overflow: bool,
+    /// What the owner hears, in order.
+    events: Vec<FileEvent>,
+}
+
+/// Decides one debounced batch.
+///
+/// notify reports a lost inotify queue as a batch carrying the rescan flag and
+/// no path, and reports a backend read failure as an error batch; both mean the
+/// events that would have named the changed documents are gone. Each becomes
+/// one [`FileEvent::Overflow`] followed by a re-probe of every followed
+/// document, so nothing waits for a later event that may never come. Ordinary
+/// batches keep the access filter (OI-168); a re-probe is driven by `stat`, not
+/// by the dropped events.
+fn batch(files: &[PathBuf], result: &DebounceEventResult) -> Batch {
+    let (events, overflow) = match result {
+        Ok(events) => (events.as_slice(), events.iter().any(|event| event.need_rescan())),
+        Err(_) => (&[][..], true),
+    };
+    let mut decided = Batch { overflow, events: Vec::new() };
+    if overflow {
+        decided.events.push(FileEvent::Overflow);
+    }
+    let mut reported = HashSet::new();
+    for file in files {
+        if !reported.insert(file.clone()) || !(overflow || touched(file, events)) {
+            continue;
+        }
+        decided.events.push(classify(file, events));
+    }
+    decided
+}
+
+/// Forwards one decided batch to the owner and marks the watch stale when it
+/// lost events, so the next file list or rearm reinstalls the folders.
+fn deliver(files: &[PathBuf], result: &DebounceEventResult, stale: &AtomicBool, on_event: &mut impl FnMut(FileEvent)) {
+    let decided = batch(files, result);
+    if decided.overflow {
+        stale.store(true, Ordering::SeqCst);
+    }
+    for event in decided.events {
+        on_event(event);
+    }
+}
+
 /// A path still there was changed, whatever the events say: an atomic save
 /// renames a temp file over it, and some editors rename it away and create it
 /// again. A gone path follows a rename chain in the batch; if the final target
@@ -262,7 +371,7 @@ mod tests {
     use std::time::Instant;
 
     use notify::Event;
-    use notify::event::{AccessKind, AccessMode};
+    use notify::event::{AccessKind, AccessMode, Flag};
     use tempfile::TempDir;
 
     use super::*;
@@ -278,6 +387,19 @@ mod tests {
     fn rename(from: &Path, to: &Path) -> DebouncedEvent {
         let kind = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
         DebouncedEvent::new(Event::new(kind).add_path(from.to_path_buf()).add_path(to.to_path_buf()), Instant::now())
+    }
+
+    /// notify's inotify backend turns a queue overflow (`IN_Q_OVERFLOW`) into
+    /// this: an `Other` event with the rescan flag and no path.
+    fn rescan() -> DebouncedEvent {
+        DebouncedEvent::new(Event::new(EventKind::Other).set_flag(Flag::Rescan), Instant::now())
+    }
+
+    fn read_event(path: &Path) -> DebouncedEvent {
+        DebouncedEvent::new(
+            Event::new(EventKind::Access(AccessKind::Read)).add_path(path.to_path_buf()),
+            Instant::now(),
+        )
     }
 
     fn recv_matching(
@@ -464,6 +586,137 @@ mod tests {
         let event = recv_matching(&rx, |event| matches!(event, FileEvent::Removed { .. }), Duration::from_secs(5))
             .expect("a removal");
         assert_eq!(event, FileEvent::Removed { path: renamed });
+    }
+
+    #[test]
+    fn an_overflow_is_reported_once_and_reprobes_every_document() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path();
+        let kept = dir.join("kept.md");
+        let gone = dir.join("gone.md");
+        fs::write(&kept, "x").unwrap();
+
+        let decided = batch(&[kept.clone(), gone.clone(), kept.clone()], &Ok(vec![rescan()]));
+        assert!(decided.overflow, "the rescan flag is an overflow");
+        assert_eq!(
+            decided.events,
+            vec![
+                FileEvent::Overflow,
+                FileEvent::Changed { path: kept.clone() },
+                FileEvent::Removed { path: gone.clone() },
+            ],
+            "one overflow, then every document re-probed once"
+        );
+
+        let errors = vec![notify::Error::new(notify::ErrorKind::Generic("queue overflow".to_owned()))];
+        let decided = batch(std::slice::from_ref(&kept), &Err(errors));
+        assert!(decided.overflow, "a backend error lost events too, and is no longer dropped silently");
+        assert_eq!(decided.events, vec![FileEvent::Overflow, FileEvent::Changed { path: kept }]);
+    }
+
+    #[test]
+    fn ordinary_batches_are_unchanged_after_an_overflow() {
+        let temp = TempDir::new().unwrap();
+        let doc = temp.path().join("doc.md");
+        fs::write(&doc, "x").unwrap();
+
+        let overflow = batch(std::slice::from_ref(&doc), &Ok(vec![rescan()]));
+        assert_eq!(overflow.events.first(), Some(&FileEvent::Overflow));
+
+        let next = batch(std::slice::from_ref(&doc), &Ok(vec![write_event(&doc)]));
+        assert!(!next.overflow, "the overflow is not sticky");
+        assert_eq!(next.events, vec![FileEvent::Changed { path: doc.clone() }], "a normal write is still reported");
+
+        let quiet = batch(std::slice::from_ref(&doc), &Ok(vec![read_event(&doc)]));
+        assert!(quiet.events.is_empty(), "OI-168: a read is still not a change");
+    }
+
+    #[test]
+    fn an_overflow_reaches_the_owner_and_marks_the_watch_stale() {
+        let temp = TempDir::new().unwrap();
+        let doc = temp.path().join("doc.md");
+        fs::write(&doc, "x").unwrap();
+        let stale = AtomicBool::new(false);
+
+        let mut seen = Vec::new();
+        deliver(std::slice::from_ref(&doc), &Ok(vec![rescan()]), &stale, &mut |event| seen.push(event));
+        assert!(stale.load(Ordering::SeqCst), "the next file list reinstalls the folders");
+        assert_eq!(
+            seen,
+            vec![FileEvent::Overflow, FileEvent::Changed { path: doc.clone() }],
+            "the overflow is reported, not dropped, and the document re-probed"
+        );
+
+        // The same seam keeps working normally once the overflow is over.
+        stale.store(false, Ordering::SeqCst);
+        let mut seen = Vec::new();
+        deliver(std::slice::from_ref(&doc), &Ok(vec![write_event(&doc)]), &stale, &mut |event| seen.push(event));
+        assert!(!stale.load(Ordering::SeqCst), "a normal batch does not ask for a reinstall");
+        assert_eq!(seen, vec![FileEvent::Changed { path: doc }]);
+    }
+
+    #[test]
+    fn a_file_list_after_an_overflow_reinstalls_and_later_writes_flow() {
+        let temp = TempDir::new().unwrap();
+        let doc = temp.path().join("doc.md");
+        fs::write(&doc, "one").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = DocWatcher::new(move |event| {
+            let _ = tx.send(event);
+        })
+        .unwrap();
+        watcher.set_files(std::slice::from_ref(&doc)).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        while rx.try_recv().is_ok() {}
+
+        // The debouncer thread decides an overflow and marks the watch stale.
+        deliver(std::slice::from_ref(&doc), &Ok(vec![rescan()]), &watcher.stale, &mut |_| {});
+        assert!(watcher.stale.load(Ordering::SeqCst));
+        watcher.set_files(std::slice::from_ref(&doc)).unwrap();
+        assert_eq!(watcher.reinstalls(), 1, "the list after an overflow drops the watches first");
+        assert!(!watcher.stale.load(Ordering::SeqCst));
+        assert_eq!(watcher.dirs().len(), 1);
+
+        std::thread::sleep(Duration::from_millis(500));
+        while rx.try_recv().is_ok() {}
+        fs::write(&doc, "two").unwrap();
+        let event = recv_matching(
+            &rx,
+            |event| matches!(event, FileEvent::Changed { path } if path == &doc),
+            Duration::from_secs(5),
+        )
+        .expect("a write after the reinstall is still reported");
+        assert_eq!(event, FileEvent::Changed { path: doc });
+    }
+
+    #[test]
+    fn a_rearm_reinstalls_the_watch_and_later_writes_flow() {
+        let temp = TempDir::new().unwrap();
+        let doc = temp.path().join("doc.md");
+        fs::write(&doc, "one").unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = DocWatcher::new(move |event| {
+            let _ = tx.send(event);
+        })
+        .unwrap();
+        watcher.set_files(std::slice::from_ref(&doc)).unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        while rx.try_recv().is_ok() {}
+
+        watcher.rearm().unwrap();
+        assert_eq!(watcher.reinstalls(), 1);
+        assert_eq!(watcher.dirs().len(), 1, "the folder stays watched");
+
+        std::thread::sleep(Duration::from_millis(500));
+        while rx.try_recv().is_ok() {}
+        fs::write(&doc, "two").unwrap();
+        let event = recv_matching(
+            &rx,
+            |event| matches!(event, FileEvent::Changed { path } if path == &doc),
+            Duration::from_secs(5),
+        )
+        .expect("a write after the rearm is still reported");
+        assert_eq!(event, FileEvent::Changed { path: doc });
     }
 
     #[test]

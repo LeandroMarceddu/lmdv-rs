@@ -608,6 +608,7 @@
   "link.notLocal": "Impossible d’ouvrir {name} : ce n’est pas un fichier local",
   "msg.noWindowHost": "ce processus n’a pas d’hôte de fenêtres",
   "msg.watcherStopped": "la surveillance des fichiers s’est arrêtée",
+  "msg.watchOverflow": "Des modifications de fichiers ont été manquées ; les documents ouverts ont été vérifiés à nouveau.",
   "msg.headlessWindows": "les nouvelles fenêtres ne sont pas disponibles en mode sans interface",
   "transfer.sameWindow": "l’onglet est déjà dans cette fenêtre",
   "transfer.cannotMove": "cet onglet ne peut pas être déplacé pour le moment",

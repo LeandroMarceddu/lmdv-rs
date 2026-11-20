@@ -405,6 +405,8 @@ pub struct WindowState {
     pub(crate) restored_docs: BTreeSet<DocumentId>,
     /// This window already wrote its session entry on close/quit.
     pub(crate) session_flushed: bool,
+    /// The session fragment this window last published (OI-151).
+    pub(crate) session_publish: RefCell<crate::session::PublishedSession>,
     next_tab: TabId,
 }
 
@@ -497,6 +499,7 @@ impl WindowState {
             restoring_tabs: false,
             restored_docs: BTreeSet::new(),
             session_flushed: false,
+            session_publish: RefCell::new(crate::session::PublishedSession::default()),
             next_tab: 1,
         };
         state.push_start_tab();
@@ -1316,9 +1319,10 @@ impl WindowState {
             changed = true;
         }
         self.sync_registry();
-        // Session fragments are cheap and in-memory; the store write is what
-        // debounces. A changed tab, mode, anchor or active index schedules one
-        // write 500 ms out (architecture §8.4).
+        // Session fragments are built only when something restorable changed
+        // (OI-151); the store write is what debounces. A changed tab, mode,
+        // anchor or active index schedules one write 500 ms out
+        // (architecture §8.4).
         if self.publish_session() && self.ui.session_due.is_none() {
             let due = now + crate::session::SESSION_DEBOUNCE;
             self.ui.session_due = Some(due);
@@ -1636,8 +1640,8 @@ impl WindowState {
         true
     }
 
-    /// Makes another window's Save as reach this window's Back/Forward places
-    /// and tab titles (OI-173).
+    /// Makes another window's Save as or a watcher-observed rename reach this
+    /// window's Back/Forward places and tab titles (OI-173/OI-180).
     ///
     /// Positions and recents are process-wide and the saving window already
     /// moved them; watches are process-wide too. Only the per-tab places and
@@ -1660,6 +1664,22 @@ impl WindowState {
             changed |= tab.title() != before;
         }
         changed
+    }
+
+    /// Tells every other window that `doc` moved from `from` to `to` (OI-173's
+    /// Save as and OI-180's watcher rename).
+    ///
+    /// Positions, recents and watches are process-wide and the moving window
+    /// already handled them; what is per window is each tab's Back/Forward
+    /// places and the cached title.
+    pub(crate) fn broadcast_window_rename(&self, doc: DocumentId, from: &Path, to: &Path) {
+        let ids: Vec<WindowId> =
+            self.shared.windows().iter().map(|entry| entry.id).filter(|id| *id != self.id).collect();
+        for id in ids {
+            let _ = self
+                .shared
+                .try_post_window(id, UiMsg::DocumentRenamed { doc, from: from.to_path_buf(), to: to.to_path_buf() });
+        }
     }
 
     /// Tells every other window that `doc` adopted a newer disk read, or that

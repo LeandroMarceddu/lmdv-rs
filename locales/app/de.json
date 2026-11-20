@@ -608,6 +608,7 @@
   "link.notLocal": "{name} kann nicht geöffnet werden: keine lokale Datei",
   "msg.noWindowHost": "Dieser Prozess hat keinen Fenster-Host",
   "msg.watcherStopped": "Die Dateiüberwachung wurde beendet",
+  "msg.watchOverflow": "Dateiänderungen wurden verpasst; offene Dokumente wurden erneut geprüft.",
   "msg.headlessWindows": "Neue Fenster sind im Headless-Betrieb nicht verfügbar",
   "transfer.sameWindow": "Die Registerkarte ist bereits in diesem Fenster",
   "transfer.cannotMove": "Diese Registerkarte kann gerade nicht verschoben werden",

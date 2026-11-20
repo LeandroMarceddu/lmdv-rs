@@ -152,8 +152,8 @@ pub(crate) fn seed_placement(shared: &AppShared, id: WindowId, plan: PlacementPl
     );
 }
 
-/// Captures one window's restorable state.
-pub(crate) fn capture_window(state: &WindowState) -> WindowSession {
+/// The window-level facts a fragment is built from, cheaply readable.
+fn session_header(state: &WindowState) -> (Option<StoredPlacement>, bool, SessionWindowKind) {
     let (placement, kind) = {
         let windows = state.shared().windows();
         match windows.get(state.id()) {
@@ -161,19 +161,96 @@ pub(crate) fn capture_window(state: &WindowState) -> WindowSession {
             None => (None, WindowKind::Normal),
         }
     };
-    WindowSession {
-        placement: placement.map(|placement| StoredPlacement {
+    (
+        placement.map(|placement| StoredPlacement {
             x: placement.position.0,
             y: placement.position.1,
             width: i32::try_from(placement.content_size.0).unwrap_or(i32::MAX),
             height: i32::try_from(placement.content_size.1).unwrap_or(i32::MAX),
             maximized: placement.maximized,
         }),
-        maximized: placement.is_some_and(|placement| placement.maximized),
-        kind: stored_window_kind(kind),
+        placement.is_some_and(|placement| placement.maximized),
+        stored_window_kind(kind),
+    )
+}
+
+/// Captures one window's restorable state.
+pub(crate) fn capture_window(state: &WindowState) -> WindowSession {
+    let (placement, maximized, kind) = session_header(state);
+    WindowSession {
+        placement,
+        maximized,
+        kind,
         tabs: state.tabs().iter().map(capture_tab).collect(),
         active: state.active_index(),
         closed: Vec::new(),
+    }
+}
+
+/// Whether a stored tab still describes `tab` (OI-151).
+///
+/// Comparing the restorable facts is a read; [`capture_tab`] clones each
+/// Back/Forward list, so an idle frame must not build a fragment at all.
+fn same_tab(stored: &TabSession, tab: &Tab) -> bool {
+    let source = match (&tab.source, &stored.source) {
+        (crate::window::TabSource::Start, SessionTabSource::Start) => true,
+        (crate::window::TabSource::Document(document), SessionTabSource::File { path }) => {
+            matches!(&*document.key.borrow(), DocumentKey::File(own) if own == path)
+        }
+        (crate::window::TabSource::Document(document), SessionTabSource::Pasted { id, title }) => {
+            matches!(&*document.key.borrow(), DocumentKey::Untitled(paste) if paste.0 == *id)
+                && tab.full_title() == *title
+        }
+        _ => false,
+    };
+    source
+        && stored.anchor.as_ref() == Some(&tab.view.anchor)
+        && stored.line == tab.view.line
+        && stored.anchor_id.is_none()
+        && stored.nav == tab.view.nav
+        && stored.mode == session_mode(tab.view.mode)
+}
+
+fn session_mode(mode: Mode) -> TabMode {
+    match mode {
+        Mode::Viewer => TabMode::Viewer,
+        Mode::Editor => TabMode::Editor,
+    }
+}
+
+/// The fragment this window last published (OI-151).
+///
+/// A frame that changed nothing restorable must not clone every tab's 50-entry
+/// Back/Forward lists again: the cached fragment answers the comparison, and a
+/// real change (tab, place, anchor, mode, active index, window frame) builds
+/// the next one. Closing still captures the latest state (see
+/// [`WindowState::publish_session`] and [`finish_window`]).
+#[derive(Debug, Default)]
+pub(crate) struct PublishedSession {
+    window: Option<WindowSession>,
+    /// Fragments built so far, so a test can prove an idle frame builds none.
+    #[cfg(test)]
+    builds: std::cell::Cell<u64>,
+}
+
+impl PublishedSession {
+    /// How many fragments this window built; `#[cfg(test)]` only.
+    #[cfg(test)]
+    pub(crate) fn builds(&self) -> u64 {
+        self.builds.get()
+    }
+
+    /// Whether `last` still describes `state`.
+    fn matches(&self, state: &WindowState) -> bool {
+        let Some(last) = self.window.as_ref() else { return false };
+        let (placement, maximized, kind) = session_header(state);
+        last.placement == placement
+            && last.maximized == maximized
+            && last.kind == kind
+            && last.active == state.active_index()
+            && last.closed.is_empty()
+            && last.tabs.len() == state.tabs().len()
+            && last.tabs.iter().zip(state.tabs()).all(|(stored, tab)| same_tab(stored, tab))
     }
 }
 
@@ -192,10 +269,7 @@ fn capture_tab(tab: &Tab) -> TabSession {
         line: tab.view.line,
         anchor_id: None,
         nav: tab.view.nav.clone(),
-        mode: match tab.view.mode {
-            Mode::Viewer => TabMode::Viewer,
-            Mode::Editor => TabMode::Editor,
-        },
+        mode: session_mode(tab.view.mode),
     }
 }
 
@@ -454,9 +528,25 @@ pub(crate) fn finish_window(state: &mut WindowState, quit: bool) {
 }
 
 impl WindowState {
-    /// Publishes this window's restorable fragment. True when it changed.
+    /// Publishes this window's restorable fragment, building it only when
+    /// something restorable changed (OI-151). True when the published fragment
+    /// changed.
+    ///
+    /// The comparison reads the fragment already built here; it does not clone
+    /// any tab's history. A last-moment change still reaches the crash snapshot
+    /// because [`finish_window`] and `Drop` call this after capturing the
+    /// position, and the cached fragment is compared against that state too.
     pub(crate) fn publish_session(&self) -> bool {
-        self.shared.publish_session_window(self.id(), capture_window(self))
+        let mut published = self.session_publish.borrow_mut();
+        if published.matches(self) {
+            return false;
+        }
+        let captured = capture_window(self);
+        #[cfg(test)]
+        published.builds.set(published.builds.get() + 1);
+        let changed = self.shared.publish_session_window(self.id(), captured.clone());
+        published.window = Some(captured);
+        changed
     }
 
     /// Drops the factory's initial start page before restored tabs are added.
@@ -1104,5 +1194,71 @@ mod tests {
         assert!(state.tabs().is_empty());
         state.push_start_tab();
         assert_eq!(state.tabs().len(), 1);
+    }
+
+    #[test]
+    fn an_idle_frame_does_not_rebuild_the_published_fragment() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = state(&shared, "window-1");
+        let tab = state.open_synthetic("Note", "# Note\n");
+        assert!(state.publish_session(), "the first publish builds the fragment");
+        let builds = state.session_publish.borrow().builds();
+        for _ in 0..20 {
+            assert!(!state.publish_session(), "nothing restorable changed");
+        }
+        assert_eq!(state.session_publish.borrow().builds(), builds, "an idle frame builds no fragment");
+
+        // A Back/Forward place is restorable: the next publish builds once.
+        if let Some(tab) = state.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+            tab.view.nav.record(lmdv_core::Place::new("pasted:9", lmdv_core::ScrollAnchor::top()));
+        }
+        assert!(state.publish_session());
+        assert_eq!(state.session_publish.borrow().builds(), builds + 1);
+        assert_eq!(shared.session_snapshot(false).windows[0].tabs[0].nav.back[0].path, "pasted:9");
+    }
+
+    #[test]
+    fn a_new_tab_or_a_window_frame_change_republishes_the_session() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = state(&shared, "window-1");
+        // The constructor published the start page; this is the baseline.
+        let _ = state.publish_session();
+        // The first document replaces the start page; the second appends.
+        state.open_synthetic("First", "first\n");
+        assert!(state.publish_session(), "an opened document is restorable");
+        let builds = state.session_publish.borrow().builds();
+        state.open_synthetic("Second", "second\n");
+        assert!(state.publish_session(), "a new tab is restorable");
+        assert_eq!(state.session_publish.borrow().builds(), builds + 1);
+        assert_eq!(shared.session_snapshot(false).windows[0].tabs.len(), 2);
+
+        shared.set_window_placement(
+            state.id(),
+            RunePlacement { position: (40, 60), content_size: (900, 700), ..RunePlacement::default() },
+        );
+        assert!(state.publish_session(), "the native frame is restorable");
+        let stored = shared.session_snapshot(false).windows[0].placement.expect("a stored frame");
+        assert_eq!((stored.x, stored.y, stored.width, stored.height), (40, 60, 900, 700));
+    }
+
+    #[test]
+    fn a_last_moment_change_reaches_the_crash_snapshot() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = state(&shared, "window-1");
+        let tab = state.open_synthetic("Note", "# Note\n");
+        assert!(state.publish_session());
+        // The reader moved and entered edit mode after the last published
+        // fragment; closing must still store both.
+        if let Some(tab) = state.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+            tab.view.anchor = lmdv_core::ScrollAnchor { id: "late".to_owned(), offset: 72.0 };
+            tab.view.mode = Mode::Editor;
+        }
+        finish_window(&mut state, true);
+        let session = shared.session_snapshot(true);
+        assert_eq!(session.windows[0].tabs[0].anchor.as_ref().map(|anchor| anchor.id.as_str()), Some("late"));
+        assert_eq!(session.windows[0].tabs[0].mode, TabMode::Editor);
     }
 }

@@ -546,6 +546,8 @@ fn an_overtaken_move_is_not_committed() {
         origin: Some(second),
         tab: Some(opened),
         doc,
+        follow: true,
+        front: Some(second),
     });
     // Another document came first.
     assert!(state.activate_tab(first));
@@ -660,4 +662,157 @@ fn a_place_key_names_files_and_pasted_text() {
     let key = pasted_key(&state, pasted);
     assert!(key.starts_with("pasted:"), "{key}");
     assert!(!Path::new(&key).is_absolute());
+}
+
+// ---- the tab menu's own tab (O-14/OI-151) --------------------------------
+
+#[test]
+fn a_tab_menu_back_moves_the_background_tabs_own_places() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let first = state.open_synthetic("First", "# First\n");
+    let second = state.open_synthetic("Second", "# Second\n");
+    let key = pasted_key(&state, second);
+    if let Some(tab) = state.tabs.iter_mut().find(|candidate| candidate.id == second) {
+        tab.view.nav.record(Place::new(key, ScrollAnchor { id: "second".to_owned(), offset: 120.0 }));
+        tab.view.anchor = ScrollAnchor { id: "second".to_owned(), offset: 360.0 };
+    }
+    assert!(state.activate_tab(first));
+    assert!(state.nav_can_back_in(second), "the menu reads the tab it was opened on");
+    assert!(!state.nav_can_back(), "the front tab has no place of its own");
+
+    let mut tx = Tx::default();
+    state.nav_back_in_tab(second, &mut tx);
+
+    assert_eq!(state.active_tab().map(|tab| tab.id), Some(first), "the menu never brings its tab forward");
+    let background = state.tab(second).expect("the background tab");
+    assert!(background.view.nav.back.is_empty(), "the place was consumed");
+    assert_eq!(background.view.nav.forward.len(), 1);
+    assert_eq!(background.view.nav.forward[0].pos.offset, 360.0, "the place left is kept for Forward");
+    assert_eq!(background.view.anchor.offset, 120.0, "the tab lands there when it comes forward");
+    assert_eq!(state.tab(first).map(|tab| tab.view.anchor.offset), Some(0.0), "the article did not move");
+    assert!(state.tab(first).expect("the front tab").view.nav.back.is_empty(), "the front tab's history stayed");
+}
+
+#[test]
+fn a_tab_menu_forward_on_a_background_tab_returns_to_its_place() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let first = state.open_synthetic("First", "# First\n");
+    let second = state.open_synthetic("Second", "# Second\n");
+    let key = pasted_key(&state, second);
+    if let Some(tab) = state.tabs.iter_mut().find(|candidate| candidate.id == second) {
+        tab.view.nav.record(Place::new(key, ScrollAnchor { id: "second".to_owned(), offset: 120.0 }));
+        tab.view.anchor = ScrollAnchor { id: "second".to_owned(), offset: 360.0 };
+    }
+    assert!(state.activate_tab(first));
+    let mut tx = Tx::default();
+    state.nav_back_in_tab(second, &mut tx);
+    assert!(state.nav_can_forward_in(second));
+
+    let mut tx = Tx::default();
+    state.nav_forward_in_tab(second, &mut tx);
+    assert_eq!(state.active_tab().map(|tab| tab.id), Some(first), "still not brought forward");
+    let background = state.tab(second).expect("the background tab");
+    assert_eq!(background.view.nav.back.len(), 1);
+    assert!(background.view.nav.forward.is_empty());
+    assert_eq!(background.view.anchor.offset, 360.0, "Forward put the place back");
+}
+
+#[test]
+fn a_background_tab_menu_back_to_another_document_brings_that_tab_forward() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let first = state.open_synthetic("First", "# First\n");
+    let second = state.open_synthetic("Second", "# Second\n");
+    let third = state.open_synthetic("Third", "# Third\n");
+    let first_key = pasted_key(&state, first);
+    if let Some(tab) = state.tabs.iter_mut().find(|candidate| candidate.id == second) {
+        tab.view.nav.record(Place::new(first_key, ScrollAnchor { id: "first".to_owned(), offset: 36.0 }));
+        tab.view.anchor = ScrollAnchor { id: "second".to_owned(), offset: 200.0 };
+    }
+    assert!(state.activate_tab(third));
+
+    let mut tx = Tx::default();
+    state.nav_back_in_tab(second, &mut tx);
+
+    assert_eq!(state.active_tab().map(|tab| tab.id), Some(first), "the destination's own tab comes forward");
+    assert_eq!(state.tab(first).map(|tab| tab.view.anchor.offset), Some(36.0), "the destination place is restored");
+    let background = state.tab(second).expect("the menu tab");
+    assert!(background.view.nav.back.is_empty(), "the move still belongs to the menu tab");
+    assert_eq!(background.view.nav.forward.len(), 1);
+    assert_eq!(background.view.nav.forward[0].pos.offset, 200.0);
+    assert!(nav_of(&state, third).back.is_empty(), "the front tab kept its own history");
+}
+
+/// OI-151's residual edge: a place is resolved only against this window's
+/// tabs. A pasted document shown in another window has no tab here, so Back
+/// drops the place instead of opening the shared document.
+#[test]
+fn a_pasted_place_shown_in_another_window_is_dropped_instead_of_opened() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let mut first = WindowState::new_keyed(shared.clone(), shared.allocate_window(), "main".to_owned());
+    let pasted = first.open_synthetic("Pasted", "# P\n");
+    let document = first.tab(pasted).and_then(Tab::document).cloned().expect("a document");
+    let place_key = pasted_key(&first, pasted);
+
+    let mut second = WindowState::new_keyed(shared.clone(), shared.allocate_window(), "window-2".to_owned());
+    let other = second.attach_document(document);
+    assert_eq!(first.close_tab(pasted), crate::window::CloseOutcome::Closed, "the first window stops showing it");
+
+    let note = first.open_synthetic("Note", "# N\n");
+    if let Some(tab) = first.tabs.iter_mut().find(|candidate| candidate.id == note) {
+        tab.view.nav.record(Place::new(place_key, ScrollAnchor::top()));
+    }
+    let mut tx = Tx::default();
+    first.nav_back(&mut tx);
+    assert_eq!(first.active_tab().map(|tab| tab.id), Some(note), "the window stays on its own tab");
+    assert!(nav_of(&first, note).back.is_empty(), "the place is dropped, not carried across windows");
+    assert!(second.tab(other).is_some(), "the other window kept the shared pasted document");
+}
+
+#[test]
+fn a_watcher_rename_reaches_every_window() {
+    let temp = TempDir::new().unwrap();
+    let shared = test_support::shared(&temp);
+    let from = temp.path().join("before.md");
+    let to = temp.path().join("after.md");
+    std::fs::write(&from, "# Before\n\nbody\n").unwrap();
+
+    let mut first = WindowState::new_keyed(shared.clone(), shared.allocate_window(), "main".to_owned());
+    let first_tab = first.open_path(from.clone());
+    poll_until(&mut first, "the load", ready);
+
+    // The second window shows the same document; its Back list holds the old
+    // spelling. It never finds the document under `from` after the first
+    // window rekeys it.
+    let mut second = WindowState::new_keyed(shared.clone(), shared.allocate_window(), "window-2".to_owned());
+    let second_tab = second.open_path(from.clone());
+    if let Some(tab) = second.tabs.iter_mut().find(|candidate| candidate.id == second_tab) {
+        tab.view.nav.record(Place::new(from.to_string_lossy(), ScrollAnchor::top()));
+    }
+    assert_eq!(second.tab(second_tab).map(Tab::full_title).as_deref(), Some("before.md"));
+
+    // A third window does not show the file at all: only its Back list names
+    // the old spelling. The broadcast must reach it too.
+    let mut third = WindowState::new_keyed(shared.clone(), shared.allocate_window(), "window-3".to_owned());
+    let other = third.open_synthetic("Other", "# Other\n");
+    if let Some(tab) = third.tabs.iter_mut().find(|candidate| candidate.id == other) {
+        tab.view.nav.record(Place::new(from.to_string_lossy(), ScrollAnchor::top()));
+    }
+
+    std::fs::rename(&from, &to).unwrap();
+    assert!(first.apply_file_event(lmdv_io::watch::FileEvent::Renamed { from: from.clone(), to: to.clone() }));
+
+    let mut tx = Tx::default();
+    assert!(second.poll(0.0, &mut tx), "the broadcast changes the second window");
+    let renamed = second.tab(second_tab).expect("the tab");
+    assert_eq!(renamed.view.nav.back[0].path, to.to_string_lossy(), "the place follows the file");
+    assert_eq!(renamed.full_title(), "after.md", "the title follows too");
+    assert_eq!(first.tab(first_tab).map(Tab::full_title).as_deref(), Some("after.md"));
+
+    let mut tx = Tx::default();
+    assert!(third.poll(0.0, &mut tx), "a window that only remembers the old path is rekeyed too");
+    assert_eq!(nav_of(&third, other).back[0].path, to.to_string_lossy());
 }
