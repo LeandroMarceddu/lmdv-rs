@@ -329,18 +329,7 @@ impl JobHub {
         let job = self.allocate();
         let worker_mailbox = mailbox.clone();
         let spawned = rune::task::spawn("lmdv-parse", move || {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                lmdv_md::parse_with_revision(&source, revision)
-            }))
-            .map(Arc::new)
-            .map_err(|panic| {
-                let why = panic
-                    .downcast_ref::<&str>()
-                    .copied()
-                    .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-                    .unwrap_or("no message");
-                format!("the Markdown parser failed: {why}")
-            });
+            let result = crate::export_io::parse_snapshot(&source, revision);
             worker_mailbox.post(JobMsg::Parsed { doc, revision, result });
         });
         if let Err(error) = spawned {

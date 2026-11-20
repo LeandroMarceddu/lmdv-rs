@@ -12,16 +12,25 @@
 //! canonicalized (X-15). Network and `data:` sources never reach the filesystem.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use lmdv_export::{AssetResolver, DocxOptions, ExportDoc, ExportedAsset, PdfOptions, RichOptions, export_rich_html};
 use lmdv_io::PathPolicy;
+use lmdv_md::MdDoc;
 
-use crate::share::{ExportFormat, ExportOutcome, ExportSpec, pdf_fonts};
+use crate::share::{ExportFormat, ExportOutcome, ExportSpec, export_title_text, pdf_fonts};
 
 /// Builds the export model once and writes the chosen format off the UI thread.
+///
+/// The model is the one the UI handed over when it is already at the snapshot's
+/// revision; otherwise this worker parses the snapshot itself, so a job started
+/// during the 120 ms preview debounce exports the edited text (OI-103).
 pub(crate) fn run_export(spec: &ExportSpec) -> Result<ExportOutcome, String> {
     let assets = ExportAssets::for_source(spec.options.source_path.as_deref());
-    let doc = ExportDoc::from_md(&spec.model, &spec.options, &assets).map_err(|error| error.to_string())?;
+    let model = export_model("export", &spec.source, spec.revision, spec.model.as_ref())?;
+    let mut options = spec.options.clone();
+    options.title = Some(export_title_text(&model, &spec.title_base));
+    let doc = ExportDoc::from_md(&model, &options, &assets).map_err(|error| error.to_string())?;
     let (bytes, font_note) = match spec.format {
         ExportFormat::Html => (doc.to_html().map_err(|error| error.to_string())?.into_bytes(), None),
         ExportFormat::Docx => (doc.to_docx(&DocxOptions::default()).map_err(|error| error.to_string())?, None),
@@ -48,19 +57,49 @@ pub(crate) fn run_export(spec: &ExportSpec) -> Result<ExportOutcome, String> {
 
 /// Builds the whole-document rich clipboard fragment off the UI thread.
 ///
-/// The plain form is the Markdown source captured on the UI thread; the HTML
+/// The plain form is the Markdown snapshot captured on the UI thread; the HTML
 /// is the inline-styled export model, resolved through the same asset policy as
-/// the file exports.
+/// the file exports. A stale model is replaced by a parse of the snapshot, so
+/// the copy and its plain form always describe one revision (OI-103).
 pub(crate) fn run_rich_copy(spec: &crate::share::RichCopySpec) -> Result<crate::share::RichCopy, String> {
     let assets = ExportAssets::for_source(spec.options.source_path.as_deref());
-    let doc = ExportDoc::from_md(&spec.model, &spec.options, &assets).map_err(|error| error.to_string())?;
+    let model = export_model("copy", &spec.source, spec.revision, spec.model.as_ref())?;
+    let mut options = spec.options.clone();
+    options.title = Some(export_title_text(&model, &spec.title_base));
+    let doc = ExportDoc::from_md(&model, &options, &assets).map_err(|error| error.to_string())?;
     let options = RichOptions {
         lang: spec.options.lang.clone(),
         source_path: spec.options.source_path.clone(),
         title: Some(doc.title.clone()),
     };
     let html = export_rich_html(&doc, &options);
-    Ok(crate::share::RichCopy { markdown: spec.markdown.clone(), html })
+    Ok(crate::share::RichCopy { markdown: spec.source.to_string(), html })
+}
+
+/// Chooses the model a worker exports: an already current parse, else one made
+/// from the snapshot at its revision.
+fn export_model(what: &str, source: &str, revision: u64, model: Option<&Arc<MdDoc>>) -> Result<Arc<MdDoc>, String> {
+    if let Some(model) = model.filter(|model| model.revision == revision) {
+        return Ok(model.clone());
+    }
+    parse_snapshot(source, revision).map_err(|error| format!("the {what} could not parse the document: {error}"))
+}
+
+/// Parses `source` at `revision`, catching a parser panic like the parse job.
+///
+/// The parse workers and both Share workers use this one implementation, so a
+/// malformed document never takes a worker (or the process) down (M-34).
+pub(crate) fn parse_snapshot(source: &str, revision: u64) -> Result<Arc<MdDoc>, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lmdv_md::parse_with_revision(source, revision)))
+        .map(Arc::new)
+        .map_err(|panic| {
+            let why = panic
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("no message");
+            format!("the Markdown parser failed: {why}")
+        })
 }
 
 /// Writes `bytes` to `path` atomically. The parent folder must exist; a target

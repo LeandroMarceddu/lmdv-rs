@@ -13,11 +13,18 @@
 //! performs the clipboard write, so the job never touches the clipboard and no
 //! handler touches the filesystem.
 //!
-//! Export is one background job per request. The UI hands it an `Arc<MdDoc>`
-//! snapshot, the format and the destination; the worker (`export_io`) builds
+//! Export is one background job per request. The UI flushes the active editor,
+//! copies the shared buffer's source and hands the worker (`export_io`) that
+//! snapshot with the document's revision. The worker reuses a parse already at
+//! that revision or parses the snapshot itself, then builds
 //! `ExportDoc::from_md` exactly once, writes the file atomically and posts the
-//! result back. Nothing here reads the reader's theme, size, font or column
-//! width: the export pipeline is separate (ADR-015, X-10).
+//! result back (OI-103). Nothing here reads the reader's theme, size, font or
+//! column width: the export pipeline is separate (ADR-015, X-10).
+//!
+//! While a job runs, the exporting document's tab is pinned: activation,
+//! reordering and closing it are refused until the completion or failure
+//! clears `ShareState::in_flight` (OI-105). The job still owns a snapshot, so
+//! the worker never depends on the tab staying put.
 //!
 //! The UI only stores paths. File access is confined to the worker: pictures go
 //! through [`lmdv_io::PathPolicy`] before their bytes are read, and the
@@ -29,7 +36,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use lmdv_core::{Document, DocumentId, JobId};
+use lmdv_core::{DocStatus, Document, DocumentId, JobId};
 use lmdv_export::{ExportOptions, PdfFont};
 use lmdv_md::MdDoc;
 use rune::{ClipboardContent, FileDialogOptions, Tx};
@@ -139,12 +146,19 @@ pub struct PdfExport {
 pub struct RichCopySpec {
     /// The document the snapshot came from, for the completion check.
     pub doc: DocumentId,
-    /// The parsed model, never the reader's appearance.
-    pub model: Arc<MdDoc>,
+    /// The source the copy must describe, taken after the editor flush.
+    pub source: Arc<str>,
+    /// The buffer revision `source` came from.
+    pub revision: u64,
+    /// A parse already at `revision`, when the reader or the cache had one.
+    ///
+    /// The worker parses `source` when this is missing or older, so a copy
+    /// started inside the preview debounce is never stale (OI-103).
+    pub model: Option<Arc<MdDoc>>,
+    /// The title fallback when the source has no level-1 heading.
+    pub title_base: String,
     /// Title, language, source path and content flags.
     pub options: ExportOptions,
-    /// The document's Markdown source, the clipboard's plain-text form.
-    pub markdown: String,
 }
 
 /// A finished rich copy: the HTML fragment and its plain fallback.
@@ -166,13 +180,22 @@ pub struct RichCopyJob {
 }
 
 /// Everything one export job needs. It is built on the UI thread from a
-/// snapshot and moved to the worker.
+/// snapshot taken after the editor flush and moved to the worker.
 #[derive(Clone, Debug)]
 pub struct ExportSpec {
     /// The document the snapshot came from, for the completion check.
     pub doc: DocumentId,
-    /// The parsed model, never the reader's appearance.
-    pub model: Arc<MdDoc>,
+    /// The source to export, taken after the active editor was flushed.
+    pub source: Arc<str>,
+    /// The buffer revision `source` came from.
+    pub revision: u64,
+    /// A parse already at `revision`, when the reader or the cache had one.
+    ///
+    /// The worker parses `source` when this is missing or older, so an export
+    /// started inside the preview debounce is never stale (OI-103).
+    pub model: Option<Arc<MdDoc>>,
+    /// The title fallback when the source has no level-1 heading.
+    pub title_base: String,
     /// Title, language, source path and content flags.
     pub options: ExportOptions,
     /// Which writer to run.
@@ -218,7 +241,8 @@ pub struct ExportJob {
 pub struct ShareState {
     /// The menu is open under the Share button.
     pub menu_open: bool,
-    /// The export in flight; one at a time (X-05).
+    /// The export in flight; one at a time (X-05). Its document's tab stays
+    /// pinned to the front until the job ends (OI-105).
     pub in_flight: Option<ExportJob>,
     /// The rich copy in flight; one at a time.
     pub copy_in_flight: Option<RichCopyJob>,
@@ -324,6 +348,11 @@ impl WindowState {
 
     /// Starts the export job for the active document. `path` may not exist; its
     /// parent must (X-15).
+    ///
+    /// The active editor is flushed first, then the shared buffer is snapshotted
+    /// with its revision. A parse already at that revision rides along; otherwise
+    /// the worker parses the snapshot itself, so an edit typed just before Share
+    /// (inside the 120 ms preview debounce) is exported (OI-103).
     pub(crate) fn start_export(
         &mut self,
         format: ExportFormat,
@@ -335,27 +364,38 @@ impl WindowState {
             self.notice(lmdv_i18n::t!("msg.exportBusy"));
             return;
         }
-        let Some(tab) = self.active_tab() else { return };
-        let Some(document) = tab.document().cloned() else { return };
-        let Some(model) = tab.view.reader.clone() else {
+        let Some(document) = self.active_tab().and_then(|tab| tab.document()).cloned() else { return };
+        if !matches!(*document.status.borrow(), DocStatus::Ready | DocStatus::Gone) {
             self.notice(lmdv_i18n::t!("msg.exportNotReady"));
             return;
-        };
-        let title = {
-            let title = document.title.borrow().clone();
-            let title = title.trim().to_owned();
-            (!title.is_empty()).then_some(title)
-        };
-        let title = export_title(&document, &model).or(title);
+        }
+        self.flush_export_text();
+        let revision = document.revision();
+        let source = document.snapshot();
+        let model = self.parsed_for_export(document.id, revision);
+        let title_base = export_base(&document);
+        let title =
+            model.as_ref().and_then(|model| export_title(&document, model)).unwrap_or_else(|| title_base.clone());
         let options = ExportOptions {
-            title,
+            title: Some(title),
             lang: lmdv_i18n::locale_id().to_owned(),
             include_toc: false,
             math: true,
             front_matter: false,
             source_path: document.key.borrow().path().map(Path::to_path_buf),
         };
-        let spec = ExportSpec { doc: document.id, model, options, format, pdf, path, open_viewer };
+        let spec = ExportSpec {
+            doc: document.id,
+            source,
+            revision,
+            model,
+            title_base,
+            options,
+            format,
+            pdf,
+            path,
+            open_viewer,
+        };
         let job = self.shared().jobs().export(self.worker().clone(), spec);
         self.share.flash_until = None;
         self.share.flash_armed = false;
@@ -364,38 +404,67 @@ impl WindowState {
 
     /// Starts the rich-copy job for the active document (X-02). The copy is
     /// always the whole document; selection copy is X-03.
+    ///
+    /// Like an export it flushes and snapshots the current revision first, so the
+    /// clipboard describes the buffer the user sees, never the last parsed model
+    /// (OI-103).
     pub(crate) fn start_rich_copy(&mut self) {
         if self.share.copy_busy() {
             self.notice(lmdv_i18n::t!("msg.copyBusy"));
             return;
         }
-        let Some(tab) = self.active_tab() else { return };
-        let Some(document) = tab.document().cloned() else { return };
-        let Some(model) = tab.view.reader.clone() else {
+        let Some(document) = self.active_tab().and_then(|tab| tab.document()).cloned() else { return };
+        if !matches!(*document.status.borrow(), DocStatus::Ready | DocStatus::Gone) {
             self.notice(lmdv_i18n::t!("msg.copyNotReady"));
             return;
-        };
-        let title = {
-            let title = document.title.borrow().clone();
-            let title = title.trim().to_owned();
-            (!title.is_empty()).then_some(title)
-        };
+        }
+        self.flush_export_text();
+        let revision = document.revision();
+        // Unsaved edits live in the shared source buffer, so the plain form is
+        // the Markdown the user currently sees, not the last saved file.
+        let source = document.snapshot();
+        let model = self.parsed_for_export(document.id, revision);
+        let title_base = export_base(&document);
         let options = ExportOptions {
-            title: export_title(&document, &model).or(title),
+            title: Some(title_base.clone()),
             lang: lmdv_i18n::locale_id().to_owned(),
             include_toc: false,
             math: true,
             front_matter: false,
             source_path: document.key.borrow().path().map(Path::to_path_buf),
         };
-        // Unsaved edits live in the shared source buffer, so the plain form is
-        // the Markdown the user currently sees, not the last saved file.
-        let markdown = document.text().text().to_owned();
-        let spec = RichCopySpec { doc: document.id, model, options, markdown };
+        let spec = RichCopySpec { doc: document.id, source, revision, model, title_base, options };
         self.share.flash_until = None;
         self.share.flash_armed = false;
         let job = self.shared().jobs().copy_rich(self.worker().clone(), spec);
         self.share.copy_in_flight = Some(RichCopyJob { job, doc: document.id });
+    }
+
+    /// Commits an active editor's field text into the shared buffer when the
+    /// two differ. Every input path already calls `editor_changed`, so this is a
+    /// belt-and-braces flush for a key that lands in the same frame as Share
+    /// (OI-103); a viewer tab has no editor and needs nothing.
+    fn flush_export_text(&mut self) {
+        let Some(stale) = self.active_tab().and_then(|tab| {
+            let editor = tab.view.editor.as_ref()?;
+            let document = tab.document()?;
+            Some(editor.text() != document.text().text())
+        }) else {
+            return;
+        };
+        if stale {
+            self.editor_changed();
+        }
+    }
+
+    /// The parse a job may hand to a worker: the active tab's model when it is
+    /// already at `revision`, else the shared cache's, else `None` so the
+    /// worker parses the snapshot.
+    fn parsed_for_export(&self, doc: DocumentId, revision: u64) -> Option<Arc<MdDoc>> {
+        let reader = self.active_tab().and_then(|tab| tab.view.reader.clone());
+        reader
+            .filter(|model| model.revision == revision)
+            .or_else(|| self.shared().parsed(doc, revision).and_then(|parsed| parsed.ok()))
     }
 
     /// Handles a rich-copy completion: writes both clipboard forms from the UI
@@ -510,6 +579,32 @@ impl WindowState {
         }
         changed
     }
+
+    /// The document an export in flight pins to the front of this window
+    /// (OI-105). `None` when no export runs.
+    pub fn export_pinned_document(&self) -> Option<DocumentId> {
+        self.share.in_flight.as_ref().map(|job| job.doc)
+    }
+
+    /// Whether an export in flight keeps the tab showing `doc` in place.
+    pub fn export_pins(&self, doc: DocumentId) -> bool {
+        self.export_pinned_document() == Some(doc)
+    }
+
+    /// Refuses a tab operation that would leave an exporting document and
+    /// explains why. Returns `true` when the caller must stop (OI-105).
+    ///
+    /// The job owns a snapshot, so the refusal is about the promised UI state,
+    /// not about the worker's data. The completion or failure clears
+    /// `ShareState::in_flight` and every operation works again.
+    pub(crate) fn export_holds_tab(&mut self) -> bool {
+        if self.share.in_flight.is_some() {
+            self.notice(lmdv_i18n::t!("msg.exportBusy"));
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// The PDF settings for a print/export, including the localized medium date.
@@ -523,6 +618,14 @@ pub(crate) fn pdf_export(state: &WindowState) -> PdfExport {
 /// The title an export uses: the first level-1 heading, else the source stem or
 /// pasted title (X-14). Returns `None` only when the caller has no title at all.
 pub fn export_title(document: &Document, model: &MdDoc) -> Option<String> {
+    Some(export_title_text(model, &export_base(document)))
+}
+
+/// [`export_title`] from an already parsed model and a prepared fallback.
+///
+/// The export worker calls this after it has chosen the model, so the title and
+/// the body always come from the same revision (OI-103).
+pub(crate) fn export_title_text(model: &MdDoc, base: &str) -> String {
     model
         .headings
         .iter()
@@ -530,7 +633,7 @@ pub fn export_title(document: &Document, model: &MdDoc) -> Option<String> {
         .map(|heading| heading.text.trim())
         .filter(|text| !text.is_empty())
         .map(str::to_owned)
-        .or_else(|| Some(export_base(document)))
+        .unwrap_or_else(|| base.to_owned())
 }
 
 /// The name an export starts with: the source stem, else the pasted title made

@@ -266,6 +266,10 @@ impl WindowState {
         if self.editor.save_texts.contains_key(&document.id) {
             return false;
         }
+        // OI-105: a document being exported cannot move to another window.
+        if self.export_pins(document.id) {
+            return false;
+        }
         if self.transfer.pending.values().any(|pending| pending.doc == document.id) {
             return false;
         }

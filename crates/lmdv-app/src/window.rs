@@ -306,6 +306,9 @@ pub enum CloseOutcome {
     WindowClose,
     /// No tab with that id exists.
     NotFound,
+    /// An export in flight pins this document's tab, so the close was refused
+    /// (OI-105).
+    Blocked,
 }
 
 /// The application state of one window.
@@ -565,12 +568,18 @@ impl WindowState {
     /// Applies a launch in this window: open the file and its pending line.
     ///
     /// A launch without a file only brings the window forward; the start page
-    /// stays as it is.
+    /// stays as it is. An export can leave the new tab in the background
+    /// (OI-105), so the line target goes to the tab that was opened rather than
+    /// to whichever tab is in front.
     pub fn open_launch(&mut self, launch: &Launch) {
         let Some(path) = launch.path.clone() else { return };
-        self.open_path(path);
+        let tab = self.open_path(path);
         if let Some(line) = launch.line {
-            self.set_pending_line(line);
+            if self.active_tab().map(|active| active.id) == Some(tab) {
+                self.set_pending_line(line);
+            } else if let Some(tab) = self.tabs.iter_mut().find(|candidate| candidate.id == tab) {
+                tab.view.line = Some(line.max(1));
+            }
         }
     }
 
@@ -703,20 +712,31 @@ impl WindowState {
     }
 
     /// [`Self::new_start_tab`] at `at`, or at the end when it is gone.
+    ///
+    /// While an export pins a document, the new start page is inserted in the
+    /// background: the exporting tab stays front (OI-105).
     fn insert_start_tab(&mut self, at: Option<usize>) -> TabId {
-        self.flush_active_draft();
-        self.capture_active_position();
-        self.save_outline_filter();
-        self.lightbox = None;
+        let pinned = self.export_pinned_document().and_then(|doc| self.index_of_document(doc));
+        if pinned.is_none() {
+            self.flush_active_draft();
+            self.capture_active_position();
+            self.save_outline_filter();
+            self.lightbox = None;
+        }
         let id = self.allocate_tab();
         let index = at.unwrap_or(self.tabs.len()).min(self.tabs.len());
         self.tabs.insert(index, Tab::start(id));
-        self.active = index;
-        self.note_active_tab();
-        self.sync_editor_panes();
-        self.begin_restore(&ScrollAnchor::top());
-        self.load_outline_filter();
-        self.sync_outline();
+        match pinned {
+            Some(active) => self.active = if index <= active { active + 1 } else { active },
+            None => {
+                self.active = index;
+                self.note_active_tab();
+                self.sync_editor_panes();
+                self.begin_restore(&ScrollAnchor::top());
+                self.load_outline_filter();
+                self.sync_outline();
+            }
+        }
         id
     }
 
@@ -841,9 +861,14 @@ impl WindowState {
         }
         let tab_id = tab.id;
         let anchor = tab.view.anchor.clone();
-        let replacing_start =
-            index.is_none() && !self.restoring_tabs && self.tabs.get(self.active).is_some_and(Tab::is_start);
-        if !replacing_start {
+        // OI-105: an export keeps its document front, so an opened tab joins the
+        // strip in the background until the job ends.
+        let pinned = self.export_pinned_document().and_then(|doc| self.index_of_document(doc));
+        let replacing_start = pinned.is_none()
+            && index.is_none()
+            && !self.restoring_tabs
+            && self.tabs.get(self.active).is_some_and(Tab::is_start);
+        if !replacing_start && pinned.is_none() {
             self.capture_active_position();
             self.save_outline_filter();
         }
@@ -852,25 +877,38 @@ impl WindowState {
         } else if let Some(index) = index {
             let index = index.min(self.tabs.len());
             self.tabs.insert(index, tab);
-            self.active = index;
+            self.active = match pinned {
+                Some(active) => {
+                    if index <= active {
+                        active + 1
+                    } else {
+                        active
+                    }
+                }
+                None => index,
+            };
         } else {
             self.tabs.push(tab);
-            self.active = self.tabs.len().saturating_sub(1);
+            if pinned.is_none() {
+                self.active = self.tabs.len().saturating_sub(1);
+            }
         }
-        self.note_active_tab();
-        self.sync_editor_panes();
         doc.subscribers.borrow_mut().insert(self.id);
-        self.begin_restore(&anchor);
-        self.load_outline_filter();
-        self.sync_outline();
         if let Some(path) = doc.key.borrow().path().map(Path::to_path_buf) {
             self.shared.watch_path(&path);
         }
-        // A new tab in front is a tab switch: the table preview and the media
-        // preview belonged to the tab that was showing (P6-T, V-01).
-        self.tables.preview = None;
-        self.tables.target = None;
-        self.lightbox = None;
+        if pinned.is_none() {
+            self.note_active_tab();
+            self.sync_editor_panes();
+            self.begin_restore(&anchor);
+            self.load_outline_filter();
+            self.sync_outline();
+            // A new tab in front is a tab switch: the table preview and the media
+            // preview belonged to the tab that was showing (P6-T, V-01).
+            self.tables.preview = None;
+            self.tables.target = None;
+            self.lightbox = None;
+        }
         if self.shared.docs().get(doc.id).is_some_and(|document| {
             matches!(*document.status.borrow(), DocStatus::Ready) && document.key.borrow().path().is_some()
         }) {
@@ -931,6 +969,13 @@ impl WindowState {
         if index == self.active {
             return true;
         }
+        // OI-105: an export pins the document it snapshotted to the front until
+        // the job ends. Switching to another tab of the same document is fine.
+        let leaving = self.active_tab().and_then(Tab::document_id);
+        if leaving.is_some_and(|doc| self.export_pins(doc)) && self.tabs[index].document_id() != leaving {
+            self.export_holds_tab();
+            return false;
+        }
         self.flush_active_draft();
         self.capture_active_position();
         self.save_outline_filter();
@@ -990,6 +1035,11 @@ impl WindowState {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
             return CloseOutcome::NotFound;
         };
+        // OI-105: the exporting document stays in the strip until its job ends.
+        if self.tabs[index].document_id().is_some_and(|doc| self.export_pins(doc)) {
+            self.export_holds_tab();
+            return CloseOutcome::Blocked;
+        }
         // A Back/Forward move that opened this tab has nowhere to land.
         self.cancel_travel_for(id);
         if self.tables.preview.as_ref().is_some_and(|preview| preview.tab == id) {
@@ -1056,6 +1106,12 @@ impl WindowState {
     /// Closes the tab, asking first when it is the last view of a dirty
     /// document (E-13/T-05); a lone start page asks the window to close.
     pub fn request_close_tab(&mut self, id: TabId) {
+        // OI-105: no save prompt or close while the exporting document's job is
+        // still running; the completion clears the pin.
+        if self.tab(id).and_then(Tab::document_id).is_some_and(|doc| self.export_pins(doc)) {
+            self.export_holds_tab();
+            return;
+        }
         if self.guard_close_tab(id) {
             return;
         }
@@ -1095,6 +1151,12 @@ impl WindowState {
         if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
             return;
         }
+        // OI-105: the exporting document's tab stays at its slot until the job
+        // ends. Moving another tab is allowed.
+        if self.tabs[from].document_id().is_some_and(|doc| self.export_pins(doc)) {
+            self.export_holds_tab();
+            return;
+        }
         let active_id = self.active_tab().map(|tab| tab.id);
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
@@ -1110,6 +1172,12 @@ impl WindowState {
     /// at that end), so the caller knows whether to reveal it again.
     pub fn move_active_tab(&mut self, direction: i32) -> bool {
         if direction == 0 || self.tabs.len() < 2 {
+            return false;
+        }
+        // OI-105: an export pins the front document; the move is refused rather
+        // than reported as a successful reveal.
+        if self.active_tab().and_then(Tab::document_id).is_some_and(|doc| self.export_pins(doc)) {
+            self.export_holds_tab();
             return false;
         }
         let to = if direction < 0 {

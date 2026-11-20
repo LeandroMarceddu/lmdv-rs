@@ -10,7 +10,7 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::commands::lookup_command;
-use crate::share::{PdfExport, RichCopyJob, SHARE_ITEMS, export_title, pdf_export};
+use crate::share::{ExportJob, PdfExport, RichCopyJob, SHARE_ITEMS, export_title, pdf_export};
 use crate::test_support;
 use crate::window::{WindowState, title_for_path};
 
@@ -489,6 +489,146 @@ fn a_failed_rich_copy_shows_an_error_notice_and_no_flash() {
         ),
         "a duplicate completion changes nothing"
     );
+}
+
+#[test]
+fn an_edit_typed_just_before_share_is_exported() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("notes", "# First\n\nOld body.\n");
+    wait_for_reader(&mut state);
+    let mut tx = Tx::default();
+    assert!(state.enter_editor(None, &mut tx), "edit mode");
+    // Type at the end and do not let the 120 ms preview debounce run: the
+    // reader still holds the model parsed before the edit (OI-103).
+    let end = state.active_editor_edit().text.len();
+    state.active_editor_edit().set_caret(end);
+    state.active_editor_edit().insert("\n\nEdited just before Share.\n");
+    let document = state.active_tab().and_then(|tab| tab.document()).cloned().expect("the document");
+    assert!(!document.text().text().contains("Edited just before Share."), "the field text is not in the buffer yet");
+    let stale = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("the pre-edit model");
+    assert!(!stale.source.contains("Edited just before Share."), "the reader is still on the old model");
+    let target = export_target(&temp, "fresh.html");
+
+    state.start_export(ExportFormat::Html, target.clone(), None, false);
+    wait_for_export(&mut state);
+
+    let html = std::fs::read_to_string(&target).expect("the exported HTML");
+    assert!(html.contains("Edited just before Share."), "the export parsed the current revision: {html}");
+    assert!(html.contains("Old body."), "the older text is still there");
+}
+
+#[test]
+fn a_rich_copy_takes_a_revision_typed_just_before_it() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Notes\n\nOriginal.\n");
+    wait_for_reader(&mut state);
+    let mut tx = Tx::default();
+    assert!(state.enter_editor(None, &mut tx), "edit mode");
+    let end = state.active_editor_edit().text.len();
+    state.active_editor_edit().set_caret(end);
+    state.active_editor_edit().insert("\n\nEdited for the clipboard.\n");
+    let document = state.active_tab().and_then(|tab| tab.document()).cloned().expect("the document");
+    assert!(!document.text().text().contains("Edited for the clipboard."), "the field text is not in the buffer yet");
+    let stale = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("the pre-edit model");
+    assert!(!stale.source.contains("Edited for the clipboard."), "the reader is still on the old model");
+    let (mut runtime, board) = clipboard_runtime(state);
+
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+        assert!(state.run_command("share.copy-rich", tx), "the command is enabled");
+    });
+    wait_for_clipboard(&mut runtime, &board);
+
+    let copied = board.content().expect("clipboard content");
+    assert!(copied.text().contains("Edited for the clipboard."), "the plain form is the edited buffer");
+    let html = copied.html().expect("the HTML form");
+    assert!(html.contains("Edited for the clipboard."), "the HTML used the same revision: {html}");
+}
+
+#[test]
+fn an_export_pins_its_document_until_the_job_ends() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let first = state.open_synthetic("First", "# First\n");
+    let second = state.open_synthetic("Second", "# Second\n");
+    assert!(state.activate_tab(first));
+    let doc = state.active_document_id().expect("the first document");
+    state.share.in_flight = Some(ExportJob { job: 77, doc, format: ExportFormat::Html, open_viewer: false });
+
+    assert!(!state.activate_tab(second), "a tab switch away from the exporting document is refused");
+    assert_eq!(state.active_tab().map(|tab| tab.id), Some(first));
+    assert!(state.ui.notice.is_some(), "the refusal is visible");
+
+    let order: Vec<_> = state.tabs.iter().map(|tab| tab.id).collect();
+    assert!(!state.move_active_tab(1), "the pinned tab cannot move");
+    assert_eq!(state.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(), order, "the strip is unchanged");
+
+    assert_eq!(state.close_tab(first), crate::window::CloseOutcome::Blocked);
+    assert!(state.tab(first).is_some(), "the tab is still open");
+
+    // Opening a file or a new tab while the job runs must not leave the
+    // exporting document either; the new tab joins in the background (OI-105).
+    let third = state.open_synthetic("Third", "# Third\n");
+    assert_eq!(state.active_tab().map(|tab| tab.id), Some(first), "an opened tab joins in the background");
+    assert!(state.tab(third).is_some(), "the opened tab is in the strip");
+    let blank = state.new_start_tab();
+    assert_eq!(state.active_tab().map(|tab| tab.id), Some(first), "a new start page joins in the background");
+    assert!(state.tab(blank).is_some(), "the start page is in the strip");
+
+    // The worker failed (or finished): the pin is gone and everything works.
+    assert!(state.handle_exported(77, doc, ExportFormat::Html, Err("the worker stopped".to_owned())));
+    assert!(!state.export_pins(doc));
+    assert!(state.activate_tab(second), "switching works again");
+    assert_eq!(state.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(), vec![first, second, third, blank]);
+    assert_eq!(state.close_tab(first), crate::window::CloseOutcome::Closed);
+}
+
+/// OI-068: a large document's export cost stays visible.
+///
+/// Ignored by default (it writes hundreds of KB and runs a cold PDF). Run it
+/// explicitly and read the timings:
+///
+/// ```text
+/// cargo test -p lmdv-app large_export_benchmark -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "performance measurement; run explicitly with --ignored --nocapture"]
+fn large_export_benchmark() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let mut source = String::with_capacity(256 * 1024);
+    source.push_str("# Large export\n\n");
+    for index in 0..800 {
+        source.push_str(&format!(
+            "## Section {index}\n\nParagraph {index} with **bold**, *emphasis*, `code`, [a link](other.md) and a plain sentence that wraps at the export column width.\n\n- first item\n- second item\n\n"
+        ));
+        if index % 16 == 0 {
+            source.push_str(&format!("$$\nx_{index}^2 + y_{index}^2 = z_{index}^2\n$$\n\n"));
+        }
+    }
+    state.open_synthetic("large", &source);
+    wait_for_reader(&mut state);
+    eprintln!("large export benchmark: {} bytes, 800 sections", source.len());
+
+    for (format, name) in
+        [(ExportFormat::Html, "large.html"), (ExportFormat::Docx, "large.docx"), (ExportFormat::Pdf, "large.pdf")]
+    {
+        let target = export_target(&temp, name);
+        let pdf = (format == ExportFormat::Pdf).then(|| pdf_export(&state));
+        let started = Instant::now();
+        state.start_export(format, target.clone(), pdf, false);
+        wait_for_export(&mut state);
+        let elapsed = started.elapsed();
+        let bytes = std::fs::metadata(&target).map(|meta| meta.len()).unwrap_or(0);
+        let elapsed_ms = elapsed.as_secs_f64() * 1_000.0;
+        eprintln!("{format:?}: {elapsed_ms:.2} ms, {bytes} bytes");
+        assert!(bytes > 0, "{format:?} wrote a file");
+        // A deliberately generous ceiling: the point is to make a regression
+        // visible, not to pin one machine's speed.
+        let budget_ms = if format == ExportFormat::Pdf { 60_000.0 } else { 10_000.0 };
+        assert!(elapsed_ms < budget_ms, "{format:?} took {elapsed_ms:.0} ms (budget {budget_ms:.0} ms)");
+    }
 }
 
 #[test]
