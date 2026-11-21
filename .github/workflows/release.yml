@@ -1,8 +1,8 @@
 name: Release
 
 # Cutting a `v*` tag publishes the Linux AppImage + raw binary and the Windows
-# NSIS installer. Windows remains compile-checked in CI; the installer is built
-# here but runtime support is not claimed (see OI-155).
+# installer + raw binary. Windows remains compile-checked in CI; the installer is
+# built here but runtime support is not claimed (see OI-155).
 on:
   push:
     tags:
@@ -91,7 +91,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    name: Windows release (NSIS installer)
+    name: Windows release (installer + raw binary)
     runs-on: windows-latest
     timeout-minutes: 240
     steps:
@@ -130,6 +130,13 @@ jobs:
             /DICON="$PWD\assets\lmdv.ico" `
             /DOUTDIR="$PWD\dist" `
             packaging\windows\lmdv.nsi
+
+      - name: Stage raw Windows binary
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME -replace '^v',''
+          Copy-Item -Path target\release\lmdv.exe `
+            -Destination "dist\lmdv-${version}-windows-x86_64.exe"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4

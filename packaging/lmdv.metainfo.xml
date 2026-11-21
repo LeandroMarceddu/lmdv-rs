@@ -49,6 +49,13 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.8.0" date="2026-11-21" type="development">
+      <description>
+        <p>Make lmdv the default Markdown handler from Settings on Windows and
+          Linux, and reuse the reading article across scroll frames: much lower
+          scrolling latency and frame cost on large, table-heavy documents.</p>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-11-21" type="development">
       <description>
         <p>Complete start page and notices, link actions, editor preview and

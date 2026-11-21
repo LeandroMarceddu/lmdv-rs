@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (200 done, 52 substitutes, 61 partial, 11 missing, 18 n/a), the P0 missing and the four P0 partial batches are implemented, and v0.7.0 is released. Remaining: 18 P0 partials, the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (200 done, 52 substitutes, 61 partial, 11 missing, 18 n/a), the P0 missing and the four P0 partial batches are implemented, the default Markdown handler covers Windows and Linux, the scroll/article-reuse fix is in, and v0.8.0 is released. Remaining: 18 P0 partials, the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -372,7 +372,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0** and **v0.7.0** were published from it (unsigned, no checksums).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0**, **v0.7.0** and **v0.8.0** were published from it (unsigned, no checksums).
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
@@ -456,7 +456,7 @@
 - Audit: 200 done, 52 substitute, 61 partial, 11 missing, 18 n/a; 18 P0 gaps remain.
 - v0.7.0 tag; release notes in `docs/releases/v0.7.0.md`.
 
-## Default Markdown handler — Windows and Linux — complete (`e4ade81`)
+## Default Markdown handler — Windows and Linux — complete (`e4ade81`, v0.8.0)
 
 - Settings → General has one “Make lmdv the default for Markdown files” row on Windows and Linux.
 - Linux applies at once (`lmdv_io::assoc::linux`): reuses a usable `lmdv.desktop` byte for byte (the installer wrapper on this machine), otherwise writes a managed entry for `$APPIMAGE`/`current_exe` plus the embedded icon; sets `text/markdown`, `text/x-markdown` and `application/x-markdown` first in `mimeapps.list` under both default and added associations, preserving other handlers. No root, no `xdg-mime`/`gio`; best-effort `update-desktop-database`.
@@ -465,14 +465,14 @@
 - i18n 633 keys; Linux detail and “applied” notice in six locales.
 - Evidence: 24 `assoc` tests, 40 settings tests, 18 i18n tests; Linux + Windows-target checks clean; `--scene settings` shows the row. Windows runtime behavior still needs a real Windows run (OI-155).
 
-## Scroll latency and frame pacing — complete
+## Scroll latency and frame pacing — complete (`ec3b50b`, v0.8.0)
 
 - The reported “30 FPS / delay when scrolling quickly” was per-frame article work, not vsync: the reading view passes link/block/table/media wires, so `lmdv-render`'s per-block memo was unreachable and every wheel frame rebuilt the whole article. On the reporter's 951 KiB guide: **49.9 ms/frame (20 FPS)**, `view_cpu` 14–15.5 ms, layout 0.13 ms.
 - `ReaderView::memo` now wraps the article in `rune::memo`, versioned by document revision (+ source hash while revision 0), theme fingerprint, content width, scale, highlight hash and app state (tab, mode, open details/front matter, table copy flash). Documents drawing a picture or diagram stay unmemoised (a picture decodes on a worker, a diagram follows the appearance).
 - The wheel glide is speed-aware: Rune's 0.32 s spring for a single notch or a wheel after a pause, stiffening to 0.10 s during a burst so the content trails ~72 pt instead of ~300. Single-notch motion is unchanged.
 - Result: **20 → 41 FPS** at 1200×860 (46.5 at 900×700), `view_cpu` **1.9 ms**, burst trail **297 → 117 pt**. The renderer's own commit/apply/paint over 15.5k nodes is now the cost; 60 FPS on this document needs Rune-side work or a virtualized article.
 - No FPS setting: this Rune rev exposes no present mode or refresh cap, and every surface is already `AutoVsync` (desktop refresh). A row would be inert; the Rune API request is OI-193.
-- Fixture: `tests/fixtures/stress/developer-guide.md` (951 KiB, 10.5k lines, 51 tables, 186 fences).
+- Fixture: `tests/fixtures/stress/developer-guide.md` (951 KiB, 10.5k lines, 51 tables, 186 fences); release notes in `docs/releases/v0.8.0.md`.
 
 ## Next up
 
@@ -486,6 +486,8 @@
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 
 **Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. Record any repeat with the run id.
+
+**Known flake (2026-11-21):** the full gate failed once in `lmdv-io instance::tests::a_stale_socket_is_reclaimed_but_a_live_one_is_not` with “a free lock must be primary” under the parallel suite; the test alone and the next full `lmdv-io` run passed. It is a lock-file timing race in the fixture (the server's lock is released in the `Drop` body's field drop), not article/UI behavior. Record any repeat with the gate output.
 
 ## P6-01b — complete
 

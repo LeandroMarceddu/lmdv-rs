@@ -25,7 +25,7 @@ checksums or reproducible-build claims yet; the blockers are listed at the end.
 Push a `v*` tag. `.github/workflows/release.yml` builds and publishes:
 
 - Linux: `dist/lmdv-<version>-<arch>.AppImage` and the raw `lmdv-<version>-x86_64` binary.
-- Windows: `dist/lmdv-<version>-setup.exe`, built with `packaging/windows/lmdv.nsi`.
+- Windows: `dist/lmdv-<version>-installer.exe` (NSIS) and the raw `dist/lmdv-<version>-windows-x86_64.exe`, built with `packaging/windows/lmdv.nsi`.
 
 Release notes come from `docs/releases/<tag>.md` when that file exists; otherwise
 GitHub generates them. Write the notes with the version bump, before tagging.
@@ -109,7 +109,7 @@ Run it locally with:
 
 ```bash
 scripts/package-appimage.sh --dry-run          # print the exact plan, write nothing
-scripts/package-appimage.sh                    # cargo build --release -p lmdv + dist/lmdv-0.7.0-x86_64.AppImage
+scripts/package-appimage.sh                    # cargo build --release -p lmdv + dist/lmdv-0.8.0-x86_64.AppImage
 scripts/package-appimage.sh --no-build         # reuse target/release/lmdv
 scripts/package-appimage.sh --binary ./target/debug/lmdv --appdir-only \
     --out-dir /tmp/lmdv-appimage               # stage + validate, no image (fast smoke test)
@@ -126,7 +126,7 @@ scripts/package-appimage.sh --binary ./target/debug/lmdv --appdir-only \
 * AppImage does not auto-integrate. Options: `AppImageLauncher` or `appimaged` moves/copies
   the file and installs the desktop entry/icon; otherwise:
   ```bash
-  ./lmdv-0.7.0-x86_64.AppImage --appimage-extract
+  ./lmdv-0.8.0-x86_64.AppImage --appimage-extract
   # copy squashfs-root/usr/share/applications/lmdv.desktop to ~/.local/share/applications,
   # rewrite Exec to the absolute .AppImage path, copy the icon, then register as in §3
   ```

@@ -1,7 +1,7 @@
 ; lmdv Windows installer (NSIS 3 / Modern UI 2).
 ;
 ; Build from the repository root, for example:
-;   makensis /DVERSION=0.7.0 ^
+;   makensis /DVERSION=0.8.0 ^
 ;     /DSOURCE="%CD%\target\release\lmdv.exe" ^
 ;     /DICON="%CD%\assets\lmdv.ico" ^
 ;     /DOUTDIR="%CD%\dist" packaging\windows\lmdv.nsi
@@ -12,7 +12,7 @@ Unicode true
 !include "MUI2.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.7.0"
+  !define VERSION "0.8.0"
 !endif
 !ifndef SOURCE
   !define SOURCE "..\..\target\release\lmdv.exe"
@@ -26,7 +26,7 @@ Unicode true
 
 Name "lmdv"
 Caption "lmdv ${VERSION} Setup"
-OutFile "${OUTDIR}\lmdv-${VERSION}-setup.exe"
+OutFile "${OUTDIR}\lmdv-${VERSION}-installer.exe"
 InstallDir "$LOCALAPPDATA\Programs\lmdv"
 InstallDirRegKey HKCU "Software\lmdv" "InstallDir"
 RequestExecutionLevel user
