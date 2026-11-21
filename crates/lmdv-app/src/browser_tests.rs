@@ -736,6 +736,8 @@ fn the_menus_keys_move_wrap_and_skip_disabled_rows() {
     show(&mut state, listing(&root));
     state.browser.focus = Some(file.to_string_lossy().into_owned());
     state.left.set_open(true);
+    // The file is already open, so the background open must not duplicate it.
+    state.open_path(file.clone());
 
     let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
     runtime.frame(0.0);

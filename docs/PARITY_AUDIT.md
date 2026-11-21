@@ -18,12 +18,12 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 169 done, 52 substitute, 90 partial, 13 missing, 18 n/a.
+**342 rows:** 173 done, 52 substitute, 86 partial, 13 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 18 | 3 | 8 | 1 | 0 |
-| Tabs and windows | 35 | 14 | 8 | 11 | 2 | 0 |
+| Tabs and windows | 35 | 18 | 8 | 7 | 2 | 0 |
 | Editor | 40 | 20 | 2 | 15 | 2 | 1 |
 | Markdown rendering | 34 | 25 | 3 | 6 | 0 | 0 |
 | Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
@@ -39,9 +39,9 @@ matches this audit.
 | Accessibility | 15 | 9 | 0 | 6 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 0 | 16 | 1 | 0 | 3 |
-| **All** | **342** | **169** | **52** | **90** | **13** | **18** |
+| **All** | **342** | **173** | **52** | **86** | **13** | **18** |
 
-## P0 gaps (45)
+## P0 gaps (41)
 
 Priority-0 rows that are not yet done. The full evidence and the precise missing
 clause are in the area files.
@@ -53,15 +53,11 @@ clause are in the area files.
 - **R-21** (partial) — `crate::editor_tests::a_clean_document_reloads_on_a_watch_change_and_keeps_its_anchor`; the watcher ignores the app's own `Access` events (`crates/lmdv-io/src/watch.rs`, OI-168). **Gap:** every…
 - **R-23** (partial) — Rename follows file/recents/positions/history/dirty buffer: `crate::editor_tests::a_rename_follows_the_document_registry_recents_and_positions`, `a_rename_keeps_an_unsaved_buffer_dirty`;…
 
-### T — Tabs and windows (8)
+### T — Tabs and windows (4)
 
-- **T-01** (partial) — Strip is drawn in its own 40 pt band under the toolbar (`view.rs:489-649`), not in the toolbar as specified; OI-003 is still `scheduled`. The app never passes `viewport_width`, so the kit keeps…
-- **T-02** (partial) — File tabs use the stem and the full name as label (`window.rs:188-216`; `window::tests::strip_titles_drop_the_extension`); pasted titles are covered by…
-- **T-03** (partial) — Dirty replaces the close slot with `TabItemStatus::Attention` (`view.rs:563-567`). After save the flash is toolbar text “Saved” (`view.rs:483-485`;…
-- **T-05** (partial) — Neighbor choice `window::tests::closing_the_middle_tab_brings_the_right_neighbour_forward`; last document `window::tests::closing_the_last_document_leaves_a_start_page`; dirty prompt…
+- **T-01** (partial) — The strip now passes the measured `viewport_width`, so tabs shrink toward the kit's 28 pt minimum before scrolling (`view.rs`, `tab_list` tests; `--tree` proof). Still partial: the kit has no…
+- **T-03** (partial) — Dirty shows the orange Attention dot; after a save the tab's leading slot becomes a check in the success colour for the existing 1.4 s flash (`window.rs`…
 - **T-12** (partial) — Tree and search hits honor Ctrl/Ctrl+Shift/Shift (`browser.rs:744-790`; `browser_tests::the_menus_open_rows_use_the_background_tab_and_new_window_paths`). Recents open on a plain press only…
-- **T-13** (partial) — Foreground replacement is tested (`window::tests::a_document_replaces_the_front_start_page`). `attach_document_at` (`window.rs:847-890`) replaces a front start tab without a background flag, and…
-- **T-19** (partial) — Reorder is the kit's (`vendor/rune/crates/rune-kit/src/shell/tab_strip/drag.rs` SLOP is 4 pt, spec says 5) and `view.rs:635-637` calls `reorder_tab`; an exporting document refuses the drop…
 - **T-26** (partial) — `TabView` keeps anchor, find, reader find, nav, fragment, outline filter, parsed model, editor session, find bar, slash menu, details and dirty (`window.rs:78-140`);…
 
 ### E — Editor (8)

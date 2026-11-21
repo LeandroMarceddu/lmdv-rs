@@ -436,6 +436,16 @@
 - Audit: 169 done, 52 substitute, 90 partial, 13 missing, 18 n/a; 45 P0 gaps remain (partials plus image drop and drag-to-scroll).
 - v0.6.0 tag; release notes in `docs/releases/v0.6.0.md`.
 
+## P0 tabs strip — batch complete
+
+- T-02: pasted tabs show the clipboard glyph; file/start glyphs and the stem-only title with the full accessible name are unchanged.
+- T-03: the saved check replaces the tab's leading mark for 1.4 s with a polite “Saved” announcement; typing restores the dot. The close-slot position needs a kit Saved status.
+- T-05: Delete/Backspace on a focused tab closes it through the normal dirty prompt.
+- T-13: a background open no longer consumes a front start page (browser/search/palette use `open_path_background`); a pasted tab is never replaced.
+- T-19: runtime reorder and Esc-cancel tests; the strip drops drag/tear-out while an export pins the document; kit slop 4 pt accepted against the spec's 5.
+- T-01: `viewport_width` now sizes tabs down to the kit minimum; the toolbar move and per-name widths need kit APIs.
+- Audit: 173 done, 52 substitute, 86 partial, 13 missing, 18 n/a; 41 P0 gaps. Kit gaps tracked as OI-190.
+
 ## Next up
 
 **Next when work resumes:**

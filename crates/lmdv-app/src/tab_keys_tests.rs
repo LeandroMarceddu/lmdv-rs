@@ -190,3 +190,81 @@ fn the_editor_takes_ctrl_1_to_3_for_headings_first() {
     assert_eq!(state.ui.last_command.as_deref(), Some("edit.heading-2"));
     assert_eq!(state.active_index(), 2);
 }
+
+// ---- Delete on a focused tab (T-05) --------------------------------------
+
+fn strip_runtime(state: WindowState) -> rune::Runtime<WindowState> {
+    rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0))
+}
+
+fn focus_tab(runtime: &mut rune::Runtime<WindowState>, tab: lmdv_core::TabId) {
+    let key = format!("t-{}", crate::window::tab_key(tab));
+    runtime.update(move |_, tx| tx.focus(key, false));
+    runtime.frame(0.0);
+}
+
+#[test]
+fn delete_on_a_focused_tab_closes_it() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    three_tabs(&mut state);
+    state.activate_index(1);
+    let target = state.active_tab().map(|tab| tab.id).expect("the middle tab");
+    let mut runtime = strip_runtime(state);
+    runtime.frame(0.0);
+
+    focus_tab(&mut runtime, target);
+    runtime.key(KeyEvent { key: Key::Delete, mods: Mods::default() });
+    runtime.frame(0.0);
+
+    assert_eq!(runtime.state.tabs().len(), 2, "Delete closed the focused tab");
+    assert!(runtime.state.tab(target).is_none());
+    assert_eq!(titles(&runtime.state), ["One", "Three"]);
+}
+
+#[test]
+fn backspace_on_a_focused_tab_closes_it() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    three_tabs(&mut state);
+    state.activate_index(1);
+    let target = state.active_tab().map(|tab| tab.id).expect("the middle tab");
+    let mut runtime = strip_runtime(state);
+    runtime.frame(0.0);
+
+    focus_tab(&mut runtime, target);
+    runtime.key(KeyEvent { key: Key::Backspace, mods: Mods::default() });
+    runtime.frame(0.0);
+
+    assert_eq!(runtime.state.tabs().len(), 2, "Backspace closed the focused tab");
+    assert!(runtime.state.tab(target).is_none());
+}
+
+#[test]
+fn delete_on_a_dirty_focused_tab_asks_first() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    three_tabs(&mut state);
+    state.activate_index(1);
+    let target = state.active_tab().map(|tab| tab.id).expect("the middle tab");
+    if let Some(document) = state.active_tab().and_then(|tab| tab.document()) {
+        document.apply(0..0, "edited ");
+    }
+    state.active_tab_mut().expect("the middle tab").view.dirty = true;
+    let mut runtime = strip_runtime(state);
+    runtime.frame(0.0);
+
+    focus_tab(&mut runtime, target);
+    runtime.key(KeyEvent { key: Key::Delete, mods: Mods::default() });
+    runtime.frame(0.0);
+
+    assert_eq!(runtime.state.tabs().len(), 3, "a dirty tab is not closed without an answer");
+    assert!(
+        matches!(
+            runtime.state.prompt(),
+            Some(crate::editor::Prompt::CloseTab { tab, .. }) if *tab == target
+        ),
+        "Delete takes the same Save / Don't save / Cancel path as the ×: {:?}",
+        runtime.state.prompt()
+    );
+}

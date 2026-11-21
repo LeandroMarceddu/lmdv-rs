@@ -4,7 +4,7 @@
 //! Views are pure: they only read state and return elements. Every button's
 //! handler dispatches a command or mutates [`WindowState`] for the next frame.
 
-use lmdv_core::{DocStatus, Document, ScrollAnchor, ThemePref};
+use lmdv_core::{DocStatus, Document, DocumentKey, ScrollAnchor, ThemePref};
 use lmdv_render::{DetailsState, RenderWires};
 use rune::{
     Align, Color, Cursor, Cx, El, GrowthSpec, Phase, PointerButton, PointerPress, ScrollSpec, TextStyle, Tx, col, el,
@@ -139,6 +139,18 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
             if state.browser_menu().is_some() && matches!(event.key, rune::Key::Escape | rune::Key::Tab) {
                 state.close_browser_menu();
                 tx.focus(crate::browser::BROWSER_TREE_KEY, false);
+                return true;
+            }
+            // T-05: Delete/Backspace on a focused tab closes it through the same
+            // dirty guard as the × button. The kit keys each tab slot
+            // `t-tab-{id}`; a focused field eats the key before the window sees
+            // it, so only a tab's own focus reaches this.
+            if matches!(event.key, rune::Key::Delete | rune::Key::Backspace)
+                && let Some(tab) =
+                    tx.focused().and_then(|key| key.strip_prefix("t-")).and_then(crate::window::parse_tab_key)
+            {
+                state.request_close_tab(tab);
+                state.apply_pending_scroll(tx);
                 return true;
             }
             false
@@ -580,10 +592,33 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
             } else {
                 None
             });
-            let item = match &tab.source {
-                TabSource::Start => item.icon(&icons::HOME),
-                TabSource::Document(_) => {
-                    item.icon(if tab.view.mode == Mode::Editor { &icons::PENCIL } else { &icons::DOCUMENT })
+            // T-03: after a save the tab's leading mark is a check for the
+            // flash's 1.4 s; typing takes it away at once (the dirty dot). The
+            // kit has no Saved status and keeps the close button in the status
+            // slot, so the check stands where the tab's kind icon does.
+            let item = if state.tab_shows_saved_check(tab) {
+                item.avatar(
+                    icon(&icons::CHECK, 16.0).key(format!("tab-saved-{}", tab_key(tab.id))).color(kit.c.success.fg),
+                )
+            } else {
+                match &tab.source {
+                    TabSource::Start => item.icon(&icons::HOME),
+                    TabSource::Document(doc) => {
+                        if matches!(*doc.key.borrow(), DocumentKey::Untitled(_)) {
+                            // T-02: pasted text has the clipboard glyph, not the
+                            // document one; the kind stays pasted in edit mode.
+                            let tint = if is_active { kit.c.icon_base } else { kit.c.icon_muted };
+                            item.avatar(
+                                icon(&icons::CLIPBOARD, 16.0)
+                                    .key(format!("tab-clipboard-{}", tab_key(tab.id)))
+                                    .color(tint),
+                            )
+                        } else if tab.view.mode == Mode::Editor {
+                            item.icon(&icons::PENCIL)
+                        } else {
+                            item.icon(&icons::DOCUMENT)
+                        }
+                    }
                 }
             };
             item.decorate(move |el, _| {
@@ -622,13 +657,16 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
         plus
     };
 
-    let strip = TabStrip::new("tabs", TabOrientation::Horizontal)
+    // T-01/T-19: the measured strip width lets the kit size tabs from their
+    // widest down to its 28-point minimum (the kit shares the width equally; it
+    // has no per-name intrinsic width). While an export pins a document, the
+    // strip gets no drag state at all, so a reorder or tear-out cannot start —
+    // not only the drop is refused (OI-105).
+    let dragging = state.export_pinned_document().is_none();
+    let mut strip = TabStrip::new("tabs", TabOrientation::Horizontal)
         .tabs(items)
         .active(active.as_deref())
-        .drag_state(&state.drag, |state: &mut WindowState| &mut state.drag)
-        // X11 only: Wayland and headless strips keep no tear-out and the tab
-        // menu is the substitute (T-20/T-21).
-        .tear_out(state.tear_out_spec())
+        .viewport_width(cx.layout_size("tabs").map(|size| size[0]))
         .close_icon(kit.glyph.close)
         .trailing_action(trailing)
         .label(lmdv_i18n::t!("tab.list"))
@@ -655,10 +693,17 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
         })
         .on_tear_out(|state: &mut WindowState, tear, _| {
             state.handle_tear_out(tear);
-        })
-        // A torn tab leaves the 28-point strip band, which the strip's scroll
-        // viewport clips; the layered ghost floats over the window instead.
-        .build_layered(kit, layer);
+        });
+    if dragging {
+        strip = strip
+            .drag_state(&state.drag, |state: &mut WindowState| &mut state.drag)
+            // X11 only: Wayland and headless strips keep no tear-out and the tab
+            // menu is the substitute (T-20/T-21).
+            .tear_out(state.tear_out_spec());
+    }
+    // A torn tab leaves the 28-point strip band, which the strip's scroll
+    // viewport clips; the layered ghost floats over the window instead.
+    let strip = strip.build_layered(kit, layer);
 
     // D-02: the last frame's tab band and tab rects turn a file drop's x into
     // the index its files are inserted at. The kit keys every built tab slot
@@ -702,6 +747,7 @@ fn tab_list_button(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) -> El {
         let id = tab.id;
         let mut item = MenuItem::new(tab.full_title()).icon(match &tab.source {
             TabSource::Start => &icons::HOME,
+            TabSource::Document(doc) if matches!(*doc.key.borrow(), DocumentKey::Untitled(_)) => &icons::CLIPBOARD,
             TabSource::Document(_) => &icons::DOCUMENT,
         });
         if let Some(folder) = tab.document().and_then(|document| {
@@ -2228,17 +2274,25 @@ pub fn scene_tabs(state: &mut WindowState) {
     state.open_synthetic("Reading notes", READING_MARKDOWN);
     state.open_synthetic("A note being edited", EDITING_MARKDOWN);
     state.activate_index(1);
+    // T-02: the three tabs are pasted documents, so their leading mark is the
+    // clipboard. T-03: the front tab has just been saved, so it shows the check
+    // while the flash lasts.
+    if let Some(doc) = state.active_document_id() {
+        state.editor.saved_flash_until = Some(60.0);
+        state.saved_flash_docs.insert(doc);
+    }
     state.left.set_open(true);
     state.right.set_open(true);
     state.ui.notice = None;
     state.ui.help = None;
 }
 
-/// T-17's overflow strip: twelve tabs, so the strip scrolls and its ⌄ list is
-/// showing with the front tab marked ● and New tab after the separator.
+/// T-17's overflow strip: enough tabs that even the kit's 28-point minimum
+/// widths do not fit, so the strip scrolls and its ⌄ list is showing with the
+/// front tab marked ● and New tab after the separator.
 pub fn scene_tab_overflow(state: &mut WindowState) {
     state.reset_to_start_page();
-    for index in 1..=12 {
+    for index in 1..=44 {
         state.open_synthetic(&format!("Note {index}"), &format!("# Note {index}\n\nBody.\n"));
     }
     state.activate_index(1);
@@ -2881,11 +2935,11 @@ mod tests {
     }
 
     #[test]
-    fn the_overflow_scene_opens_the_list_over_twelve_tabs() {
+    fn the_overflow_scene_opens_the_list_over_many_tabs() {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
         scene_tab_overflow(&mut state);
-        assert_eq!(state.tabs().len(), 12);
+        assert_eq!(state.tabs().len(), 44);
         assert_eq!(state.active_index(), 1);
         assert!(state.tab_list_is_open());
 
@@ -2902,7 +2956,7 @@ mod tests {
             .iter()
             .filter(|element| element.key.as_deref().is_some_and(|key| key.starts_with("tab-list-menu-item")))
             .count();
-        assert_eq!(rows, 13, "twelve tabs and New tab");
+        assert_eq!(rows, 45, "forty-four tabs and New tab");
         assert!(
             elements.iter().any(|element| element.text.as_deref() == Some("\u{25cf}")),
             "the front tab is marked ●"
@@ -2937,6 +2991,70 @@ mod tests {
         assert!(state.active_tab().and_then(Tab::document).is_some_and(|doc| {
             matches!(*doc.status.borrow(), DocStatus::Ready) && doc.text().text().contains("Reading notes")
         }));
+    }
+
+    #[test]
+    fn the_tabs_scene_marks_pasted_tabs_with_the_clipboard_and_the_front_tab_saved() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let ids: Vec<lmdv_core::TabId> = state.tabs().iter().map(|tab| tab.id).collect();
+        let active = state.active_index();
+        let elements = render(state);
+
+        for (index, id) in ids.iter().enumerate() {
+            let key = if index == active {
+                format!("tab-saved-{}", tab_key(*id))
+            } else {
+                format!("tab-clipboard-{}", tab_key(*id))
+            };
+            assert!(has_key(&elements, &key), "tab {index} draws {key}");
+        }
+    }
+
+    #[test]
+    fn the_saved_check_leaves_the_strip_when_the_flash_expires() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let active = state.active_tab().map(|tab| tab.id).expect("a front tab");
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        runtime.frame(0.0);
+        assert!(has_key(&runtime.elements(), &format!("tab-saved-{}", tab_key(active))), "the check shows");
+
+        runtime.frame(60.1);
+        assert!(
+            !has_key(&runtime.elements(), &format!("tab-saved-{}", tab_key(active))),
+            "the flash's expiry returns the kind icon"
+        );
+        assert!(
+            has_key(&runtime.elements(), &format!("tab-clipboard-{}", tab_key(active))),
+            "the pasted tab's clipboard is back"
+        );
+    }
+
+    #[test]
+    fn a_crowded_strip_sizes_each_tab_to_the_measured_width() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        for index in 1..=6 {
+            state.open_synthetic(&format!("Note {index}"), &format!("# Note {index}\n\nBody.\n"));
+        }
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        let widths: Vec<f32> = runtime
+            .elements()
+            .into_iter()
+            .filter(|element| element.key.as_deref().is_some_and(|key| key.starts_with("t-tab-")))
+            .map(|element| element.rect[2])
+            .collect();
+        assert_eq!(widths.len(), 6, "six tabs");
+        for width in widths {
+            assert!(width < 224.0, "the strip gave the tabs a shared width below the maximum: {width}");
+            assert!(width >= 28.0, "and never below the kit's minimum: {width}");
+        }
     }
 
     #[test]

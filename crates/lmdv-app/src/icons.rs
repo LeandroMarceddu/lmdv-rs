@@ -12,6 +12,13 @@ pub static DOCUMENT: Icon = Icon {
     body: r#"<path d="M4 1.5h5l3 3V14a.5.5 0 0 1-.5.5h-7A.5.5 0 0 1 4 14V2a.5.5 0 0 1 .5-.5Z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/><path d="M9 1.8V5h3.2M6 8h4M6 10.5h4" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>"#,
 };
 
+/// Pasted text, as the original's clipboard tab shows it (T-02).
+pub static CLIPBOARD: Icon = Icon {
+    name: "lmdv-clipboard",
+    view: 16.0,
+    body: r#"<rect x="3.2" y="2.8" width="9.6" height="11.4" rx="1" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M6 2.8V2a.5.5 0 0 1 .5-.5h3A.5.5 0 0 1 10 2v.8" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/><path d="M5.8 6.2h4.4M5.8 8.6h4.4M5.8 11h2.8" stroke="currentColor" stroke-width="1.1" stroke-linecap="round"/>"#,
+};
+
 /// The start page.
 pub static HOME: Icon = Icon {
     name: "lmdv-home",

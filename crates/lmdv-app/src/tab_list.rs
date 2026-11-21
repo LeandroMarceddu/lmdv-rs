@@ -32,11 +32,11 @@ pub const STRIP_OVERFLOW_SLACK: f32 = 0.5;
 /// Whether the tabs overflow their strip, from the laid-out widths of the
 /// previous frame (T-17).
 ///
-/// The app never gives the kit a `viewport_width`, so the tabs keep their
-/// 224-point natural width (the kit's maximum) and the strip scrolls instead of
-/// shrinking below it; overflow therefore means the list's measured width is
-/// wider than the scroll viewport's. Both widths include the reading time a tab
-/// shows and the actions after the last tab.
+/// T-01 gives the kit the measured strip width, so tabs shrink from their
+/// widest (224 points) to the kit's 28-point minimum. The strip scrolls only
+/// once even the minimum widths do not fit; overflow therefore means the
+/// list's measured width is wider than the scroll viewport's. Both widths
+/// include the reading time a tab shows and the actions after the last tab.
 pub fn strip_overflows(scroll: Option<[f32; 2]>, list: Option<[f32; 2]>) -> bool {
     match (scroll, list) {
         (Some(scroll), Some(list)) => list[0] > scroll[0] + STRIP_OVERFLOW_SLACK,
@@ -116,9 +116,10 @@ mod tests {
         WindowState::new(crate::test_support::shared(temp))
     }
 
-    /// Six tabs at 1280 points: 6×224 plus gaps passes the 1264-point strip.
+    /// Enough tabs that even the kit's 28-point minimum does not fit a
+    /// 1280-point strip: 44 × 34 - 6 = 1490 points, past its 1264.
     fn crowded(state: &mut WindowState) {
-        for index in 1..=6 {
+        for index in 1..=44 {
             state.open_synthetic(&format!("Note {index}"), &format!("# Note {index}\n\nBody.\n"));
         }
     }

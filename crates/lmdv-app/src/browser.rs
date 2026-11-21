@@ -764,15 +764,9 @@ impl WindowState {
             return;
         }
         let background = mods.ctrl && !mods.shift;
-        let previous = self.active_tab().map(|tab| tab.id);
-        let opened = self.open_path(path);
-        if background
-            && let Some(previous) = previous
-            && let Some(index) = self.tabs.iter().position(|tab| tab.id == previous)
-        {
-            // A background open leaves the document that was in front there.
-            self.switch_to_index(index);
-        }
+        // T-13: a background open must not consume a front start page; the
+        // placement-aware open handles it, so no switch-back is needed.
+        let opened = if background { self.open_path_background(path) } else { self.open_path(path) };
         // Whichever tab is in front now draws on this frame with its own
         // place; the article viewport must not keep the other document's.
         self.apply_pending_scroll(tx);

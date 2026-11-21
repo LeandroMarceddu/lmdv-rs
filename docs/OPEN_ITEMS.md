@@ -233,6 +233,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-187 | P7 parity | Editor image paste/drop into `assets/` is missing (E-36): only the failure strings exist | Wire clipboard-image paste and image drop into the document's `assets/` folder with the link insertion | P7 | open |
 | OI-188 | P7 parity | The audit's 44 P0 partial rows have no per-row register entry; they stay tracked by behavior ID in `docs/PARITY_AUDIT.md` and the checklist | Triage the P0 partials into batches by area after the P0 missing items | P7 | open |
 | OI-189 | P7-RUNE vendor | Rune is behind a one-time structural refactor: head `7a707454` is 130 commits past the pin, our four patches no longer apply and the patched tree does not compile; upstream also fixed a Linux field a11y panic and reshapes on colour-highlight changes | Scheduled port, not a drop-in: 0001 ~1 day into `rune-text`, 0002 ~3–4 h with the `Shared`/`SharedCore` split, 0003 ~3–4 h into `a11y/text/runs.rs`, 0004 ~1 h, plus goldens, vendored rebuild, `[[test]]` registration (`autotests = false`). See `docs/RUNE_DELTA_2026-11-20.md`. | P7 | open |
+| OI-190 | P7 parity kit | rune-kit gaps block the last clauses of T-01/T-03/T-19/C-01: no flexible toolbar middle slot, no per-name tab width, no Saved status in the close slot, drag slop fixed at 4 pt (spec 5), no IME composing state | Add the kit APIs (or vendor patches) and switch the app-side substitutes to them | P7 | open |
 | OI-180 | P6-SAFE app | A watcher-observed external rename is rekeyed by the first window that processes the shared event; later windows keep the old Back/Forward spelling until reopened | `rename_history_paths` now broadcasts `UiMsg::DocumentRenamed` through `broadcast_window_rename`, so every window renames its places and refreshes the document's titles, including windows that never show the file. Tested with three windows. | P6 | fixed |
 
 ## 2. Resolved actions (examples)
@@ -262,7 +263,7 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above. Behavior-level status is in `docs/PARITY_AUDIT.md`.
 
-- **Open (50):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 153, 155, 165, 176, 181, 182, 183, 186, 187, 188, 189
+- **Open (51):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 153, 155, 165, 176, 181, 182, 183, 186, 187, 188, 189, 190
 - **Scheduled (4):** OI-003, 023, 027, 050
 - **Accepted (32):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 141, 150, 154, 157, 161, 163, 166, 174, 175, 177, 179
 - **Fixed (103):** kept for history.

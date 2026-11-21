@@ -500,6 +500,9 @@ pub struct WindowState {
     pub(crate) session_flushed: bool,
     /// The session fragment this window last published (OI-151).
     pub(crate) session_publish: RefCell<crate::session::PublishedSession>,
+    /// The documents whose tabs show T-03's post-save check: those written by
+    /// the save that armed `editor.saved_flash_until`.
+    pub(crate) saved_flash_docs: BTreeSet<DocumentId>,
     next_tab: TabId,
 }
 
@@ -595,6 +598,7 @@ impl WindowState {
             restored_docs: BTreeSet::new(),
             session_flushed: false,
             session_publish: RefCell::new(crate::session::PublishedSession::default()),
+            saved_flash_docs: BTreeSet::new(),
             next_tab: 1,
         };
         state.push_start_tab();
@@ -793,6 +797,15 @@ impl WindowState {
         self.active_tab().and_then(Tab::document_id)
     }
 
+    /// Whether `tab` shows T-03's check: it was written by the save that armed
+    /// the saved flash and has no edits since. Typing clears it (the dirty dot
+    /// takes the slot back), and the flash's expiry ends it in [`Self::poll`].
+    pub fn tab_shows_saved_check(&self, tab: &Tab) -> bool {
+        !tab.view.dirty
+            && self.editor.saved_flash_until.is_some()
+            && tab.document_id().is_some_and(|doc| self.saved_flash_docs.contains(&doc))
+    }
+
     /// Allocates a tab id that this window never reuses.
     pub(crate) fn allocate_tab(&mut self) -> TabId {
         let id = self.next_tab;
@@ -891,6 +904,14 @@ impl WindowState {
     /// Back/Forward move or a session replay.
     pub fn open_path(&mut self, path: PathBuf) -> TabId {
         self.open_path_placed(path, OpenPlace::Front).0
+    }
+
+    /// Opens `path` behind the front tab (T-13/T-14): a start page or a pasted
+    /// tab in front keeps its place, and the new tab joins the strip without
+    /// taking the keyboard. The browser and palette's background opens use this
+    /// path instead of opening in front and switching back.
+    pub fn open_path_background(&mut self, path: PathBuf) -> TabId {
+        self.open_path_placed(path, OpenPlace::Background).0
     }
 
     /// [`Self::open_path`] with D-02's drop placements, returning the tab and
@@ -1486,6 +1507,47 @@ impl WindowState {
         self.ui.notice = None;
     }
 
+    /// T-03: keeps the strip's post-save check in step with the editor's saved
+    /// flash. A save completion in this poll names the document(s) it wrote by
+    /// their changed `last_local_write`; the flash's expiry clears them, and a
+    /// screen reader hears “Saved” once per save.
+    fn track_saved_flash(
+        &mut self,
+        before: Option<f64>,
+        writes_before: &[(DocumentId, Option<FileMeta>)],
+        tx: &mut Tx,
+    ) -> bool {
+        let after = self.editor.saved_flash_until;
+        if after == before {
+            return false;
+        }
+        if after.is_none() {
+            if self.saved_flash_docs.is_empty() {
+                return false;
+            }
+            self.saved_flash_docs.clear();
+            return true;
+        }
+        let mut docs = BTreeSet::new();
+        for tab in &self.tabs {
+            let Some(document) = tab.document() else { continue };
+            let old = writes_before.iter().find(|(id, _)| *id == document.id).and_then(|(_, meta)| *meta);
+            if document.last_local_write.get() != old {
+                docs.insert(document.id);
+            }
+        }
+        // Saving an unchanged file may write no new identity: the document in
+        // front is the operator's own save.
+        if docs.is_empty()
+            && let Some(doc) = self.active_document_id()
+        {
+            docs.insert(doc);
+        }
+        self.saved_flash_docs = docs;
+        tx.announce(lmdv_i18n::t!("msg.saved"), rune::LiveRegion::Polite);
+        true
+    }
+
     /// Drains worker and UI mailboxes, pumps timers and updates the registry.
     ///
     /// Returns whether the view reads anything that changed. Close and quit
@@ -1493,6 +1555,14 @@ impl WindowState {
     /// functions stay free of host-specific `Tx` effects.
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         let mut changed = false;
+        // T-03: what a save completion in this poll may change, for the tab's
+        // check: the flash deadline and each document's last own write.
+        let saved_flash_before = self.editor.saved_flash_until;
+        let writes_before: Vec<(DocumentId, Option<FileMeta>)> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.document().map(|document| (document.id, document.last_local_write.get())))
+            .collect();
         // OI-141: Rune answers the focus in a poll; the section line hides while
         // a focus ring the keyboard put somewhere sits under it. A change must
         // re-run the view, or the line would keep the last frame's verdict.
@@ -1526,6 +1596,7 @@ impl WindowState {
             changed = true;
         }
         changed |= self.poll_editor(now, tx);
+        changed |= self.track_saved_flash(saved_flash_before, &writes_before, tx);
         changed |= self.continue_close_batch();
         changed |= self.poll_share(now, tx);
         changed |= self.drive_parse();
@@ -2493,6 +2564,86 @@ mod tests {
         assert_eq!(state.tabs().len(), 1, "the start page was replaced");
         assert_eq!(state.active_tab().map(|tab| tab.id), Some(tab));
         assert_eq!(state.active_tab().map(Tab::title).as_deref(), Some("Notes"));
+    }
+
+    #[test]
+    fn a_background_open_does_not_consume_the_front_start_page() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let path = PathBuf::from("/tmp/lmdv-app-test/background.md");
+        ready_doc(&shared, "/tmp/lmdv-app-test/background.md", "text");
+        let start = state.active_tab().map(|tab| tab.id).expect("a start page is in front");
+
+        let tab = state.open_path_background(path);
+
+        assert_eq!(state.tabs().len(), 2, "the start page stayed and the file joined it");
+        assert_eq!(state.tabs()[0].id, start, "the start page keeps its place");
+        assert!(state.tabs()[0].is_start());
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(start), "the front tab did not change");
+        assert_eq!(state.tab(tab).map(Tab::title).as_deref(), Some("background"), "the file opened behind");
+    }
+
+    #[test]
+    fn a_document_never_replaces_a_pasted_tab_in_front() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let pasted = state.open_synthetic("Pasted notes", "# Budget\n");
+        let path = PathBuf::from("/tmp/lmdv-app-test/after-paste.md");
+        ready_doc(&shared, "/tmp/lmdv-app-test/after-paste.md", "text");
+
+        let opened = state.open_path(path);
+
+        assert_eq!(state.tabs().len(), 2, "the pasted tab stayed and the file joined it");
+        assert_eq!(state.tabs()[0].id, pasted, "pasted text is never replaced (T-13)");
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(opened), "the file comes forward");
+    }
+
+    #[test]
+    fn the_saved_check_follows_the_flash_and_typing_clears_it() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let tab = state.open_synthetic("Notes", "# Notes\n");
+        let doc = state.active_document_id().expect("a document");
+        assert!(!state.tab_shows_saved_check(state.tab(tab).expect("the tab")), "nothing saved yet");
+
+        state.editor.saved_flash_until = Some(10.0);
+        state.saved_flash_docs.insert(doc);
+        assert!(state.tab_shows_saved_check(state.tab(tab).expect("the tab")), "the check follows the flash");
+
+        state.active_tab_mut().expect("the tab").view.dirty = true;
+        assert!(!state.tab_shows_saved_check(state.tab(tab).expect("the tab")), "typing takes the check away at once");
+
+        state.active_tab_mut().expect("the tab").view.dirty = false;
+        let mut tx = Tx::default();
+        assert!(state.poll(11.0, &mut tx), "the flash expiry changes the strip");
+        assert!(state.saved_flash_docs.is_empty(), "the expiry clears the check");
+        assert!(!state.tab_shows_saved_check(state.tab(tab).expect("the tab")));
+    }
+
+    #[test]
+    fn a_save_completion_names_the_written_document_for_the_check() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let first = state.open_synthetic("One", "one\n");
+        let second = state.open_synthetic("Two", "two\n");
+        let written = state.tab(first).and_then(|tab| tab.document()).cloned().expect("the first document");
+        let writes_before: Vec<(DocumentId, Option<FileMeta>)> = state
+            .tabs()
+            .iter()
+            .filter_map(|tab| tab.document().map(|doc| (doc.id, doc.last_local_write.get())))
+            .collect();
+
+        // A background close-batch save writes the first document, not the front one.
+        written.last_local_write.set(Some(FileMeta { len: 4, ..FileMeta::default() }));
+        state.editor.saved_flash_until = Some(5.0);
+        let mut tx = Tx::default();
+        assert!(state.track_saved_flash(None, &writes_before, &mut tx));
+
+        assert!(state.tab_shows_saved_check(state.tab(first).expect("the first tab")), "the written tab checks");
+        assert!(!state.tab_shows_saved_check(state.tab(second).expect("the second tab")), "an untouched tab does not");
+        assert_eq!(state.saved_flash_docs, BTreeSet::from([written.id]));
     }
 
     #[test]

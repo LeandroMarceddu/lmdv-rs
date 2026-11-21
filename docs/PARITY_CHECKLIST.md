@@ -41,7 +41,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 18 | 3 | 8 | 1 | 0 |
-| Tabs and windows | 35 | 14 | 8 | 11 | 2 | 0 |
+| Tabs and windows | 35 | 18 | 8 | 7 | 2 | 0 |
 | Editor | 40 | 20 | 2 | 15 | 2 | 1 |
 | Markdown rendering | 34 | 25 | 3 | 6 | 0 | 0 |
 | Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
@@ -57,7 +57,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Accessibility | 15 | 9 | 0 | 6 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 0 | 16 | 1 | 0 | 3 |
-| **All** | **342** | **169** | **52** | **90** | **13** | **18** |
+| **All** | **342** | **173** | **52** | **86** | **13** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -95,10 +95,10 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 ## T — Tabs and windows (35)
 
 - [~] **T-01** Tab strip (P0 · F-BASIC) — partial
-- [~] **T-02** Tab names (P0 · F-PASTE) — partial
+- [x] **T-02** Tab names (P0 · F-PASTE) — done
 - [~] **T-03** Dirty indicator (P0 · F-EDIT) — partial
 - [x] **T-04** New tab (P0 · F-BASIC) — done
-- [~] **T-05** Close tab (P0 · F-TABS) — partial
+- [x] **T-05** Close tab (P0 · F-TABS) — done
 - [x] **T-06** Close begin page/window (P0 · F-TABS) — done
 - [x] **T-07** Reopen closed tab (P0 · F-TABS) — done
 - [x] **T-08** Next/previous tab (P0 · F-TABS) — done
@@ -106,13 +106,13 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-10** Move tab by keyboard (P1 · F-TABS) — done
 - [x] **T-11** One file, one tab per window (P0 · F-TABS) — done
 - [~] **T-12** Click-open placement (P0 · F-TABS) — partial
-- [~] **T-13** Start-page replacement (P0 · F-BASIC) — partial
+- [x] **T-13** Start-page replacement (P0 · F-BASIC) — done
 - [~] **T-14** Background insertion order (P1 · F-TABS) — partial
 - [ ] **T-15** Background tab pulse (P2 · F-TABS) — missing
 - [x] **T-16** Tab hover card (P1 · F-TABS) — done
 - [x] **T-17** Overflow tab list (P1 · F-TABS) — substitute
 - [x] **T-18** Tab context menu (P1 · F-TABS) — done
-- [~] **T-19** Tab drag reorder (P0 · F-DRAG) — partial
+- [x] **T-19** Tab drag reorder (P0 · F-DRAG) — done
 - [x] **T-20** Tab tear-off (P1 · F-DRAG) — substitute
 - [x] **T-21** Drag only tab → window (P1 · F-DRAG) — substitute
 - [x] **T-22** Drop tab onto another window (P1 · F-DRAG) — substitute

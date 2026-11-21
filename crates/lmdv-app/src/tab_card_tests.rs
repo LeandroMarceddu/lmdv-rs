@@ -303,3 +303,114 @@ fn a_real_hover_sets_the_delay_and_a_leave_hides_the_card() {
         "and the layer no longer shows it (a fading exit is allowed)"
     );
 }
+
+// ---- T-19/D-04: drag reorder ---------------------------------------------
+
+fn three_tabs(state: &mut WindowState) -> Vec<lmdv_core::TabId> {
+    vec![
+        state.open_synthetic("One", "# One\n"),
+        state.open_synthetic("Two", "# Two\n"),
+        state.open_synthetic("Three", "# Three\n"),
+    ]
+}
+
+fn titles(state: &WindowState) -> Vec<String> {
+    state.tabs().iter().map(Tab::full_title).collect()
+}
+
+fn drag_tab(runtime: &mut rune::Runtime<WindowState>, tab: lmdv_core::TabId, dx: f32) {
+    let (x, y) = runtime.find(&format!("t-{}", tab_key(tab))).expect("the tab");
+    runtime.pointer_move(x, y);
+    runtime.frame(0.0);
+    runtime.pointer_down(x, y);
+    runtime.frame(0.0);
+    runtime.pointer_move(x + dx, y);
+    runtime.frame(0.0);
+}
+
+#[test]
+fn dragging_a_tab_past_its_neighbour_midpoint_reorders_it() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let tabs = three_tabs(&mut state);
+    let one = tabs[0];
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+
+    // The kit's slop is 4 points (the spec says 5): a 3-point move is still a
+    // press; the next move starts the drag.
+    let (x, y) = runtime.find(&format!("t-{}", tab_key(one))).expect("the tab");
+    runtime.pointer_move(x, y);
+    runtime.frame(0.0);
+    runtime.pointer_down(x, y);
+    runtime.frame(0.0);
+    runtime.pointer_move(x + 3.0, y);
+    runtime.frame(0.0);
+    assert!(
+        !matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Dragging(_)),
+        "3 points is inside the kit's 4-point slop"
+    );
+    runtime.pointer_move(x + 140.0, y);
+    runtime.frame(0.0);
+    assert!(
+        matches!(
+            runtime.state.drag.phase(),
+            rune_kit::shell::TabDragPhase::Dragging(rune_kit::shell::TabDragMode::Reorder { from: 0, to: 1, .. })
+        ),
+        "140 points passes the second tab's midpoint: {:?}",
+        runtime.state.drag.phase()
+    );
+    runtime.pointer_up(x + 140.0, y);
+    runtime.frame(1.0 / 60.0);
+
+    assert_eq!(titles(&runtime.state), ["Two", "One", "Three"], "the drop reordered the strip");
+}
+
+#[test]
+fn escape_cancels_a_reorder_and_restores_the_order() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let tabs = three_tabs(&mut state);
+    let one = tabs[0];
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+
+    drag_tab(&mut runtime, one, 140.0);
+    assert!(
+        matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Dragging(_)),
+        "the tab is in hand before Escape"
+    );
+    runtime.key(rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+    runtime.frame(1.0 / 60.0);
+    runtime.pointer_up(0.0, 0.0);
+    runtime.frame(1.0 / 60.0);
+
+    assert_eq!(titles(&runtime.state), ["One", "Two", "Three"], "Escape put the tab back (T-19/D-08)");
+}
+
+#[test]
+fn an_export_blocks_starting_a_reorder() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let tabs = three_tabs(&mut state);
+    let one = tabs[0];
+    let doc = state.active_document_id().expect("the pinned document");
+    state.share.in_flight =
+        Some(crate::share::ExportJob { job: 91, doc, format: crate::share::ExportFormat::Html, open_viewer: false });
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+
+    drag_tab(&mut runtime, one, 140.0);
+    assert!(
+        !matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Dragging(_)),
+        "no gesture starts while an export runs: {:?}",
+        runtime.state.drag.phase()
+    );
+    runtime.pointer_up(0.0, 0.0);
+    runtime.frame(1.0 / 60.0);
+
+    assert_eq!(titles(&runtime.state), ["One", "Two", "Three"], "the order never moved");
+}
