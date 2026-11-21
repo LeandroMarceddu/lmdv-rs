@@ -236,6 +236,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-190 | P7 parity kit | rune-kit gaps block the last clauses of T-01/T-03/T-19/C-01: no flexible toolbar middle slot, no per-name tab width, no Saved status in the close slot, drag slop fixed at 4 pt (spec 5), no IME composing state | Add the kit APIs (or vendor patches) and switch the app-side substitutes to them | P7 | open |
 | OI-191 | P7 parity | H-06's notice bar sits at the foot of the window rather than the top centre of the pane | Move it over the pane once the layout has a safe top inset for it | P7 | open |
 | OI-192 | P7 parity | E-22's Insert and Tools menus and the plain “Type / for blocks” hint are missing; the heading picker/pressed state (incl. Setext) work | Add the two menus over the existing slash-action set and a plain-text hint key | P7 | open |
+| OI-193 | P7/Rune | No per-window present mode or frame-rate cap: `RunOptions` has only `accessory`, every native surface is configured `wgpu::PresentMode::AutoVsync` with `desired_maximum_frame_latency = 2` (`vendor/rune/crates/rune/src/window.rs:879-900`), and `WindowHandle` has only read-only `surface_stats()`/`FrameEncoded.refresh_hz`. A Settings frame-rate row would be inert today. | Ask Rune for `WindowOptions.present_mode` plus `WindowHandle::set_present_mode` (uncap) and/or `WindowHandle::set_frame_rate_cap(Option<f64>)` in the redraw scheduler; then add the row. The app already presents at the desktop's vsync (uncapped motion frames). | P7 | open |
 | OI-180 | P6-SAFE app | A watcher-observed external rename is rekeyed by the first window that processes the shared event; later windows keep the old Back/Forward spelling until reopened | `rename_history_paths` now broadcasts `UiMsg::DocumentRenamed` through `broadcast_window_rename`, so every window renames its places and refreshes the document's titles, including windows that never show the file. Tested with three windows. | P6 | fixed |
 
 ## 2. Resolved actions (examples)
@@ -265,7 +266,7 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above. Behavior-level status is in `docs/PARITY_AUDIT.md`.
 
-- **Open (52):** OI-001, 004, 024, 025, 026, 041, 042, 044, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 153, 155, 165, 176, 181, 182, 183, 186, 187, 188, 189, 190, 191, 192
+- **Open (53):** OI-001, 004, 024, 025, 026, 041, 042, 044, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 153, 155, 165, 176, 181, 182, 183, 186, 187, 188, 189, 190, 191, 192, 193
 - **Scheduled (4):** OI-003, 023, 027, 050
 - **Accepted (32):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 141, 150, 154, 157, 161, 163, 166, 174, 175, 177, 179
 - **Fixed (104):** kept for history.

@@ -1996,6 +1996,7 @@ fn reader_article(
     reader::ReaderView::new(model, &look.theme, &look.style, state.scroll_cell())
         .width(width)
         .max_width(column_width)
+        .memo(article_state_version(state, tab))
         .scroll_signal(state.scroll_signal_cell())
         .math(&math)
         .images(&images)
@@ -2024,6 +2025,24 @@ fn reader_article(
         .highlights(state.reader_highlights(tab))
         .scroll_margin(find_margin)
         .build()
+}
+
+/// The app state a reused article must still be built again for.
+///
+/// [`reader::ReaderView::memo`] keeps the drawer, but a handler reads the tab
+/// it belongs to, the open `<details>` cards are drawn from the tab, and the
+/// table bar's copy check is read while building. Scrolling changes none of
+/// them, which is what makes the article reusable frame after frame.
+fn article_state_version(state: &WindowState, tab: &Tab) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tab.id.hash(&mut hasher);
+    (tab.view.mode == Mode::Editor).hash(&mut hasher);
+    tab.view.details_open.hash(&mut hasher);
+    if let Some((key, _)) = state.tables.flash.borrow().as_ref() {
+        key.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// A deleted backing file: the buffer survives and Save again recreates it.

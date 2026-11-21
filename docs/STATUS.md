@@ -456,13 +456,32 @@
 - Audit: 200 done, 52 substitute, 61 partial, 11 missing, 18 n/a; 18 P0 gaps remain.
 - v0.7.0 tag; release notes in `docs/releases/v0.7.0.md`.
 
+## Default Markdown handler — Windows and Linux — complete (`e4ade81`)
+
+- Settings → General has one “Make lmdv the default for Markdown files” row on Windows and Linux.
+- Linux applies at once (`lmdv_io::assoc::linux`): reuses a usable `lmdv.desktop` byte for byte (the installer wrapper on this machine), otherwise writes a managed entry for `$APPIMAGE`/`current_exe` plus the embedded icon; sets `text/markdown`, `text/x-markdown` and `application/x-markdown` first in `mimeapps.list` under both default and added associations, preserving other handlers. No root, no `xdg-mime`/`gio`; best-effort `update-desktop-database`.
+- Windows registers the same HKCU keys as the NSIS installer and opens Default apps (filtered on 11) with an Open-with fallback; `UserChoice` is never read, deleted or forged.
+- API: `lmdv_io::assoc::{default_supported, make_default_for_markdown, Confirmation, AssociationError}`; the Windows planner stays pure and testable on Linux.
+- i18n 633 keys; Linux detail and “applied” notice in six locales.
+- Evidence: 24 `assoc` tests, 40 settings tests, 18 i18n tests; Linux + Windows-target checks clean; `--scene settings` shows the row. Windows runtime behavior still needs a real Windows run (OI-155).
+
+## Scroll latency and frame pacing — complete
+
+- The reported “30 FPS / delay when scrolling quickly” was per-frame article work, not vsync: the reading view passes link/block/table/media wires, so `lmdv-render`'s per-block memo was unreachable and every wheel frame rebuilt the whole article. On the reporter's 951 KiB guide: **49.9 ms/frame (20 FPS)**, `view_cpu` 14–15.5 ms, layout 0.13 ms.
+- `ReaderView::memo` now wraps the article in `rune::memo`, versioned by document revision (+ source hash while revision 0), theme fingerprint, content width, scale, highlight hash and app state (tab, mode, open details/front matter, table copy flash). Documents drawing a picture or diagram stay unmemoised (a picture decodes on a worker, a diagram follows the appearance).
+- The wheel glide is speed-aware: Rune's 0.32 s spring for a single notch or a wheel after a pause, stiffening to 0.10 s during a burst so the content trails ~72 pt instead of ~300. Single-notch motion is unchanged.
+- Result: **20 → 41 FPS** at 1200×860 (46.5 at 900×700), `view_cpu` **1.9 ms**, burst trail **297 → 117 pt**. The renderer's own commit/apply/paint over 15.5k nodes is now the cost; 60 FPS on this document needs Rune-side work or a virtualized article.
+- No FPS setting: this Rune rev exposes no present mode or refresh cap, and every surface is already `AutoVsync` (desktop refresh). A row would be inert; the Rune API request is OI-193.
+- Fixture: `tests/fixtures/stress/developer-guide.md` (951 KiB, 10.5k lines, 51 tables, 186 fences).
+
 ## Next up
 
 **Next when work resumes:**
 
-1. Triage the 45 P0 gap rows in `docs/PARITY_AUDIT.md` (tabs strip, editor preview/sync, links, start page/help), then D-03 image drop (OI-187) and drag-to-scroll (OI-186).
-2. The scheduled Rune port to `7a707454` (OI-189, `docs/RUNE_DELTA_2026-11-20.md`).
-3. P7 packaging: LICENSE, three-part reverse-DNS id, installer icon, signed checksums (OI-153); Windows runtime only if it becomes a target (OI-155).
+1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms; see the scroll section and OI-193).
+2. Triage the 18 P0 gap rows in `docs/PARITY_AUDIT.md` (kit-blocked and small UI items), then D-03 image drop (OI-187) and drag-to-scroll (OI-186).
+3. The scheduled Rune port to `7a707454` (OI-189, `docs/RUNE_DELTA_2026-11-20.md`).
+4. P7 packaging: LICENSE, three-part reverse-DNS id, installer icon, signed checksums (OI-153); Windows runtime only if it becomes a target (OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

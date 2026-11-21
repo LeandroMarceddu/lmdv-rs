@@ -15,10 +15,11 @@
 //! viewport anchor [`Cell`] that `poll` observes for positions.
 
 use std::cell::Cell;
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::rc::Rc;
 
-use lmdv_md::MdDoc;
+use lmdv_md::{Block, HtmlChild, HtmlNode, HtmlTag, Inline, InlineObjectKind, MdDoc};
 use lmdv_render::{DocTheme, Highlight, ImageResolver, MathResolver, RenderOptions, RenderWires, heading_key, render};
 use rune::{Color, Cx, El, KeyEvent, ScrollSpec, Tx, col};
 use rune_kit::markdown::MarkdownStyle;
@@ -273,6 +274,81 @@ pub fn block_at_y(count: usize, y: f32, bottom: impl Fn(usize) -> Option<f32>) -
     if measured { Some(lo.min(count - 1)) } else { Some(count - 1) }
 }
 
+/// Whether the article draws a picture or a diagram that a later frame must
+/// build again for.
+///
+/// A picture decodes on a worker: the frame that first resolves it draws its
+/// declared box, and the frame after it is ready draws the picture's real
+/// aspect ratio (or its placeholder, when the decode failed). A diagram is
+/// drawn from the appearance's own Mermaid style. Both therefore need the
+/// article built on the frame they change, which rules out reusing it
+/// ([`ReaderView::memo`]).
+///
+/// Formulas are drawn in the building frame (`MathResolver`), so a document
+/// may hold them and still keep its article.
+pub fn draws_live_media(doc: &MdDoc) -> bool {
+    doc.blocks.iter().any(block_draws_live_media)
+        || doc.footnotes.iter().any(|footnote| footnote.blocks.iter().any(block_draws_live_media))
+}
+
+/// [`draws_live_media`] for one block, nested blocks included.
+fn block_draws_live_media(block: &Block) -> bool {
+    match block {
+        Block::Image(_) | Block::Mermaid { .. } => true,
+        Block::Para(inline) | Block::Heading { inline, .. } => inline_draws_live_media(inline),
+        Block::List { items, .. } => items.iter().flatten().any(block_draws_live_media),
+        Block::Quote { blocks, .. } => blocks.iter().any(block_draws_live_media),
+        Block::Table(table) => {
+            table.head.iter().any(inline_draws_live_media) || table.rows.iter().flatten().any(inline_draws_live_media)
+        }
+        Block::HtmlBlock(node) => html_draws_live_media(node),
+        Block::Code { .. } | Block::Rule | Block::MathBlock { .. } | Block::FootnoteDefs | Block::Toc => false,
+    }
+}
+
+/// [`draws_live_media`] for one inline run's objects.
+///
+/// A `<picture>` resolves through the same image resolver as an `Image` (its
+/// best `<source>`/`<img>` candidate decodes on a worker), so it keeps the
+/// article from being reused too. `<video>` and `<audio>` draw only a text
+/// link, so they do not.
+fn inline_draws_live_media(inline: &Inline) -> bool {
+    inline.objects.iter().any(|object| matches!(object.kind, InlineObjectKind::Image | InlineObjectKind::Picture))
+}
+
+/// [`draws_live_media`] for an allowed-HTML subtree.
+fn html_draws_live_media(node: &HtmlNode) -> bool {
+    if matches!(node.tag, HtmlTag::Img | HtmlTag::Picture | HtmlTag::Video | HtmlTag::Audio) {
+        return true;
+    }
+    node.children.iter().any(|child| match child {
+        HtmlChild::Node(child) => html_draws_live_media(child),
+        HtmlChild::Text(_) => false,
+    })
+}
+
+/// The source hash an article's memo key needs when a parse reuses revision 0.
+///
+/// [`render`]'s per-block keys hash the source for the same reason: a document
+/// parsed by [`lmdv_md::parse`] is revision 0 whatever its text. A document
+/// with a real revision needs none, so a large source stays unhashed on every
+/// frame the article is reused.
+fn revision_source_hash(doc: &MdDoc) -> u64 {
+    if doc.revision != 0 {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    doc.source.as_ref().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A version of the paint-only highlights, for the article's memo key.
+fn highlights_hash(highlights: &[Highlight]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    highlights.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// The reading column's side and top padding at `width` (R-02).
 ///
 /// The section line uses the same steps so its path begins where the text does.
@@ -306,6 +382,9 @@ pub struct ReaderView<'a> {
     scale: f32,
     background: Color,
     scroll_margin: f32,
+    /// The app state the article's handlers capture, when it may be reused
+    /// ([`ReaderView::memo`]).
+    memo: Option<u64>,
 }
 
 impl<'a> ReaderView<'a> {
@@ -332,6 +411,7 @@ impl<'a> ReaderView<'a> {
             scale: 1.0,
             background: Color::TRANSPARENT,
             scroll_margin: 0.0,
+            memo: None,
         }
     }
 
@@ -409,6 +489,29 @@ impl<'a> ReaderView<'a> {
         self
     }
 
+    /// Reuses the article across frames that would draw the same thing.
+    ///
+    /// The window's view runs whenever a scroll moves the outline's spy or the
+    /// reading anchor, so every frame of a wheel burst would otherwise build
+    /// the whole article again: 14 ms of a 50 ms frame on a 950 KiB document.
+    /// Rune's `memo` hands back the subtree it built for the same key instead,
+    /// keeping its node identity, so selection, hover and the viewport's
+    /// scroll offset carry on untouched.
+    ///
+    /// The key is the document revision (with the source hashed while a parse
+    /// reuses revision 0), the theme's fingerprint, the column, the scale, the
+    /// highlights and `state`. `state` must cover every app value a handler in
+    /// the article captured or read while building: the tab, the mode, the
+    /// open `<details>` cards and the table bar's copy flash.
+    ///
+    /// A document that draws a picture or a diagram is never kept
+    /// ([`draws_live_media`]): its article has to be built again when the
+    /// picture decodes or the appearance's diagram style changes.
+    pub fn memo(mut self, state: u64) -> Self {
+        self.memo = Some(state);
+        self
+    }
+
     /// The device scale, for `srcset` and fixed-size pictures (M-26).
     pub fn scale(mut self, scale: f32) -> Self {
         if scale.is_finite() {
@@ -431,6 +534,9 @@ impl<'a> ReaderView<'a> {
         // overflowing the article.
         let column = self.max_width.map_or(self.width, |max| self.width.min(max));
         let content_width = (column - 2.0 * pad_x).max(1.0);
+        // A document that draws a picture or a diagram is never kept (see `draws_live_media`).
+        let memo = self.memo.filter(|_| !draws_live_media(self.doc));
+        let highlights_version = memo.is_some().then(|| highlights_hash(&self.highlights));
         let opts = RenderOptions {
             width: content_width,
             style: self.style,
@@ -444,7 +550,24 @@ impl<'a> ReaderView<'a> {
             scale: self.scale,
             highlights: self.highlights,
         };
-        let article = render(self.doc, self.theme, &opts);
+        let article = match memo {
+            Some(state) => {
+                let version = (
+                    self.doc.revision,
+                    revision_source_hash(self.doc),
+                    self.theme.fingerprint(),
+                    content_width.to_bits(),
+                    self.scale.to_bits(),
+                    highlights_version.unwrap_or(0),
+                    state,
+                );
+                // The id is the renderer's own root key, so the reused
+                // subtree keeps it: Rune renames a memoised root to the memo's
+                // id, and one window draws one article.
+                rune::memo(lmdv_render::DOC_KEY, version, || render(self.doc, self.theme, &opts))
+            }
+            _ => render(self.doc, self.theme, &opts),
+        };
         let mut column = col().key(ARTICLE_KEY).w_full().px(pad_x).pt(pad_top).pb(READER_PAD_BOTTOM).child(article);
         if let Some(max_width) = self.max_width {
             column = column.max_w(max_width);
@@ -652,6 +775,38 @@ Closing paragraph.
         assert_eq!(activation_line(700.0, end), 700.0, "at the end the line is the viewport's bottom");
         assert_eq!(activation_line(0.0, end), HEADING_ACTIVATION, "no viewport yet");
         assert_eq!(activation_line(700.0, ScrollSnapshot::default()), HEADING_ACTIVATION, "a short document");
+    }
+
+    #[test]
+    fn only_pictures_and_diagrams_keep_the_article_from_being_reused() {
+        assert!(!draws_live_media(&lmdv_md::parse(FIXTURE)), "text, lists, quotes, code and tables are still");
+        assert!(
+            !draws_live_media(&lmdv_md::parse("$$x^2$$\n\nSome math.\n")),
+            "a formula is drawn in the building frame"
+        );
+
+        assert!(draws_live_media(&lmdv_md::parse("![alt](shot.png)\n")), "a block picture");
+        assert!(draws_live_media(&lmdv_md::parse("A paragraph with ![alt](shot.png) inline.\n")), "an inline picture");
+        assert!(draws_live_media(&lmdv_md::parse("> ![alt](shot.png)\n")), "a picture in a quote");
+        assert!(draws_live_media(&lmdv_md::parse("- ![alt](shot.png)\n")), "a picture in a list item");
+        assert!(
+            draws_live_media(&lmdv_md::parse("| a |\n| --- |\n| ![alt](shot.png) |\n")),
+            "a picture in a table cell"
+        );
+        assert!(draws_live_media(&lmdv_md::parse("<img src=\"shot.png\" alt=\"alt\">\n")), "an HTML picture");
+        let picture = r#"<picture><source srcset="shot.webp"><img src="shot.png" alt="alt"></picture>"#;
+        assert!(
+            draws_live_media(&lmdv_md::parse(&format!("A paragraph with {picture} inline.\n"))),
+            "an inline <picture> decodes through the image resolver"
+        );
+        assert!(
+            draws_live_media(&lmdv_md::parse(&format!("| a |\n| --- |\n| {picture} |\n"))),
+            "an inline <picture> in a table cell"
+        );
+        assert!(draws_live_media(&lmdv_md::parse("```mermaid\ngraph TD\nA-->B\n```\n")), "a diagram");
+
+        let footnoted = lmdv_md::parse("A note.[^1]\n\n[^1]: ![alt](shot.png)\n");
+        assert!(draws_live_media(&footnoted), "a picture in a footnote definition");
     }
 
     #[test]

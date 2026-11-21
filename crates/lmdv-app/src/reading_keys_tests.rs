@@ -667,3 +667,67 @@ fn question_mark_toggles_the_keys_overlay_in_the_reading_view() {
     settle(&mut runtime, 2);
     assert!(runtime.state.help_view().is_none(), "`?` again closes it");
 }
+
+#[test]
+fn a_fast_wheel_burst_keeps_the_article_and_lands_on_its_target() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.reset_to_start_page();
+    let mut text = String::from("# Burst\n\n");
+    for section in 0..60 {
+        text.push_str(&format!("## Section {section}\n\nA paragraph to scroll past.\n\n- one\n- two\n\n"));
+    }
+    state.open_synthetic("Burst", &text);
+    state.left.set_open(false);
+    state.right.set_open(false);
+    let mut runtime = open(state);
+    settle(&mut runtime, 4);
+    let start = scroll(&runtime);
+
+    // Sixty notches at once: the article is reused frame after frame (it has no
+    // picture or diagram), and every heading is still drawn after the burst.
+    for _ in 0..60 {
+        runtime.wheel_event(WheelEvent::new(0.0, -53.0).at(600.0, 400.0));
+        runtime.frame(1.0 / 60.0);
+    }
+    settle(&mut runtime, 60);
+    let headless = runtime.state.active_reader().expect("a model").headings.len();
+    assert!(headless > 0);
+    let elements = runtime.elements();
+    let headings = elements.iter().filter(|element| element.role == "heading").count();
+    assert!(headings > 0, "the article is still drawn after the burst");
+    assert!(elements.iter().any(|element| element.key.as_deref() == Some(crate::reader::ARTICLE_KEY)));
+    let landed = scroll(&runtime);
+    assert!(landed.offset > start.offset, "the burst scrolled the page: {start:?} -> {landed:?}");
+    assert!((landed.offset - (start.offset + 60.0 * 53.0)).abs() < 3.0, "and landed where the wheel asked");
+}
+
+#[test]
+fn opening_the_front_matter_card_builds_the_article_again() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.reset_to_start_page();
+    state.open_synthetic("Front matter", "---\ntitle: Hello\n---\n\n# Page\n\nBody.\n");
+    state.left.set_open(false);
+    state.right.set_open(false);
+    let mut runtime = open(state);
+    settle(&mut runtime, 6);
+    let has_entries = |runtime: &Runtime<WindowState>| {
+        runtime.elements().iter().any(|element| element.key.as_deref() == Some("entries") && !element.exiting)
+    };
+    assert!(!has_entries(&runtime), "the card starts closed");
+
+    // The reused article must still be built again for an open card: the card's
+    // table is app state the build reads, not a scroll.
+    runtime.update(|state: &mut WindowState, _tx| {
+        state.active_tab_mut().expect("a tab").view.details_open.insert(lmdv_render::FRONT_MATTER_KEY.to_owned());
+    });
+    runtime.frame(1.0 / 60.0);
+    assert!(has_entries(&runtime), "the open card's table is drawn");
+
+    runtime.update(|state: &mut WindowState, _tx| {
+        state.active_tab_mut().expect("a tab").view.details_open.clear();
+    });
+    runtime.frame(1.0 / 60.0);
+    assert!(!has_entries(&runtime), "and closing it takes the table away again");
+}

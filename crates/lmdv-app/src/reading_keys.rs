@@ -39,6 +39,15 @@ pub const KEY_SCROLL: f32 = 80.0;
 pub const KEY_ACCUMULATE_SECONDS: f64 = 0.400;
 /// Wheel notches closer together than this add up from the previous target.
 pub const WHEEL_ACCUMULATE_SECONDS: f64 = 0.200;
+/// Rune's glide spring (`tok::motion::GLIDE`), in seconds: the smooth single
+/// notch.
+pub const WHEEL_GLIDE_SECONDS: f32 = rune::tok::motion::GLIDE.duration;
+/// The stiffest spring a fast wheel burst glides on, in seconds. Below this the
+/// motion reads as a jump rather than a glide.
+pub const WHEEL_GLIDE_MIN_SECONDS: f32 = 0.10;
+/// How far a fast wheel's glide trails the wheel, in points (under two
+/// notches of a 40-point wheel).
+pub const WHEEL_LAG: f32 = 72.0;
 /// Two `g` presses inside this window go to the top (R-09).
 pub const DOUBLE_G_SECONDS: f64 = 0.500;
 /// The next heading is the first whose top is past this, below the viewport's
@@ -135,6 +144,9 @@ pub(crate) struct ReadingKeys {
     pub(crate) pin: Option<HeadingPin>,
     /// When the last notched wheel delta was taken.
     pub(crate) last_wheel: Option<f64>,
+    /// The wheel's own speed, in points a second, smoothed over a burst
+    /// ([`Self::wheel_spring`]); 0 outside a burst.
+    pub(crate) wheel_speed: f32,
     /// The scroll report count the pin was armed at.
     report: u64,
 }
@@ -163,6 +175,39 @@ impl ReadingKeys {
     /// Records the target of a `j`/`k` press.
     pub(crate) fn note_scroll(&mut self, target: f32, now: f64) {
         self.target = Some(KeyTarget { target, at: now });
+    }
+
+    /// The spring one notch glides on, from how fast the wheel is turning.
+    ///
+    /// Rune bounds a glide's speed by `ω × distance left`, so Rune's own 0.32 s
+    /// spring settles ~300 points behind a wheel turning at 60 notches a
+    /// second: the content visibly trails the hand. A shorter spring raises ω,
+    /// and with it the speed the glide may carry, so a burst holds a constant
+    /// [`WHEEL_LAG`] behind the wheel instead of falling further behind the
+    /// faster it turns. One notch, or a wheel after a pause, keeps Rune's glide
+    /// untouched, so the smooth single notch stays smooth.
+    ///
+    /// Called once per notch; it also records the notch as the gesture's last
+    /// ([`Self::last_wheel`]), before [`Self::note_scroll`] moves the target.
+    pub(crate) fn wheel_spring(&mut self, now: f64, dy: f32) -> rune::Spring {
+        let gap = self.last_wheel.and_then(|at| (now >= at).then_some(now - at));
+        self.last_wheel = Some(now);
+        let instant = match gap {
+            // Two events in the same instant are one burst at the highest rate
+            // the clock can tell: a 4 ms floor keeps the spring finite.
+            Some(gap) if gap > 0.0 && gap < WHEEL_ACCUMULATE_SECONDS => dy.abs() / gap.max(0.004) as f32,
+            _ => 0.0,
+        };
+        self.wheel_speed = if instant <= 0.0 || !instant.is_finite() {
+            0.0
+        } else if self.wheel_speed <= 0.0 {
+            instant
+        } else {
+            // Smoothed: a wheel's events are not evenly spaced, and one short
+            // gap must not turn a slow gesture into a burst.
+            self.wheel_speed * 0.5 + instant * 0.5
+        };
+        wheel_spring_for(self.wheel_speed)
     }
 
     /// Records a `g` press; true when it completed `g g` inside 500 ms (R-09).
@@ -218,6 +263,19 @@ impl ReadingKeys {
         }
         false
     }
+}
+
+/// The glide spring for `speed` points a second: Rune's own glide for a slow
+/// wheel or a single notch, and a stiffer one — down to
+/// [`WHEEL_GLIDE_MIN_SECONDS`] — the faster the wheel turns, so the trailing
+/// distance stays near [`WHEEL_LAG`].
+pub(crate) fn wheel_spring_for(speed: f32) -> rune::Spring {
+    let speed = if speed.is_finite() { speed.max(0.0) } else { 0.0 };
+    if speed <= 0.0 {
+        return rune::tok::motion::GLIDE;
+    }
+    let duration = (std::f32::consts::TAU * WHEEL_LAG / speed).clamp(WHEEL_GLIDE_MIN_SECONDS, WHEEL_GLIDE_SECONDS);
+    rune::Spring::new(duration, 0.0)
 }
 
 impl WindowState {
@@ -320,7 +378,10 @@ impl WindowState {
     /// no modifiers, no horizontal part) on an active reading surface: it
     /// accumulates from the previous wheel target within
     /// [`WHEEL_ACCUMULATE_SECONDS`], clamps to the document and glides there
-    /// through `Tx::scroll_to`, which reduced motion turns into a jump (A-15).
+    /// through `Tx::scroll_to_with`, which reduced motion turns into a jump
+    /// (A-15). The spring is Rune's own glide for a single notch and stiffens
+    /// with a burst's speed, so a fast wheel does not trail hundreds of points
+    /// behind the hand; a slow wheel keeps the smooth glide.
     /// `dy` points content down, so a notch down (negative) moves the offset up.
     ///
     /// The first notch of a gesture releases the O-04 heading pin and forgets
@@ -340,6 +401,10 @@ impl WindowState {
         }
         let now = tx.clock();
         let fresh = self.reading_keys.last_wheel.is_none_or(|at| now < at || now - at >= WHEEL_ACCUMULATE_SECONDS);
+        // The glide's spring follows the wheel's own speed (see
+        // `ReadingKeys::wheel_spring`); it also records this notch as the
+        // gesture's last, so it runs after `fresh` reads the one before.
+        let spring = self.reading_keys.wheel_spring(now, event.dy);
         if fresh {
             self.reading_keys.release_pin();
             self.reading_keys.target = None;
@@ -349,8 +414,7 @@ impl WindowState {
         let from = self.reading_keys.scroll_from_within(now, scroll.offset, WHEEL_ACCUMULATE_SECONDS);
         let target = (from - event.dy).clamp(0.0, scroll.max.max(0.0));
         self.reading_keys.note_scroll(target, now);
-        self.reading_keys.last_wheel = Some(now);
-        tx.scroll_to(ARTICLE_SCROLL_KEY, 0.0, target);
+        tx.scroll_to_with(ARTICLE_SCROLL_KEY, 0.0, target, spring);
         true
     }
 
@@ -492,6 +556,41 @@ mod tests {
         keys.note_scroll(200.0, 1.0);
         assert_eq!(keys.scroll_from(1.399, 70.0), 200.0);
         assert_eq!(keys.scroll_from(1.401, 70.0), 70.0);
+    }
+
+    #[test]
+    fn a_single_notch_keeps_rune_glide_and_a_burst_stiffens_it() {
+        let mut keys = ReadingKeys::default();
+        let first = keys.wheel_spring(1.0, -53.0);
+        assert_eq!(first.duration, WHEEL_GLIDE_SECONDS, "a lone notch keeps Rune's glide smooth");
+
+        // 53 points every 16.7 ms is about 3180 points a second.
+        let mut now = 1.0;
+        let mut burst = first;
+        for _ in 0..12 {
+            now += 1.0 / 60.0;
+            burst = keys.wheel_spring(now, -53.0);
+        }
+        let lag = std::f32::consts::TAU * WHEEL_LAG / burst.duration;
+        assert!((lag - 3180.0).abs() < 400.0, "a 60-notch burst holds its lag: {burst:?} carries {lag}");
+        assert!(burst.duration < WHEEL_GLIDE_SECONDS, "the burst glides stiffer than the notch: {burst:?}");
+
+        // A pause is a new gesture: soft again, and no speed left over.
+        let soft = keys.wheel_spring(now + WHEEL_ACCUMULATE_SECONDS + 0.1, -53.0);
+        assert_eq!(soft.duration, WHEEL_GLIDE_SECONDS);
+        assert_eq!(keys.wheel_speed, 0.0);
+    }
+
+    #[test]
+    fn the_spring_never_softens_past_rune_and_never_jumps() {
+        assert_eq!(wheel_spring_for(0.0).duration, WHEEL_GLIDE_SECONDS);
+        assert_eq!(wheel_spring_for(-10.0).duration, WHEEL_GLIDE_SECONDS, "a nonsense speed keeps the glide");
+        assert_eq!(wheel_spring_for(f32::NAN).duration, WHEEL_GLIDE_SECONDS);
+        assert_eq!(wheel_spring_for(1.0).duration, WHEEL_GLIDE_SECONDS, "a slow wheel is never softer than Rune's");
+        assert_eq!(wheel_spring_for(1e6).duration, WHEEL_GLIDE_MIN_SECONDS, "a very fast one still glides");
+        assert_eq!(wheel_spring_for(1e6).bounce, 0.0, "critically damped, as Rune's glide");
+        let crossover = std::f32::consts::TAU * WHEEL_LAG / WHEEL_GLIDE_SECONDS;
+        assert!((wheel_spring_for(crossover).duration - WHEEL_GLIDE_SECONDS).abs() < 1e-5);
     }
 
     #[test]
