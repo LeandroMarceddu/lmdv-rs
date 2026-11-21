@@ -160,7 +160,7 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | X-04 | System print dialog | PDF + system viewer/print | **substitute** |
 | X-08 | Native Word equations (OMML) | Images first; OMML optional | **proposed gap** |
 | X-08 / V-08 | SVG export | PNG first; SVG spike | **proposed gap** |
-| S-07/08/09/25 | Windows associations, New template, recent/jump list, alias | XDG MIME, `~/.local/bin`, app recents; `.desktop` actions optional | **substitute** |
+| S-07/08/09/25 | Windows associations, New template, recent/jump list, alias | XDG MIME, `~/.local/bin`, app recents; `.desktop` actions optional; Settings → **Make default…** applies the XDG association in one press (`lmdv_io::assoc::linux`) | **substitute** |
 | S-11/15/16/17, W-03/05/06/08, I-05 | Store/MSIX/WebView2-native behavior | Not applicable | **n/a** |
 | M-12 | Full Mermaid 11 | 17 native families; unsupported → code block | **substitute** |
 | R-20/X-03 | Rich copy of a selection | Whole-doc rich copy done (P5-04b); selection needs a block-range serializer | **build** |

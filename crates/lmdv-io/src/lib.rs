@@ -14,7 +14,11 @@
 //! * [`watch`] — debounced document and folder-tree watchers.
 //! * [`tree`] — Markdown folder listings and folder-wide search.
 //! * [`instance`] — the `flock` + Unix-socket single-instance protocol.
+//! * [`assoc`] — making lmdv the default Markdown handler: the Windows
+//!   registry registration with the Default apps hand-off, and the Linux XDG
+//!   desktop entry plus `mimeapps.list` defaults.
 
+pub mod assoc;
 pub mod atomic;
 pub mod dirs;
 pub mod instance;

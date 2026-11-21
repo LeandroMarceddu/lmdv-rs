@@ -14,10 +14,11 @@
 use lmdv_core::{
     ColumnWidth, DEFAULT_READER_SIZE, LargeFileMode, LineHeight, Prefs, ReaderFont, SIZE_STEPS, SideSize, ThemePref,
 };
+use lmdv_io::assoc::{AssociationError, Confirmation};
 use rune::{Key, KeyEvent, TextStyle, Tx};
 use rune_kit::Kit;
 
-use crate::window::WindowState;
+use crate::window::{NoticeKind, WindowState};
 
 /// The settings modal's root.
 pub const SETTINGS_KEY: &str = "settings";
@@ -75,6 +76,13 @@ pub const SETTINGS_LANGUAGE_TRIGGER: &str = "settings-language-trigger";
 pub const SETTINGS_RESTORE: &str = "settings-restore";
 /// The print/PDF H1 page-break switch.
 pub const SETTINGS_BREAK_H1: &str = "settings-break-h1";
+/// The “default for Markdown files” row (Windows and Linux).
+pub const SETTINGS_DEFAULT_MD_ROW: &str = "settings-row-default-md";
+/// Its button.
+pub const SETTINGS_DEFAULT_MD: &str = "settings-default-md";
+/// How long the report stays up; on Windows the user is in Settings when it
+/// appears, so it outlives an ordinary confirmation.
+const DEFAULT_MD_NOTICE_SECONDS: f64 = 8.0;
 
 /// One choice in the theme control, in the original app's order.
 pub const THEMES: [ThemePref; 5] =
@@ -203,6 +211,43 @@ pub fn pane_kit(kit: &Kit, size: SideSize) -> Kit {
     type_scale(&mut pane.ty.text_xsmall);
     type_scale(&mut pane.ty.text_xsmall_medium);
     pane
+}
+
+/// Whether this build offers the “default for Markdown files” action.
+///
+/// Windows registers lmdv and hands the confirmation to Default apps; Linux
+/// writes the XDG entry and the user's `mimeapps.list` and applies it at once.
+/// The row is not drawn anywhere else, although the action still answers with
+/// the unsupported notice if reached.
+pub const fn default_markdown_supported() -> bool {
+    lmdv_io::assoc::default_supported()
+}
+
+/// The row's explanation: what the press actually does on this platform.
+///
+/// Windows needs the user's confirmation in Default apps, so the detail says so;
+/// Linux applies the change here and now.
+pub fn default_markdown_detail() -> &'static str {
+    if cfg!(windows) { lmdv_i18n::t!("set.defaultMdDetail") } else { lmdv_i18n::t!("set.defaultMdDetailLinux") }
+}
+
+/// The notice a “make default” result shows, and how it reads.
+///
+/// Pure, so the mapping is tested without writing a registry or a desktop entry:
+/// Linux's [`Confirmation::Applied`] is a completed action, the Windows pages
+/// are informational hand-offs, and a refusal that still registered lmdv is a
+/// warning.
+pub fn default_markdown_notice(result: Result<Confirmation, AssociationError>) -> (String, NoticeKind) {
+    match result {
+        Ok(Confirmation::Applied) => (lmdv_i18n::t!("msg.defaultMdApplied").to_owned(), NoticeKind::Success),
+        Ok(Confirmation::FilteredSettingsPage | Confirmation::SettingsPage) => {
+            (lmdv_i18n::t!("msg.defaultMdRegistered").to_owned(), NoticeKind::Info)
+        }
+        Ok(Confirmation::OpenWithDialog) => (lmdv_i18n::t!("msg.defaultMdOpenWith").to_owned(), NoticeKind::Info),
+        Ok(Confirmation::Unavailable) => (lmdv_i18n::t!("msg.defaultMdManual").to_owned(), NoticeKind::Warning),
+        Err(AssociationError::Unsupported) => (lmdv_i18n::t!("msg.defaultMdUnsupported").to_owned(), NoticeKind::Info),
+        Err(error) => (lmdv_i18n::t!("msg.defaultMdFailed", "err" => error.to_string()), NoticeKind::Warning),
+    }
 }
 
 /// The locale index a preference set resolves to.
@@ -429,6 +474,10 @@ impl WindowState {
                 self.set_print_break_h1(!on);
                 true
             }
+            SETTINGS_DEFAULT_MD => {
+                self.make_default_markdown();
+                true
+            }
             "settings-close" | "settings-close-footer" => {
                 self.close_settings();
                 true
@@ -629,6 +678,24 @@ impl WindowState {
     /// same preference.
     pub fn set_print_break_h1(&mut self, on: bool) {
         self.patch_prefs(|prefs| prefs.print_break_h1 = on);
+    }
+
+    /// `settings-default-md`: makes lmdv the Markdown handler.
+    ///
+    /// On Linux the XDG entry and the user's `mimeapps.list` are written here and
+    /// the action is complete. Windows 10/11 protect `UserChoice`, so there the
+    /// registry work lives in [`lmdv_io::assoc`] and the dialog closes (the
+    /// Default apps page covers it) while lmdv reports which surface opened. A
+    /// platform with neither reaches the same path and says the action is
+    /// unavailable.
+    pub fn make_default_markdown(&mut self) {
+        self.close_settings();
+        let active = self.active_path();
+        let (text, kind) = default_markdown_notice(lmdv_io::assoc::make_default_for_markdown(active.as_deref()));
+        // On Windows the Default apps page takes the user away from lmdv; let the
+        // report outlive the usual copy confirmation (H-06's strip is the one
+        // place it is announced).
+        self.show_notice(text, kind, None, DEFAULT_MD_NOTICE_SECONDS);
     }
 
     /// Whether every preference this dialog resets still equals its default, so

@@ -601,6 +601,90 @@ fn the_editor_and_general_switches_change_their_preferences() {
     assert!((share.checked.expect("checked"))(&state));
 }
 
+#[test]
+fn the_default_markdown_row_exists_where_the_action_does() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    open(&mut state);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+
+    let elements = runtime.elements();
+    let row = elements.iter().find(|element| element.key.as_deref() == Some(SETTINGS_DEFAULT_MD_ROW));
+    let button = elements.iter().find(|element| element.key.as_deref() == Some(SETTINGS_DEFAULT_MD));
+    let supported = cfg!(any(windows, target_os = "linux"));
+    assert_eq!(row.is_some(), supported, "the default-app row exists exactly where the action does");
+    assert_eq!(button.is_some(), supported, "its button, too");
+    assert_eq!(default_markdown_supported(), supported);
+
+    if supported {
+        assert_eq!(button.map(|button| button.role), Some("button"));
+    }
+
+    // The detail says what a press does here. The button itself is never pressed
+    // in a test: on Linux that would rewrite the real ~/.config/mimeapps.list.
+    let tree = runtime.accessibility_json();
+    let description = a11y(&tree, SETTINGS_DEFAULT_MD_ROW)
+        .and_then(|row| row.get("description"))
+        .and_then(|description| description.as_str());
+    if supported {
+        assert_eq!(description, Some(default_markdown_detail()));
+    } else {
+        assert_eq!(description, None, "no row is drawn where the action does not exist");
+    }
+}
+
+#[test]
+fn the_default_detail_names_the_platforms_own_mechanism() {
+    if cfg!(windows) {
+        assert_eq!(default_markdown_detail(), lmdv_i18n::t!("set.defaultMdDetail"));
+    } else {
+        assert_eq!(default_markdown_detail(), lmdv_i18n::t!("set.defaultMdDetailLinux"));
+        assert_ne!(
+            default_markdown_detail(),
+            lmdv_i18n::t!("set.defaultMdDetail"),
+            "the Windows confirmation hand-off is not what Linux does"
+        );
+    }
+}
+
+#[test]
+fn the_default_markdown_result_maps_to_its_notice() {
+    use lmdv_io::assoc::{AssociationError, Confirmation};
+
+    let applied = default_markdown_notice(Ok(Confirmation::Applied));
+    assert_eq!(applied, (lmdv_i18n::t!("msg.defaultMdApplied").to_owned(), crate::window::NoticeKind::Success));
+    assert_ne!(
+        applied.0,
+        lmdv_i18n::t!("msg.defaultMdUnsupported"),
+        "Linux applies the change instead of reporting a platform limit"
+    );
+
+    for page in [Confirmation::FilteredSettingsPage, Confirmation::SettingsPage] {
+        assert_eq!(
+            default_markdown_notice(Ok(page)),
+            (lmdv_i18n::t!("msg.defaultMdRegistered").to_owned(), crate::window::NoticeKind::Info),
+            "{page:?} is the register-then-confirm hand-off"
+        );
+    }
+    assert_eq!(
+        default_markdown_notice(Ok(Confirmation::OpenWithDialog)),
+        (lmdv_i18n::t!("msg.defaultMdOpenWith").to_owned(), crate::window::NoticeKind::Info)
+    );
+    assert_eq!(
+        default_markdown_notice(Ok(Confirmation::Unavailable)),
+        (lmdv_i18n::t!("msg.defaultMdManual").to_owned(), crate::window::NoticeKind::Warning)
+    );
+    assert_eq!(
+        default_markdown_notice(Err(AssociationError::Unsupported)),
+        (lmdv_i18n::t!("msg.defaultMdUnsupported").to_owned(), crate::window::NoticeKind::Info)
+    );
+
+    let (text, kind) = default_markdown_notice(Err(AssociationError::NoHome));
+    assert_eq!(kind, crate::window::NoticeKind::Warning);
+    assert!(text.contains(&AssociationError::NoHome.to_string()), "the reason reaches the user: {text}");
+}
+
 // ---- live layout ----------------------------------------------------------
 
 #[test]

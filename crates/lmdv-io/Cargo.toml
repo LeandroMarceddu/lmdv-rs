@@ -23,5 +23,16 @@ blake3 = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Windows-only: the per-user registry writes, Default apps hand-off and shell
+# refresh for `assoc::windows`. `windows-sys` is already in the lockfile through
+# the app's platform crates, so this adds no package.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile = "3"

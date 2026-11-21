@@ -383,6 +383,35 @@ The installer implements the first three fallbacks, including a small `mimeapps.
 
 The one non-obvious fallback is editing `mimeapps.list` directly: `xdg-mime` prepends the new app to the existing list rather than replacing it. Our editor does the same, so uninstalling restores `kate;zed;` rather than just `kate`.
 
+### 3.8 The in-app “Make lmdv the default” action
+
+Settings → General carries the same row on Windows and Linux. On Linux the
+press applies the association immediately (`lmdv_io::assoc::linux`); there is
+no consent hash to hand off, so no settings page opens:
+
+1. A usable `lmdv.desktop` (a `[Desktop Entry]` with `Exec=` and one of the
+   three Markdown `MimeType=` values) in `$XDG_DATA_HOME/applications` or any
+   `$XDG_DATA_DIRS` `applications` directory is reused **byte for byte**. This
+   keeps the installer's launcher wrapper (`~/.local/bin/lmdv`) and a package's
+   entry authoritative. A user-level entry that is not usable stops the press
+   rather than being overwritten.
+2. Only when no usable entry exists, the app writes the packaging entry for
+   `$APPIMAGE` (an AppImage's `current_exe` is inside its mount) or
+   `current_exe`, with the same `X-LMDV-Managed=true` marker, plus the embedded
+   icon when it is absent or already ours. The `Exec` rules in §2.3 apply.
+3. `$XDG_CONFIG_HOME/mimeapps.list` names `lmdv.desktop` first for
+   `text/markdown`, `text/x-markdown` and `application/x-markdown` under both
+   `[Default Applications]` and `[Added Associations]`, keeping the previous
+   handlers after it and every unrelated line. The merge is idempotent and keeps
+   the file's CRLF/LF style.
+4. `update-desktop-database` runs detached when available; a missing tool only
+   delays the “Open With” list, not the default. KDE can keep its `ksycoca`
+   menu cache until the next login; the default itself resolves at launch time.
+
+No root, no `xdg-mime`/`gio` dependency, no write outside `$XDG_DATA_HOME` and
+`$XDG_CONFIG_HOME`. Non-UTF-8 program paths and paths containing `"`, `\`, `$`,
+a backtick, `%` or a newline are refused before anything is written.
+
 ---
 
 ## 4. Dev/intermediate builds: the launcher

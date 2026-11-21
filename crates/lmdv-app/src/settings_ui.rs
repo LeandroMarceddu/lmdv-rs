@@ -14,11 +14,13 @@ use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, Select, Switch};
 use crate::icons;
 use crate::settings::{
     COLUMN_WIDTHS, LARGE_FILE_MODES, LINE_HEIGHTS, READER_FONTS, SETTINGS_APPEARANCE, SETTINGS_BODY, SETTINGS_BREAK_H1,
-    SETTINGS_CLOSE, SETTINGS_CLOSE_FOOTER, SETTINGS_EDITOR, SETTINGS_FONT, SETTINGS_FORMAT_BAR, SETTINGS_GENERAL,
-    SETTINGS_KEY, SETTINGS_LANGUAGE, SETTINGS_LANGUAGE_TRIGGER, SETTINGS_LARGE_FILE, SETTINGS_PANEL, SETTINGS_PANELS,
-    SETTINGS_RESET, SETTINGS_RESET_CANCEL, SETTINGS_RESET_CONFIRM, SETTINGS_RESTORE, SETTINGS_SCRIM, SETTINGS_SIZE,
-    SETTINGS_SPACING, SETTINGS_SPELLCHECK, SETTINGS_THEME, SETTINGS_TITLE, SETTINGS_WIDTH, SIDE_SIZES, THEMES,
-    column_width_label, font_label, large_file_label, line_height_label, side_size_label, theme_index, theme_label,
+    SETTINGS_CLOSE, SETTINGS_CLOSE_FOOTER, SETTINGS_DEFAULT_MD, SETTINGS_DEFAULT_MD_ROW, SETTINGS_EDITOR,
+    SETTINGS_FONT, SETTINGS_FORMAT_BAR, SETTINGS_GENERAL, SETTINGS_KEY, SETTINGS_LANGUAGE, SETTINGS_LANGUAGE_TRIGGER,
+    SETTINGS_LARGE_FILE, SETTINGS_PANEL, SETTINGS_PANELS, SETTINGS_RESET, SETTINGS_RESET_CANCEL,
+    SETTINGS_RESET_CONFIRM, SETTINGS_RESTORE, SETTINGS_SCRIM, SETTINGS_SIZE, SETTINGS_SPACING, SETTINGS_SPELLCHECK,
+    SETTINGS_THEME, SETTINGS_TITLE, SETTINGS_WIDTH, SIDE_SIZES, THEMES, column_width_label, default_markdown_detail,
+    default_markdown_supported, font_label, large_file_label, line_height_label, side_size_label, theme_index,
+    theme_label,
 };
 use crate::window::WindowState;
 
@@ -346,7 +348,8 @@ fn editor_rows(state: &WindowState, kit: &Kit) -> El {
     rows
 }
 
-/// The General section: language, session restore and the H1 page break.
+/// The General section: language, session restore, the H1 page break and the
+/// “default for Markdown files” row (Windows and Linux).
 fn general_rows(state: &WindowState, kit: &Kit, popups: &mut Vec<El>) -> El {
     let prefs = state.shared().prefs();
     let options = crate::settings::language_options();
@@ -391,7 +394,7 @@ fn general_rows(state: &WindowState, kit: &Kit, popups: &mut Vec<El>) -> El {
         .build(kit)
         .key(SETTINGS_BREAK_H1);
 
-    col()
+    let mut rows = col()
         .w_full()
         .child(setting_row(
             "settings-row-language",
@@ -413,7 +416,26 @@ fn general_rows(state: &WindowState, kit: &Kit, popups: &mut Vec<El>) -> El {
             Some(lmdv_i18n::t!("set.breakH1Detail")),
             break_h1,
             kit,
-        ))
+        ));
+    // Windows registers lmdv and then asks the user to confirm in Default apps;
+    // Linux writes the XDG entry and the user's mimeapps.list and is done. The
+    // row's detail says which of the two the press does; platforms with neither
+    // have no row.
+    if default_markdown_supported() {
+        let button = rune_kit::Button::new(lmdv_i18n::t!("set.defaultMdAction"))
+            .variant(rune_kit::ButtonVariant::Outline)
+            .on_press(|state: &mut WindowState| state.make_default_markdown())
+            .build(kit)
+            .key(SETTINGS_DEFAULT_MD);
+        rows = rows.child(setting_row(
+            SETTINGS_DEFAULT_MD_ROW,
+            lmdv_i18n::t!("set.defaultMd"),
+            Some(default_markdown_detail()),
+            button,
+            kit,
+        ));
+    }
+    rows
 }
 
 /// The footer: reset (with its confirmation) and close.
