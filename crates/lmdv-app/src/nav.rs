@@ -32,9 +32,10 @@ use crate::window::{Tab, WindowState};
 
 /// Where a heading or section jump lands, in points below the viewport top.
 ///
-/// [`WindowState::jump_to_heading`] asks for exactly this inset, and O-12's
-/// “lands within 8 px” rule is measured against it, so the two stay in step.
-pub const JUMP_INSET: f32 = 12.0;
+/// L-01 specifies a 24-point top margin; [`WindowState::jump_to_heading`] asks
+/// for exactly [`landing_inset`], and O-12's “lands within 8 px” rule is
+/// measured against it, so the two stay in step.
+pub const JUMP_INSET: f32 = 24.0;
 /// A jump that would move the page less than this is not a new place (O-12).
 pub const MIN_JUMP_DISTANCE: f32 = 8.0;
 
@@ -46,6 +47,30 @@ pub const MIN_JUMP_DISTANCE: f32 = 8.0;
 /// stays right while a glide is still moving both numbers together.
 pub fn heading_destination(scroll: ScrollSnapshot, heading_top: f32, inset: f32) -> f32 {
     (scroll.offset + heading_top - inset).clamp(0.0, scroll.max.max(0.0))
+}
+
+/// The landing inset for a jump to a heading (L-01).
+///
+/// The base is [`JUMP_INSET`]; when the landing point — the heading's top less
+/// that margin — is inside a measured table whose header row is stuck to the
+/// viewport's top, the header's measured height is added so the heading clears
+/// it instead of landing underneath. A table the last frame did not measure
+/// adds nothing. The section line needs no reserve here: a heading jump holds
+/// it away until the page lands (O-09/O-11).
+pub fn landing_inset(tables: &[crate::section::MeasuredTable], scroll: ScrollSnapshot, heading_top: f32) -> f32 {
+    let landing = scroll.offset + heading_top - JUMP_INSET;
+    let cover = tables
+        .iter()
+        .filter(|table| {
+            let top = scroll.offset + table.top;
+            let bottom = scroll.offset + table.bottom;
+            // Stuck: the table's top is above the viewport's, its body still
+            // reaches past the landing point, and the header is measured.
+            table.header > 0.0 && top < scroll.offset && top <= landing && bottom > landing
+        })
+        .map(|table| table.header)
+        .fold(0.0, f32::max);
+    JUMP_INSET + cover
 }
 
 /// Pasted documents are keyed `pasted:<id>`, as the original's `docKey` spells
@@ -226,12 +251,13 @@ impl WindowState {
     ///
     /// Landing inside 8 points of where the heading already is would leave the
     /// reader where they were, so the original does not call that a place. The
-    /// destination is the heading's measured top less [`JUMP_INSET`], clamped to
-    /// the document, exactly where the scroll request lands.
+    /// destination is the heading's measured top less [`landing_inset`],
+    /// clamped to the document, exactly where the scroll request lands.
     fn jump_moves_less_than(&self, index: usize, distance: f32) -> bool {
         let Some(top) = self.heading_top(index) else { return false };
         let scroll = self.reading.scroll.get();
-        let dest = heading_destination(scroll, top, JUMP_INSET);
+        let inset = landing_inset(&self.section_line.tables(), scroll, top);
+        let dest = heading_destination(scroll, top, inset);
         (dest - scroll.offset).abs() < distance
     }
 

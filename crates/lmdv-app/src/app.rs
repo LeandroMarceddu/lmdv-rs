@@ -16,10 +16,10 @@ use crate::view;
 use crate::window::WindowState;
 use crate::windows::{WindowHandles, WindowKind};
 
-/// The default content size of every window, in points.
-pub const WINDOW_SIZE: (f32, f32) = (1100.0, 760.0);
-/// The smallest content size a window can be resized to.
-pub const WINDOW_MIN_SIZE: (f32, f32) = (560.0, 420.0);
+/// The default content size of every window, in points (S-12).
+pub const WINDOW_SIZE: (f32, f32) = (1200.0, 860.0);
+/// The smallest content size a window can be resized to (S-12).
+pub const WINDOW_MIN_SIZE: (f32, f32) = (480.0, 480.0);
 /// Headless two-window gate: the primary window's frame, in physical pixels.
 const TEST_PRIMARY_POSITION: (i32, i32) = (80, 80);
 /// Headless two-window gate: the second window's frame, in physical pixels.
@@ -111,9 +111,50 @@ fn run_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>, launch: Launch) {
     }
     let factory_shared = Rc::clone(&shared);
     let factory_launch = launch.clone();
-    rune::run_windows(move |_displays| {
-        startup_windows(Rc::clone(&factory_shared), factory_launch.clone(), headless_test_window())
+    rune::run_windows(move |displays| {
+        startup_windows(
+            Rc::clone(&factory_shared),
+            factory_launch.clone(),
+            headless_test_window(),
+            center_on_primary(displays),
+        )
     });
+}
+
+/// The top-left that centres a logical window on a display (S-12).
+///
+/// `display` is the display's physical `(x, y, width, height)`; a logical
+/// content size becomes physical pixels at `scale`. A window larger than its
+/// display is pinned to the display's top-left instead of hanging off it.
+pub(crate) fn centered_position(display: (i32, i32, u32, u32), logical: (f32, f32), scale: f64) -> (i32, i32) {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let width = (f64::from(logical.0) * scale).round() as i64;
+    let height = (f64::from(logical.1) * scale).round() as i64;
+    let x = i64::from(display.0) + (i64::from(display.2) - width) / 2;
+    let y = i64::from(display.1) + (i64::from(display.3) - height) / 2;
+    (x.max(i64::from(display.0)) as i32, y.max(i64::from(display.1)) as i32)
+}
+
+/// The centred top-left for the launch window, from the factory's displays.
+fn center_on_primary(displays: &[rune::Display]) -> Option<(i32, i32)> {
+    let display = displays.iter().find(|display| display.primary).or_else(|| displays.first())?;
+    Some(centered_position(
+        (display.position.0, display.position.1, display.size.0, display.size.1),
+        WINDOW_SIZE,
+        display.scale,
+    ))
+}
+
+/// Gives the first unplaced startup window the centred position (S-12).
+///
+/// A stored session placement and the headless gate's fixed frame are kept;
+/// only a window the session did not place opens centred.
+fn pick_launch_position(windows: &mut [StartupWindow], center: Option<(i32, i32)>) {
+    if let Some(center) = center
+        && let Some(window) = windows.iter_mut().find(|window| window.frame.position.is_none())
+    {
+        window.frame.position = Some(center);
+    }
 }
 
 /// The windows every process starts with.
@@ -128,7 +169,12 @@ fn run_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>, launch: Launch) {
 ///
 /// The clean flag starts `false` here: from this point a crash leaves a marker
 /// the next launch reports. A clean close or quit overwrites it with `true`.
-fn startup_windows(shared: Rc<AppShared>, launch: Launch, test_window: Option<PathBuf>) -> Vec<rune::AnyWindowSpec> {
+fn startup_windows(
+    shared: Rc<AppShared>,
+    launch: Launch,
+    test_window: Option<PathBuf>,
+    center: Option<(i32, i32)>,
+) -> Vec<rune::AnyWindowSpec> {
     // The session is read after the store has started, so a future-schema or
     // foreign file must be protected before the factory's first session patch
     // — even when this launch will not restore it, because a CLI launch or
@@ -151,7 +197,8 @@ fn startup_windows(shared: Rc<AppShared>, launch: Launch, test_window: Option<Pa
         drafts: &drafts,
         positions: crate::session::positions_available(),
     });
-    let windows = startup_states(Rc::clone(&shared), &launch, test_window, restore);
+    let mut windows = startup_states(Rc::clone(&shared), &launch, test_window, restore);
+    pick_launch_position(&mut windows, center);
     shared.queue_session(false);
     windows.into_iter().map(|window| window_spec(window.key, window.state, window.frame, window.kind).boxed()).collect()
 }
@@ -618,13 +665,49 @@ mod tests {
     }
 
     #[test]
+    fn the_main_window_is_1200_by_860_with_a_480_minimum() {
+        // S-12: the spec's logical content size and floor.
+        assert_eq!(WINDOW_SIZE, (1200.0, 860.0));
+        assert_eq!(WINDOW_MIN_SIZE, (480.0, 480.0));
+
+        let spec = app_spec();
+        assert_eq!(spec.size, WINDOW_SIZE);
+        assert_eq!(spec.min_size, Some(WINDOW_MIN_SIZE), "Rune's host receives the floor");
+    }
+
+    #[test]
+    fn a_window_without_a_placement_opens_centered() {
+        // S-12: 1920×1080 at scale 1 centres the 1200×860 content.
+        assert_eq!(centered_position((0, 0, 1920, 1080), WINDOW_SIZE, 1.0), (360, 110));
+        // At scale 2 the content is 2400×1720 on a 2560×1440 display: it fits
+        // across but not down, so only the overflowing axis pins to the top.
+        assert_eq!(centered_position((0, 0, 2560, 1440), WINDOW_SIZE, 2.0), (80, 0));
+        // A second display keeps its own origin.
+        assert_eq!(centered_position((1920, 0, 1920, 1080), WINDOW_SIZE, 1.0), (2280, 110));
+        assert_eq!(centered_position((0, 0, 1920, 1080), WINDOW_SIZE, 0.0), (360, 110), "a bad scale reads as 1");
+
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut windows = startup_states(Rc::clone(&shared), &Launch::default(), None, None);
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].frame.position, None, "nothing places it before the display is read");
+        pick_launch_position(&mut windows, Some((360, 110)));
+        assert_eq!(windows[0].frame.position, Some((360, 110)), "the launch window opens centred");
+
+        let mut placed = startup_states(Rc::clone(&shared), &Launch::default(), None, None);
+        placed[0].frame.position = Some((40, 50));
+        pick_launch_position(&mut placed, Some((360, 110)));
+        assert_eq!(placed[0].frame.position, Some((40, 50)), "a stored placement wins over the centre");
+    }
+
+    #[test]
     fn the_startup_factory_declares_the_primary_and_the_headless_second_window() {
         let temp = TempDir::new().unwrap();
         let shared = test_support::shared(&temp);
         let path = temp.path().join("second.md");
         std::fs::write(&path, "# Second\n").unwrap();
 
-        let specs = startup_windows(Rc::clone(&shared), Launch::default(), Some(path));
+        let specs = startup_windows(Rc::clone(&shared), Launch::default(), Some(path), None);
         let keys: Vec<String> = specs.iter().map(|spec| spec.key().to_owned()).collect();
         assert_eq!(keys, vec!["window-1".to_owned(), "second".to_owned()]);
         assert_eq!(shared.windows().len(), 2);
@@ -638,7 +721,7 @@ mod tests {
     fn startup_marks_the_session_unclean_and_a_clean_last_close_marks_it_clean() {
         let temp = TempDir::new().unwrap();
         let shared = AppShared::start(test_support::dirs(&temp));
-        let specs = startup_windows(Rc::clone(&shared), Launch::default(), None);
+        let specs = startup_windows(Rc::clone(&shared), Launch::default(), None, None);
         assert_eq!(specs.len(), 1);
         assert!(shared.flush_store(std::time::Duration::from_secs(2)));
 
@@ -662,7 +745,7 @@ mod tests {
         let dirs = test_support::dirs(&temp);
         write_stored_session(&dirs, 2);
         let shared = AppShared::start(dirs);
-        let specs = startup_windows(Rc::clone(&shared), Launch::default(), None);
+        let specs = startup_windows(Rc::clone(&shared), Launch::default(), None, None);
         let keys: Vec<String> = specs.iter().map(|spec| spec.key().to_owned()).collect();
         assert_eq!(keys, vec!["main".to_owned(), "window-2".to_owned()]);
         assert_eq!(shared.windows().len(), 2);
@@ -677,7 +760,7 @@ mod tests {
         let shared = AppShared::start(dirs);
         let path = temp.path().join("launch.md");
         std::fs::write(&path, "# Launch\n").unwrap();
-        let specs = startup_windows(Rc::clone(&shared), Launch { path: Some(path), ..Launch::default() }, None);
+        let specs = startup_windows(Rc::clone(&shared), Launch { path: Some(path), ..Launch::default() }, None, None);
         let keys: Vec<String> = specs.iter().map(|spec| spec.key().to_owned()).collect();
         assert_eq!(keys, vec!["window-1".to_owned()], "a CLI file wins over the session");
         drop(specs);
@@ -689,14 +772,14 @@ mod tests {
         let dirs = test_support::dirs(&temp);
         write_stored_session(&dirs, 2);
         let shared = AppShared::start(dirs);
-        let specs = startup_windows(Rc::clone(&shared), Launch { new_window: true, ..Launch::default() }, None);
+        let specs = startup_windows(Rc::clone(&shared), Launch { new_window: true, ..Launch::default() }, None, None);
         assert_eq!(specs.iter().map(|spec| spec.key().to_owned()).collect::<Vec<_>>(), vec!["window-1"]);
         drop(specs);
 
         let headless_temp = TempDir::new().unwrap();
         let headless = AppShared::start(test_support::dirs(&headless_temp));
         headless.set_headless();
-        let specs = startup_windows(Rc::clone(&headless), Launch::default(), None);
+        let specs = startup_windows(Rc::clone(&headless), Launch::default(), None, None);
         assert_eq!(specs.iter().map(|spec| spec.key().to_owned()).collect::<Vec<_>>(), vec!["window-1"]);
         drop(specs);
         assert!(!headless.dirs().session_path().exists(), "headless tooling never writes a session");
@@ -715,7 +798,7 @@ mod tests {
         std::fs::write(&path, "# Launch\n").unwrap();
         // A CLI file skips the restore, but the launch still replaces the
         // stored session on close: the ignored file must stay untouched.
-        let specs = startup_windows(Rc::clone(&shared), Launch { path: Some(path), ..Launch::default() }, None);
+        let specs = startup_windows(Rc::clone(&shared), Launch { path: Some(path), ..Launch::default() }, None, None);
         assert!(shared.flush_store(std::time::Duration::from_secs(2)));
         drop(specs);
         assert_eq!(std::fs::read_to_string(dirs.session_path()).unwrap(), future);
@@ -743,7 +826,7 @@ mod tests {
         drop(handle);
 
         let shared = AppShared::start(dirs);
-        let specs = startup_windows(Rc::clone(&shared), Launch::default(), None);
+        let specs = startup_windows(Rc::clone(&shared), Launch::default(), None, None);
         assert_eq!(specs.iter().map(|spec| spec.key().to_owned()).collect::<Vec<_>>(), vec!["window-1"]);
         drop(specs);
     }

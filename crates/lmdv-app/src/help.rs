@@ -116,6 +116,28 @@ pub fn page(locale_id: &str) -> Arc<HelpPage> {
     pages.entry(locale_id.to_owned()).or_insert_with(|| Arc::new(parse(lmdv_i18n::help_page(locale_id)))).clone()
 }
 
+/// One catalog message's inline HTML (`<code>`, `<kbd>`, `<b>`, …) as runs,
+/// parsed once per message.
+///
+/// The start page's lead, tips and hint are written with the help pages' small
+/// vocabulary (`empty.tip1` has a `<code>`, `empty.tip3` and `empty.hint` have
+/// `<kbd>`s), so they draw with the same keycap and code styling (H-01/H-03).
+/// The message is the cache key: a language change hands in another string.
+pub fn message_inline(html: &'static str) -> Arc<Inline> {
+    static MESSAGES: OnceLock<Mutex<HashMap<&'static str, Arc<Inline>>>> = OnceLock::new();
+    let messages = MESSAGES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut messages = messages.lock().unwrap_or_else(|poison| poison.into_inner());
+    messages.entry(html).or_insert_with(|| Arc::new(parse_inline(html))).clone()
+}
+
+/// [`parse`] for a bare inline message, with no block wrapper.
+fn parse_inline(html: &str) -> Inline {
+    match parse(&format!("<p>{html}</p>")).blocks.into_iter().next() {
+        Some(Block::Paragraph(inline)) => inline,
+        _ => Inline::default(),
+    }
+}
+
 /// Parses the help pages' HTML subset into blocks.
 ///
 /// The parser is deliberately forgiving: tags it does not know are skipped,
@@ -692,7 +714,7 @@ fn heading_font(level: u8, kit: &Kit) -> TextStyle {
 }
 
 /// Draws one inline as a wrapping text with styled byte ranges.
-fn inline_el(inline: &Inline, font: TextStyle, color: Color, kit: &Kit) -> El {
+pub(crate) fn inline_el(inline: &Inline, font: TextStyle, color: Color, kit: &Kit) -> El {
     let content = inline.text();
     let mut spans = Vec::new();
     let mut offset = 0;

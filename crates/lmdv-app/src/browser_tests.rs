@@ -237,7 +237,7 @@ fn a_folder_link_reroots_the_pane_and_a_plain_file_falls_back() {
     let generation = state.browser.tree_generation;
     assert!(state.finish_tree_listing(generation, image.clone(), Err(TreeError::NotADirectory(image.clone()))));
     assert_eq!(state.browser.root(), Some(project.as_path()), "a non-folder link returns to the old root");
-    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown file")));
+    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown document")));
 }
 
 #[test]
@@ -465,7 +465,7 @@ fn a_failed_folder_link_with_no_previous_root_returns_to_the_empty_state() {
     assert!(state.finish_tree_listing(generation, file.clone(), Err(TreeError::NotADirectory(file.clone()))));
     assert!(state.browser.root().is_none(), "no folder open again");
     assert!(state.shared().ui().tree_root.is_none(), "the bad root is not persisted");
-    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown file")));
+    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown document")));
 }
 
 /* ---- F-12: the file and folder context menu ---- */

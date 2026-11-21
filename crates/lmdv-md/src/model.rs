@@ -5,6 +5,7 @@
 //! Positions are UTF-8 byte offsets into the LF-normalized source and lines
 //! are 0-based, matching the original viewer's `data-source-line`.
 
+use std::borrow::Cow;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -59,6 +60,40 @@ impl MdDoc {
         self.block_spans.get(index).map(|span| span.key.as_str())
     }
 
+    /// Every code block's text, in the order the article draws it (M-13).
+    ///
+    /// The renderer numbers each code block's copy action by its position
+    /// here, so a document may hold any number of code blocks — top level,
+    /// nested in a quote or a list item, inside raw HTML's `<pre>`, or in a
+    /// footnote definition — and each one copies its own text.
+    pub fn code_texts(&self) -> Vec<Cow<'_, str>> {
+        let mut texts = Vec::new();
+        for block in &self.blocks {
+            push_code_texts(block, &mut texts);
+        }
+        // The generated footnote section is drawn after every block.
+        for footnote in &self.footnotes {
+            for block in &footnote.blocks {
+                push_code_texts(block, &mut texts);
+            }
+        }
+        texts
+    }
+
+    /// How many code blocks the article draws before top-level block `index`
+    /// (M-13).
+    ///
+    /// The renderer numbers a block's code blocks from this count, so a
+    /// memoised block keeps the destinations it was built with.
+    pub fn code_count_before(&self, index: usize) -> usize {
+        self.blocks.iter().take(index).map(count_code_texts).sum()
+    }
+
+    /// How many code blocks top-level block `index` holds (M-13).
+    pub fn code_count_in(&self, index: usize) -> usize {
+        self.blocks.get(index).map_or(0, count_code_texts)
+    }
+
     /// The stable key for a heading (`h0`, `h1`, …).
     pub fn heading_key(index: usize) -> String {
         format!("h{index}")
@@ -102,6 +137,90 @@ impl MdDoc {
                 || heading.legacy_id.as_deref() == Some(fragment)
                 || heading.anchor.as_deref() == Some(fragment)
         })
+    }
+}
+
+/// The part of a written URL that names the file: the query dropped and the
+/// fragment kept (M-24).
+///
+/// An image's `#gh-dark-mode-only` is a theme hint the renderer reads from the
+/// source as written, while `?raw=1` is a fetch hint that has no meaning for a
+/// local file. Callers that resolve a path strip the query first and then split
+/// the fragment themselves.
+pub fn url_path_and_fragment(url: &str) -> (&str, Option<&str>) {
+    let (rest, fragment) = match url.split_once('#') {
+        Some((rest, fragment)) => (rest, Some(fragment)),
+        None => (url, None),
+    };
+    let path = rest.split_once('?').map_or(rest, |(path, _)| path);
+    (path, fragment)
+}
+
+/// How many code blocks one block holds, in drawing order (M-13).
+fn count_code_texts(block: &Block) -> usize {
+    match block {
+        Block::Code { .. } => 1,
+        Block::List { items, .. } => items.iter().flatten().map(count_code_texts).sum(),
+        Block::Quote { blocks, .. } => blocks.iter().map(count_code_texts).sum(),
+        Block::HtmlBlock(node) => count_html_code_texts(node),
+        _ => 0,
+    }
+}
+
+/// How many `<pre>` code blocks an HTML subtree draws (M-13).
+fn count_html_code_texts(node: &HtmlNode) -> usize {
+    match node.tag {
+        HtmlTag::Pre => 1,
+        HtmlTag::Fragment | HtmlTag::Div | HtmlTag::P => node
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                HtmlChild::Node(child) => Some(count_html_code_texts(child)),
+                HtmlChild::Text(_) => None,
+            })
+            .sum(),
+        _ => 0,
+    }
+}
+
+/// Every code block inside `block`, in drawing order (M-13).
+fn push_code_texts<'a>(block: &'a Block, texts: &mut Vec<Cow<'a, str>>) {
+    match block {
+        Block::Code { text, .. } => texts.push(Cow::Borrowed(text)),
+        Block::List { items, .. } => {
+            for item in items {
+                for block in item {
+                    push_code_texts(block, texts);
+                }
+            }
+        }
+        Block::Quote { blocks, .. } => {
+            for block in blocks {
+                push_code_texts(block, texts);
+            }
+        }
+        Block::HtmlBlock(node) => push_html_code_texts(node, texts),
+        _ => {}
+    }
+}
+
+/// Every `<pre>` an HTML subtree draws as a code block, in drawing order (M-13).
+///
+/// The renderer reaches `<pre>` only through a fragment, `div` or `p` whose
+/// children are laid out as blocks; a table, list, details card or quote draws
+/// its body inline, so a `<pre>` inside one is not a code block and is not
+/// counted (which keeps the copy numbering in step with the article).
+fn push_html_code_texts<'a>(node: &'a HtmlNode, texts: &mut Vec<Cow<'a, str>>) {
+    match node.tag {
+        HtmlTag::Pre => texts.push(Cow::Owned(node.text())),
+        HtmlTag::Fragment | HtmlTag::Div | HtmlTag::P => {
+            for child in &node.children {
+                if let HtmlChild::Node(child) = child {
+                    push_html_code_texts(child, texts);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

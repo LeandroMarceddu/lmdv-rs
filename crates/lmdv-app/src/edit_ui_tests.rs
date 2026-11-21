@@ -261,6 +261,44 @@ fn format_commands_apply_the_selection_and_report_pressed_state() {
 }
 
 #[test]
+fn the_format_bar_reads_setext_headings_while_the_commands_toggle_atx() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Setext", "Title\n=====\n\nSubtitle\n--------\n\nParagraph\n\n---\n");
+    enter_editor(&mut state);
+    let heading = |state: &WindowState| crate::edit_ui::format_state(state.active_tab().expect("tab")).heading;
+
+    // H1: the text line and its underline both read as level 1.
+    state.active_editor_edit().set_caret(2);
+    assert_eq!(heading(&state), 1, "the text above `=====` is H1");
+    state.active_editor_edit().set_caret(8);
+    assert_eq!(heading(&state), 1, "the `=====` underline reads as H1 too");
+
+    // H2: the same for `--------`.
+    let subtitle = text(&state).find("Subtitle").expect("H2 text");
+    state.active_editor_edit().set_caret(subtitle + 2);
+    assert_eq!(heading(&state), 2);
+    let underline = text(&state).find("--------").expect("H2 underline");
+    state.active_editor_edit().set_caret(underline + 2);
+    assert_eq!(heading(&state), 2);
+
+    // A plain paragraph and a thematic break after a blank line are not headings.
+    let paragraph = text(&state).find("Paragraph").expect("paragraph");
+    state.active_editor_edit().set_caret(paragraph);
+    assert_eq!(heading(&state), 0);
+    let rule = text(&state).find("\n---\n").expect("break") + 2;
+    state.active_editor_edit().set_caret(rule);
+    assert_eq!(heading(&state), 0, "`---` after a blank line is a thematic break");
+
+    // The command still toggles ATX: H1 on the Setext text line inserts `# `.
+    state.active_editor_edit().set_caret(2);
+    let mut tx = Tx::default();
+    assert!(state.run_command("edit.heading-1", &mut tx));
+    assert!(text(&state).starts_with("# Title\n=====\n"), "{:?}", text(&state));
+    assert_eq!(heading(&state), 1, "the ATX marker now names the level");
+}
+
+#[test]
 fn the_slash_menu_filters_and_inserts_in_place_of_the_query() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);

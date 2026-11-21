@@ -61,7 +61,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-046 | P2-03 renderer | Video/audio are placeholder cards; playback continuity and `<track>` subtitles remain gaps | Rune has no Linux media backend | P5/P6 | accepted-gap |
 | OI-047 | P2-03 renderer | Image loading/`Image::wait` polish and broken-image behavior need app integration | Per-window `ImageCache` + policy + missing placeholder wired | P2 | fixed |
 
-| OI-048 | P2 integration | Renderer emits `copy-code:code` for every block; app copies only when a document has one top-level code block | Renderer should emit `copy-code:b{i}` | P3 | open |
+| OI-048 | P2 integration | Renderer emits `copy-code:code` for every block; app copies only when a document has one top-level code block | Fixed with drawing-order numbering: `MdDoc::code_texts` enumerates top-level, nested, duplicated, HTML `<pre>` and footnote blocks, the renderer emits `copy-code:{n}` and the app resolves exactly that block. `{n}` rather than `b{i}` because several code blocks can share one top-level block. | P3 | fixed |
 | OI-049 | P2 integration | First image resolution does a `PathPolicy` stat/canonicalize in the view; later hits cache | Add a `ProbeImage` job/cache in P3 | P3 | open |
 | OI-050 | P2 integration | `data:` images are unsupported | Decide safe data-image policy (small images only) | P6 | scheduled |
 | OI-051 | P2 integration | Non-Markdown local links refuse with a notice; no Open externally? confirmation | P6 link-open confirmation | P6 | open |
@@ -234,6 +234,8 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-188 | P7 parity | The audit's 44 P0 partial rows have no per-row register entry; they stay tracked by behavior ID in `docs/PARITY_AUDIT.md` and the checklist | Triage the P0 partials into batches by area after the P0 missing items | P7 | open |
 | OI-189 | P7-RUNE vendor | Rune is behind a one-time structural refactor: head `7a707454` is 130 commits past the pin, our four patches no longer apply and the patched tree does not compile; upstream also fixed a Linux field a11y panic and reshapes on colour-highlight changes | Scheduled port, not a drop-in: 0001 ~1 day into `rune-text`, 0002 ~3–4 h with the `Shared`/`SharedCore` split, 0003 ~3–4 h into `a11y/text/runs.rs`, 0004 ~1 h, plus goldens, vendored rebuild, `[[test]]` registration (`autotests = false`). See `docs/RUNE_DELTA_2026-11-20.md`. | P7 | open |
 | OI-190 | P7 parity kit | rune-kit gaps block the last clauses of T-01/T-03/T-19/C-01: no flexible toolbar middle slot, no per-name tab width, no Saved status in the close slot, drag slop fixed at 4 pt (spec 5), no IME composing state | Add the kit APIs (or vendor patches) and switch the app-side substitutes to them | P7 | open |
+| OI-191 | P7 parity | H-06's notice bar sits at the foot of the window rather than the top centre of the pane | Move it over the pane once the layout has a safe top inset for it | P7 | open |
+| OI-192 | P7 parity | E-22's Insert and Tools menus and the plain “Type / for blocks” hint are missing; the heading picker/pressed state (incl. Setext) work | Add the two menus over the existing slash-action set and a plain-text hint key | P7 | open |
 | OI-180 | P6-SAFE app | A watcher-observed external rename is rekeyed by the first window that processes the shared event; later windows keep the old Back/Forward spelling until reopened | `rename_history_paths` now broadcasts `UiMsg::DocumentRenamed` through `broadcast_window_rename`, so every window renames its places and refreshes the document's titles, including windows that never show the file. Tested with three windows. | P6 | fixed |
 
 ## 2. Resolved actions (examples)
@@ -263,9 +265,9 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above. Behavior-level status is in `docs/PARITY_AUDIT.md`.
 
-- **Open (51):** OI-001, 004, 024, 025, 026, 041, 042, 044, 048, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 153, 155, 165, 176, 181, 182, 183, 186, 187, 188, 189, 190
+- **Open (52):** OI-001, 004, 024, 025, 026, 041, 042, 044, 049, 051, 054, 055, 058, 059, 060, 061, 074, 082, 093, 094, 095, 096, 097, 100, 101, 102, 104, 106, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 153, 155, 165, 176, 181, 182, 183, 186, 187, 188, 189, 190, 191, 192
 - **Scheduled (4):** OI-003, 023, 027, 050
 - **Accepted (32):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 141, 150, 154, 157, 161, 163, 166, 174, 175, 177, 179
-- **Fixed (103):** kept for history.
+- **Fixed (104):** kept for history.
 
 P3, P4 (with substitutes) and P5 are closed; P6 polish and P7 audit remain. Accepted gaps are re-checked at the next gate.

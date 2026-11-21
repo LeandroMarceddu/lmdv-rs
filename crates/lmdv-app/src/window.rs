@@ -226,6 +226,39 @@ impl Tab {
     }
 }
 
+/// A status notice's severity (H-06): the bar's icon and colour, and how a
+/// screen reader is told (H-07/A-10).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// A neutral status: a refusal, or something to know.
+    #[default]
+    Info,
+    /// A completed action: the save, a copied path or table.
+    Success,
+    /// Something was refused or is degraded, but the window still works.
+    Warning,
+    /// A failed action: read at once, as `role=alert`.
+    Error,
+}
+
+impl NoticeKind {
+    /// Errors interrupt: the bar is `role=alert` with an assertive live region.
+    pub const fn is_error(self) -> bool {
+        matches!(self, Self::Error)
+    }
+}
+
+/// The confirmations raised through [`WindowState::notice`] by the handlers
+/// that predate notice kinds: the save and the three copy actions (H-06).
+///
+/// Matching the catalog message keeps those call sites honest without a second
+/// severity argument at every one of them; new code names its kind instead.
+fn is_confirmation(text: &str) -> bool {
+    ["msg.saved", "msg.pathCopied", "msg.tableCopied", "msg.imageCopied"]
+        .iter()
+        .any(|name| text == lmdv_i18n::text(lmdv_i18n::key(name)))
+}
+
 /// What a status notice says and when it disappears.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Notice {
@@ -235,6 +268,11 @@ pub struct Notice {
     pub deadline: f64,
     /// An action the notice offers, such as the task tick's Undo.
     pub action: Option<NoticeAction>,
+    /// The notice's severity (H-06).
+    pub kind: NoticeKind,
+    /// The number of notices this window has shown (H-07). The bar alternates
+    /// an invisible mark on it, so the same words twice are announced twice.
+    pub seq: u64,
 }
 
 /// An action a notice offers. The payload is UI state, never a live job.
@@ -244,6 +282,10 @@ pub enum NoticeAction {
     TaskUndo(crate::tasks::TaskUndo),
     /// Opens a folder in the desktop's file manager (X-05's Show in folder).
     ShowInFolder(PathBuf),
+    /// Opens a non-Markdown file with the desktop's handler (L-07's Open).
+    OpenFile(PathBuf),
+    /// Asks for a path for a pasted document (L-09's Save as…).
+    SaveAs(DocumentId),
     /// Re-runs `Print…` after a PDF failure (X-05's Use the print dialog).
     UsePrintDialog,
 }
@@ -254,6 +296,8 @@ impl NoticeAction {
         match self {
             Self::TaskUndo(_) => lmdv_i18n::t!("msg.undo"),
             Self::ShowInFolder(_) => lmdv_i18n::t!("msg.showInFolder"),
+            Self::OpenFile(_) => lmdv_i18n::t!("msg.openFile"),
+            Self::SaveAs(_) => lmdv_i18n::t!("tab.saveAs"),
             Self::UsePrintDialog => lmdv_i18n::t!("msg.usePrintDialog"),
         }
     }
@@ -274,6 +318,8 @@ pub enum HelpView {
 pub struct UiState {
     /// The current status notice, if any.
     pub notice: Option<Notice>,
+    /// How many notices this window has shown (H-07's clear-before-write).
+    pub(crate) notice_seq: u64,
     /// The open Help surface, if any (`None`: no Help dialog).
     pub help: Option<HelpView>,
     /// The last dispatched command id (palette recents, debugging).
@@ -295,6 +341,9 @@ pub struct UiState {
     pub(crate) focused_key: Option<String>,
     /// The keyboard moved the focus (`focus-visible`), not a press.
     pub(crate) focus_visible: bool,
+    /// A notice's **Save as…** action was pressed; the next poll opens the
+    /// dialog for that pasted document, where a `Tx` exists (L-09).
+    pub(crate) save_as_requested: Option<DocumentId>,
 }
 
 /// A file drag from another app over this window (D-01, D-02, H-12).
@@ -613,7 +662,7 @@ impl WindowState {
         }
         if let Some(error) = state.shared.store_error() {
             let message = lmdv_i18n::t!("msg.settingsSaveFailed", "err" => error);
-            state.notice(message);
+            state.notice_kind(message, NoticeKind::Error);
         }
         // OI-007/OI-012: a portable root that fell back to XDG and every state
         // file that was quarantined or left read-only are startup facts; the
@@ -625,7 +674,7 @@ impl WindowState {
                     existing.text.push(' ');
                     existing.text.push_str(&startup.join(" "));
                 }
-                None => state.notice(startup.join(" ")),
+                None => state.notice_kind(startup.join(" "), NoticeKind::Warning),
             }
         }
         let _ = state.publish_session();
@@ -998,7 +1047,7 @@ impl WindowState {
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_else(|| first.display().to_string());
-        self.notice(lmdv_i18n::t!("msg.notMarkdown", "name" => name));
+        self.notice_kind(lmdv_i18n::t!("msg.notMarkdown", "name" => name), NoticeKind::Warning);
     }
 
     /// Adds a ready in-memory document, for scenes and tests. Never touches
@@ -1333,7 +1382,7 @@ impl WindowState {
         let position = self.shared.cascade_position(self.id);
         let request = WindowOpenRequest { launch: Launch::default(), kind: WindowKind::Normal, position };
         if let Err(error) = Rc::clone(&self.shared).request_new_window(request) {
-            self.notice(lmdv_i18n::t!("msg.openWindowFailed", "err" => error));
+            self.notice_kind(lmdv_i18n::t!("msg.openWindowFailed", "err" => error), NoticeKind::Error);
         }
     }
 
@@ -1497,9 +1546,30 @@ impl WindowState {
     }
 
     /// Shows a status notice for `NOTICE_SECONDS`.
+    ///
+    /// The kind is [`NoticeKind::Info`] unless the message is one of the
+    /// confirmations the older handlers raise through this one entry point (a
+    /// save, a copied path, table or image): those are successes (H-06).
     pub fn notice(&mut self, text: impl Into<String>) {
-        let deadline = self.ui.last_now + NOTICE_SECONDS;
-        self.ui.notice = Some(Notice { text: text.into(), deadline, action: None });
+        let text = text.into();
+        let kind = if is_confirmation(&text) { NoticeKind::Success } else { NoticeKind::Info };
+        self.show_notice(text, kind, None, NOTICE_SECONDS);
+    }
+
+    /// [`Self::notice`] with an explicit severity (H-06).
+    pub fn notice_kind(&mut self, text: impl Into<String>, kind: NoticeKind) {
+        self.show_notice(text.into(), kind, None, NOTICE_SECONDS);
+    }
+
+    /// [`Self::notice`] whose words are the strip's, with its own stay.
+    ///
+    /// Every notice is numbered here (H-07): the bar alternates an invisible
+    /// mark on the number, so the same message twice still changes what a
+    /// screen reader is told.
+    pub(crate) fn show_notice(&mut self, text: String, kind: NoticeKind, action: Option<NoticeAction>, seconds: f64) {
+        self.ui.notice_seq = self.ui.notice_seq.wrapping_add(1);
+        let deadline = self.ui.last_now + seconds;
+        self.ui.notice = Some(Notice { text, deadline, action, kind, seq: self.ui.notice_seq });
     }
 
     /// Dismisses the current notice.
@@ -1509,14 +1579,10 @@ impl WindowState {
 
     /// T-03: keeps the strip's post-save check in step with the editor's saved
     /// flash. A save completion in this poll names the document(s) it wrote by
-    /// their changed `last_local_write`; the flash's expiry clears them, and a
-    /// screen reader hears “Saved” once per save.
-    fn track_saved_flash(
-        &mut self,
-        before: Option<f64>,
-        writes_before: &[(DocumentId, Option<FileMeta>)],
-        tx: &mut Tx,
-    ) -> bool {
+    /// their changed `last_local_write`; the flash's expiry clears them. The
+    /// save's “Saved” reaches a screen reader through the notice bar, the
+    /// window's one polite live region (H-07), not a second whisper here.
+    fn track_saved_flash(&mut self, before: Option<f64>, writes_before: &[(DocumentId, Option<FileMeta>)]) -> bool {
         let after = self.editor.saved_flash_until;
         if after == before {
             return false;
@@ -1544,7 +1610,6 @@ impl WindowState {
             docs.insert(doc);
         }
         self.saved_flash_docs = docs;
-        tx.announce(lmdv_i18n::t!("msg.saved"), rune::LiveRegion::Polite);
         true
     }
 
@@ -1589,14 +1654,28 @@ impl WindowState {
         }
         changed |= self.reap_transfers();
         changed |= self.pump_timers(now);
+        // L-09: a notice's **Save as…** needs the frame's `Tx` for the native
+        // dialog, so the press only asks and this poll opens it.
+        if let Some(doc) = self.ui.save_as_requested.take() {
+            // The notice belonged to a pasted document; a tab switch in the
+            // meantime must not turn the press into Save as on a file (L-09).
+            let pasted =
+                self.tabs.iter().find(|tab| tab.document_id() == Some(doc)).is_some_and(|tab| {
+                    matches!(&*tab.document().expect("checked").key.borrow(), DocumentKey::Untitled(_))
+                });
+            if pasted {
+                self.request_save_as(doc, crate::editor::AfterSave::Dismiss, tx);
+                changed = true;
+            }
+        }
         // OI-073: the document watcher's setup error is not a per-frame fact;
         // show it once, like the file browser's watch failure.
         if let Some(error) = self.shared.take_watch_error() {
-            self.notice(lmdv_i18n::t!("msg.watchFailed", "err" => error));
+            self.notice_kind(lmdv_i18n::t!("msg.watchFailed", "err" => error), NoticeKind::Warning);
             changed = true;
         }
         changed |= self.poll_editor(now, tx);
-        changed |= self.track_saved_flash(saved_flash_before, &writes_before, tx);
+        changed |= self.track_saved_flash(saved_flash_before, &writes_before);
         changed |= self.continue_close_batch();
         changed |= self.poll_share(now, tx);
         changed |= self.drive_parse();
@@ -1617,6 +1696,9 @@ impl WindowState {
         changed |= self.poll_section_line(now, tx);
         changed |= self.expire_line_flash(now);
         changed |= self.sync_outline();
+        // O-03: the scroll spy's active row follows the page in the outline
+        // pane; the reveal is issued here because the view cannot hold a `Tx`.
+        changed |= self.reveal_active_outline_row(tx);
 
         let title = self.window_title();
         if title != self.ui.last_title {
@@ -1666,6 +1748,33 @@ impl WindowState {
                     Ok(loaded) => {
                         let path = loaded.path;
                         let meta = loaded.meta;
+                        // R-21: a watcher reload whose text came back unchanged is
+                        // an attribute touch (OneDrive, a backup tool, `touch`):
+                        // record the new baseline and leave the buffer, the parse,
+                        // the reading anchor and the undo history alone.
+                        if self.editor.compare_reloads.remove(&doc) {
+                            let same = {
+                                let current = document.text();
+                                current.text() == loaded.buffer.text()
+                                    && current.eol() == loaded.buffer.eol()
+                                    && current.had_bom() == loaded.buffer.had_bom()
+                            };
+                            if same {
+                                document.set_saved(meta, document.hash(), path);
+                                return false;
+                            }
+                            // Different text: a real reload, so the reading
+                            // place is restored after the swap (R-21).
+                            if self.active_document_id() == Some(doc) {
+                                let anchor = self
+                                    .tabs
+                                    .iter()
+                                    .find(|tab| tab.document_id() == Some(doc))
+                                    .map(|tab| tab.view.anchor.clone())
+                                    .unwrap_or_default();
+                                self.begin_restore(&anchor);
+                            }
+                        }
                         *document.title.borrow_mut() = title_for_path(&path);
                         *document.buf.borrow_mut() = loaded.buffer;
                         *document.status.borrow_mut() = DocStatus::Ready;
@@ -1726,12 +1835,16 @@ impl WindowState {
                         true
                     }
                     Err(error) => {
+                        self.editor.compare_reloads.remove(&doc);
                         self.restored_docs.remove(&doc);
                         let travel = self.navigation.pending.as_ref().is_some_and(|pending| pending.doc == Some(doc));
                         *document.status.borrow_mut() = DocStatus::Error(error.to_string());
                         let name = document.title.borrow().clone();
                         if !travel {
-                            self.notice(lmdv_i18n::t!("msg.openFailed", "name" => name, "err" => error));
+                            self.notice_kind(
+                                lmdv_i18n::t!("msg.openFailed", "name" => name, "err" => error),
+                                NoticeKind::Error,
+                            );
                             // OI-073: a deleted or unreadable file can still
                             // have a crash draft. Offer it here — the buffer is
                             // empty, so Restore keeps the text and Save again
@@ -1765,7 +1878,7 @@ impl WindowState {
                 if self.browser.root.as_deref() == Some(root.as_path()) {
                     if self.browser.watch_error.as_deref() != Some(error.as_str()) {
                         self.browser.watch_error = Some(error.clone());
-                        self.notice(lmdv_i18n::t!("msg.watchFailed", "err" => error));
+                        self.notice_kind(lmdv_i18n::t!("msg.watchFailed", "err" => error), NoticeKind::Warning);
                     }
                     true
                 } else {
@@ -1780,7 +1893,7 @@ impl WindowState {
                 if ok {
                     false
                 } else {
-                    self.notice(lmdv_i18n::t!("msg.stateSaveFailed"));
+                    self.notice_kind(lmdv_i18n::t!("msg.stateSaveFailed"), NoticeKind::Error);
                     true
                 }
             }
@@ -2138,7 +2251,7 @@ impl WindowState {
         }
         let name = self.shared.docs().get(doc).map(|document| document.title.borrow().clone()).unwrap_or_default();
         let mib = lmdv_io::LARGE_DOC_BYTES.div_ceil(1024 * 1024);
-        self.notice(lmdv_i18n::t!("msg.largeDocument", "name" => name, "mib" => mib));
+        self.notice_kind(lmdv_i18n::t!("msg.largeDocument", "name" => name, "mib" => mib), NoticeKind::Warning);
     }
 
     /// Routes one forwarded launch on the router window.
@@ -2154,7 +2267,7 @@ impl WindowState {
             }
             crate::windows::RouteAction::Posted(_) | crate::windows::RouteAction::Opened(_) => true,
             crate::windows::RouteAction::Failed(error) => {
-                self.notice(lmdv_i18n::t!("msg.openWindowFailed", "err" => error));
+                self.notice_kind(lmdv_i18n::t!("msg.openWindowFailed", "err" => error), NoticeKind::Error);
                 true
             }
         }
@@ -2638,8 +2751,7 @@ mod tests {
         // A background close-batch save writes the first document, not the front one.
         written.last_local_write.set(Some(FileMeta { len: 4, ..FileMeta::default() }));
         state.editor.saved_flash_until = Some(5.0);
-        let mut tx = Tx::default();
-        assert!(state.track_saved_flash(None, &writes_before, &mut tx));
+        assert!(state.track_saved_flash(None, &writes_before));
 
         assert!(state.tab_shows_saved_check(state.tab(first).expect("the first tab")), "the written tab checks");
         assert!(!state.tab_shows_saved_check(state.tab(second).expect("the second tab")), "an untouched tab does not");

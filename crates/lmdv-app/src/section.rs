@@ -101,6 +101,9 @@ pub struct MeasuredTable {
     pub top: f32,
     /// Its bottom edge likewise.
     pub bottom: f32,
+    /// The header row's height, when the frame drew it (0.0 when unmeasured).
+    /// A heading jump that lands under a stuck header adds it (L-01).
+    pub header: f32,
 }
 
 /// The frame's section line: its parts, outermost first; empty when hidden.
@@ -142,6 +145,9 @@ pub struct SectionLineState {
     frame: RefCell<SectionLineFrame>,
     /// A click's second press is swallowed until this clock time (O-10).
     swallow_until: Cell<f64>,
+    /// The last viewer frame's measured tables, for a jump's sticky-header
+    /// cover (L-01). Cleared by [`Self::reset`] and every non-viewer frame.
+    tables: RefCell<Vec<MeasuredTable>>,
 }
 
 impl SectionLineState {
@@ -155,6 +161,17 @@ impl SectionLineState {
         self.pending_at.set(0.0);
         *self.shown.borrow_mut() = None;
         *self.frame.borrow_mut() = SectionLineFrame::default();
+        self.tables.borrow_mut().clear();
+    }
+
+    /// Records the viewer frame's measured tables (L-01).
+    pub fn set_tables(&self, tables: Vec<MeasuredTable>) {
+        *self.tables.borrow_mut() = tables;
+    }
+
+    /// The last viewer frame's measured tables.
+    pub fn tables(&self) -> Vec<MeasuredTable> {
+        self.tables.borrow().clone()
     }
 
     /// Records a scroll report and the page's speed (O-09).
@@ -565,6 +582,10 @@ fn focus_rect_hits(rect: [f32; 4], viewport: [f32; 4]) -> bool {
 }
 
 /// The top-level tables' edges relative to the article viewport's top.
+///
+/// The header row's height is measured from the drawn table (`b7/table/head`,
+/// or `b7/scroll/table/head` when the table scrolls sideways) so a jump that
+/// lands under a stuck header can clear it (L-01).
 pub(crate) fn measure_tables(cx: &Cx<WindowState>, doc: &MdDoc, viewport_top: f32) -> Vec<MeasuredTable> {
     let mut tables = Vec::new();
     for (index, block) in doc.blocks.iter().enumerate() {
@@ -576,7 +597,12 @@ pub(crate) fn measure_tables(cx: &Cx<WindowState>, doc: &MdDoc, viewport_top: f3
         if !rect[3].is_finite() || rect[3] <= 0.0 {
             continue;
         }
-        tables.push(MeasuredTable { top: rect[1] - viewport_top, bottom: rect[1] + rect[3] - viewport_top });
+        let header = ["table/head", "scroll/table/head"]
+            .iter()
+            .find_map(|path| cx.window_layout(&format!("{key}/{path}")))
+            .filter(|rect| rect[3].is_finite() && rect[3] > 0.0)
+            .map_or(0.0, |rect| rect[3]);
+        tables.push(MeasuredTable { top: rect[1] - viewport_top, bottom: rect[1] + rect[3] - viewport_top, header });
     }
     tables
 }
@@ -610,6 +636,14 @@ pub(crate) fn compute(
 ) -> SectionLineFrame {
     let now = state.ui.last_now;
     state.section_line.observe_scroll(state.scroll_snapshot(), now);
+    // L-01: this frame's tables are measured for the jump's sticky-header
+    // cover whether or not the line itself is on screen.
+    let Some(viewport) = cx.window_layout(ARTICLE_SCROLL_KEY) else {
+        state.section_line.set_tables(Vec::new());
+        return SectionLineFrame::default();
+    };
+    let tables = measure_tables(cx, doc, viewport[1]);
+    state.section_line.set_tables(tables.clone());
     // The outline out of sight: hidden, or folded away without peeking over the
     // text. Never while editing (this view is the reading view), nor without
     // headings (O-07).
@@ -618,10 +652,6 @@ pub(crate) fn compute(
         state.section_line.clear();
         return SectionLineFrame::default();
     }
-    let Some(viewport) = cx.window_layout(ARTICLE_SCROLL_KEY) else {
-        return SectionLineFrame::default();
-    };
-    let tables = measure_tables(cx, doc, viewport[1]);
     // O-09: an element with the keyboard's focus ring under the line owns it.
     let clear_of_focus = !focus_under_line(state, cx, viewport);
     let want = wanted(doc, headings, &tables).filter(|_| clear_of_focus);
@@ -705,11 +735,11 @@ mod tests {
     fn a_table_header_holding_the_top_hides_the_line() {
         let doc = lmdv_md::parse("# Title\n\n## A\n\nText\n\n| H | I |\n| --- | --- |\n| x | y |\n");
         let heads = measured(&[(0, -500.0, -470.0), (1, -120.0, -90.0)]);
-        let holding = [MeasuredTable { top: -40.0, bottom: 200.0 }];
+        let holding = [MeasuredTable { top: -40.0, bottom: 200.0, header: 0.0 }];
         assert_eq!(wanted(&doc, &heads, &holding), None);
-        let gone = [MeasuredTable { top: -300.0, bottom: -40.0 }];
+        let gone = [MeasuredTable { top: -300.0, bottom: -40.0, header: 0.0 }];
         assert_eq!(wanted(&doc, &heads, &gone), Some(vec![1]), "a table scrolled past does not hide it");
-        let below = [MeasuredTable { top: 200.0, bottom: 400.0 }];
+        let below = [MeasuredTable { top: 200.0, bottom: 400.0, header: 0.0 }];
         assert_eq!(wanted(&doc, &heads, &below), Some(vec![1]));
     }
 
@@ -717,13 +747,13 @@ mod tests {
     fn a_table_about_to_stick_also_hides_the_line() {
         // OI-141: the original hides the line while a table spans its lower
         // edge, not only once its top has passed the viewport's top.
-        let about = [MeasuredTable { top: 18.0, bottom: 300.0 }];
+        let about = [MeasuredTable { top: 18.0, bottom: 300.0, header: 0.0 }];
         assert!(table_holds_top(&about), "the table's header reaches the line's lower edge");
-        let past = [MeasuredTable { top: -2.0, bottom: 300.0 }];
+        let past = [MeasuredTable { top: -2.0, bottom: 300.0, header: 0.0 }];
         assert!(table_holds_top(&past));
-        let below = [MeasuredTable { top: SECTION_LINE_HEIGHT + 1.0, bottom: 300.0 }];
+        let below = [MeasuredTable { top: SECTION_LINE_HEIGHT + 1.0, bottom: 300.0, header: 0.0 }];
         assert!(!table_holds_top(&below), "clear of the line's edge");
-        let gone = [MeasuredTable { top: -300.0, bottom: SECTION_LINE_HEIGHT }];
+        let gone = [MeasuredTable { top: -300.0, bottom: SECTION_LINE_HEIGHT, header: 0.0 }];
         assert!(!table_holds_top(&gone), "a table scrolled past does not hide it");
     }
 

@@ -1376,6 +1376,34 @@ fn code_blocks_keep_language_and_text() {
 }
 
 #[test]
+fn every_code_block_has_its_text_in_drawing_order() {
+    let model = doc(concat!(
+        "```rust\nlet top = 1;\n```\n\n",
+        "> ```rust\n> let quoted = 2;\n> ```\n\n",
+        "- item\n\n  ```rust\n  let listed = 3;\n  ```\n\n",
+        "<div><pre><code>let raw = 4;</code></pre></div>\n\n",
+        "Footnote.[^1]\n\n[^1]: ```rust\n    let foot = 5;\n    ```\n",
+    ));
+    let texts: Vec<String> = model.code_texts().into_iter().map(|text| text.into_owned()).collect();
+    assert_eq!(texts, vec!["let top = 1;", "let quoted = 2;", "let listed = 3;", "let raw = 4;", "let foot = 5;"]);
+    // Two identical blocks stay two, in order (M-13's duplicated case).
+    let twice = doc("```\nsame\n```\n\n```\nsame\n```\n");
+    assert_eq!(twice.code_texts(), vec!["same", "same"]);
+    assert!(doc("no code here\n").code_texts().is_empty());
+    // A `<pre>` inside an HTML table cell is drawn inline, not as a code
+    // block, so it is not a copy destination.
+    assert!(doc("<table><tr><td><pre>not code</pre></td></tr></table>\n").code_texts().is_empty());
+    // A block's destinations begin where the code blocks before it end.
+    assert_eq!(model.code_count_before(0), 0);
+    assert_eq!(model.code_texts().len(), 5);
+    assert_eq!(
+        model.code_count_before(model.blocks.len()),
+        4,
+        "the footnote's block is numbered inside its own section"
+    );
+}
+
+#[test]
 fn strikethrough_is_a_style_span() {
     let doc = doc("before ~~gone~~ after\n");
     let inline = match &doc.blocks[0] {

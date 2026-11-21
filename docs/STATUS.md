@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is done (169 done, 52 substitutes, 90 partial, 13 missing, 18 n/a), the three P0 missing behaviors are implemented (wiki links, click placement, file drop), and v0.6.0 is released. Remaining: the P0 partials, the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (200 done, 52 substitutes, 61 partial, 11 missing, 18 n/a), the P0 missing and the four P0 partial batches are implemented, and v0.7.0 is released. Remaining: 18 P0 partials, the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -372,7 +372,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5** and **v0.6.0** were published from it (unsigned, no checksums).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0** and **v0.7.0** were published from it (unsigned, no checksums).
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
@@ -445,6 +445,16 @@
 - T-19: runtime reorder and Esc-cancel tests; the strip drops drag/tear-out while an export pins the document; kit slop 4 pt accepted against the spec's 5.
 - T-01: `viewport_width` now sizes tabs down to the kit minimum; the toolbar move and per-name widths need kit APIs.
 - Audit: 173 done, 52 substitute, 86 partial, 13 missing, 18 n/a; 41 P0 gaps. Kit gaps tracked as OI-190.
+
+## P0 batches — tabs, start page, editor, links, reading — complete
+
+- Tabs: clipboard glyph, saved check + announcement, Delete/Backspace close, background opens no longer consume a start page, reorder/Esc/export gating. T-01/T-03 stay partial on kit APIs (OI-190).
+- Start page/notices/a11y: full H-01 page with tips, recents Clear + middle-click + “yesterday”, notice kinds/icons and live-region roles, localized `?` overlay, `aria-keyshortcuts` assertion. H-02's dead-file pruning (OI-004) and H-06's bar position (OI-191) remain.
+- Editor: 200 ms preview with parse-error containment, Discard/Cancel leave-edit, Setext-aware format bar. Insert/Tools menus remain (OI-192).
+- Links/markdown: 24 pt anchor landing + table-header compensation, `tel:`, ignored unknown schemes, Open/Show-in-folder for other files, Not-found notice, Save-as for pasted links, same-share network rule, per-block code copy, query-dropping images, transactional rendering.
+- Reading/system: width-based padding, F5 semantics, mtime-only touches, rename notice, outline scroll-spy, cold-start burst, 1200×860/480×480 window.
+- Audit: 200 done, 52 substitute, 61 partial, 11 missing, 18 n/a; 18 P0 gaps remain.
+- v0.7.0 tag; release notes in `docs/releases/v0.7.0.md`.
 
 ## Next up
 

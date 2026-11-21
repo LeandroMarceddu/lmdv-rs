@@ -43,7 +43,11 @@ pub const WHEEL_ACCUMULATE_SECONDS: f64 = 0.200;
 pub const DOUBLE_G_SECONDS: f64 = 0.500;
 /// The next heading is the first whose top is past this, below the viewport's
 /// top (`src/toc.ts:175`: past the scroll margin a just-reached heading sits at).
-pub const STEP_BELOW_TOP: f32 = 32.0;
+///
+/// Just inside [`crate::reader::READER_PAD_TOP`] (32, R-02): the first heading
+/// sits exactly on the column's top padding, and `.` from the top must still
+/// reach it.
+pub const STEP_BELOW_TOP: f32 = 24.0;
 /// The previous heading is the last one above this (`src/toc.ts:176`).
 pub const STEP_ABOVE_TOP: f32 = -4.0;
 /// Quiet time after a heading jump's last scroll report before a report counts

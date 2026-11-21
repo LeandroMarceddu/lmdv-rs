@@ -49,6 +49,12 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.7.0" date="2026-11-21" type="development">
+      <description>
+        <p>Complete start page and notices, link actions, editor preview and
+          discard flow, reading padding, window sizing, and tab-strip marks.</p>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-11-20" type="development">
       <description>
         <p>Wiki-style links, link-click placement, external file drop, reader

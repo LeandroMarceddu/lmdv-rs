@@ -7,8 +7,8 @@
 use lmdv_core::{DocStatus, Document, DocumentKey, ScrollAnchor, ThemePref};
 use lmdv_render::{DetailsState, RenderWires};
 use rune::{
-    Align, Color, Cursor, Cx, El, GrowthSpec, Phase, PointerButton, PointerPress, ScrollSpec, TextStyle, Tx, col, el,
-    icon, row, text, text_input,
+    Align, Color, Cursor, Cx, El, GrowthSpec, LiveRegion, Phase, PointerButton, PointerPress, ScrollSpec, TextStyle,
+    Tx, col, el, icon, row, text, text_input,
 };
 use rune_kit::shell::{SidebarPeek, SplitView, TabItem, TabItemStatus, TabOrientation, TabStrip, Toolbar};
 use rune_kit::syntax::SyntaxTheme;
@@ -16,14 +16,14 @@ use rune_kit::{
     Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Placement,
 };
 
-use crate::commands::{COMMANDS, lookup_command};
+use crate::commands::lookup_command;
 use crate::edit_ui::{FindField, GotoLine, SlashMenu};
 use crate::editor::{NARROW_SPLIT_WIDTH, SPLIT_DEFAULT};
 use crate::images::WindowImages;
 use crate::math::WindowMath;
 use crate::reader_find::{READER_FIND_BAND, READER_FIND_QUERY_KEY};
 use crate::reading_meta::{TAB_META_GAP, TAB_META_TRAILING};
-use crate::window::{HelpView, Mode, Notice, Tab, TabSource, WindowState, parse_tab_key, tab_key};
+use crate::window::{HelpView, Mode, Notice, NoticeKind, Tab, TabSource, WindowState, parse_tab_key, tab_key};
 use crate::{icons, outline, reader};
 
 /// Source lines drawn before the preview stops. The real renderer virtualizes
@@ -210,7 +210,7 @@ fn tab_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
                 menu = menu.item(MenuItem::new(target.title).on_select(move |state: &mut WindowState| {
                     state.close_tab_menu();
                     if let Err(error) = state.move_tab_to_window(tab, target_id) {
-                        state.notice(error);
+                        state.notice_kind(error, NoticeKind::Error);
                     }
                 }));
             }
@@ -420,7 +420,7 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
     let title = state.active_tab().map(Tab::full_title).unwrap_or_else(|| "lmdv".to_owned());
     let open = IconButton::new(&icons::FOLDER)
         .variant(IconButtonVariant::GhostMuted)
-        .label(lmdv_i18n::t!("toolbar.open"))
+        .label(crate::commands::strip_trailing_keys(lmdv_i18n::t!("toolbar.open")))
         .help(lmdv_i18n::t!("toolbar.openHint"))
         .shortcut("Ctrl+O")
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
@@ -431,7 +431,7 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
     let browser = IconButton::new(&rune_kit::shell::SIDEBAR)
         .variant(IconButtonVariant::GhostMuted)
         .expanded(state.left.is_open())
-        .label(lmdv_i18n::t!("toolbar.tree"))
+        .label(crate::commands::strip_trailing_keys(lmdv_i18n::t!("toolbar.tree")))
         .help(lmdv_i18n::t!("toolbar.treeHint"))
         .shortcut("Ctrl+B")
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
@@ -442,7 +442,7 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
     let outline = IconButton::new(&rune_kit::shell::INSPECTOR)
         .variant(IconButtonVariant::GhostMuted)
         .expanded(state.right.is_open())
-        .label(lmdv_i18n::t!("toolbar.toc"))
+        .label(crate::commands::strip_trailing_keys(lmdv_i18n::t!("toolbar.toc")))
         .help(lmdv_i18n::t!("toolbar.tocHint"))
         .shortcut("Ctrl+I")
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
@@ -452,7 +452,7 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
         .key("toggle-outline");
     let help = IconButton::new(&icons::HELP)
         .variant(IconButtonVariant::GhostMuted)
-        .label(lmdv_i18n::t!("toolbar.help"))
+        .label(crate::commands::strip_trailing_keys(lmdv_i18n::t!("toolbar.help")))
         .help(lmdv_i18n::t!("cmd.keys"))
         .shortcut("F1")
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
@@ -463,7 +463,7 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
     let settings = IconButton::new(&icons::SETTINGS)
         .variant(IconButtonVariant::GhostMuted)
         .expanded(state.settings_is_open())
-        .label(lmdv_i18n::t!("toolbar.settings"))
+        .label(crate::commands::strip_trailing_keys(lmdv_i18n::t!("toolbar.settings")))
         .help(lmdv_i18n::t!("toolbar.settingsHint"))
         .shortcut("Ctrl+,")
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
@@ -475,7 +475,12 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
     let edit = IconButton::new(if editing { &icons::BOOK } else { &icons::PENCIL })
         .variant(IconButtonVariant::GhostMuted)
         .expanded(editing)
-        .label(if editing { lmdv_i18n::t!("toolbar.read") } else { lmdv_i18n::t!("toolbar.edit") })
+        // A-03: the chord lives in the shortcut hint, not in the name.
+        .label(crate::commands::strip_trailing_keys(if editing {
+            lmdv_i18n::t!("toolbar.read")
+        } else {
+            lmdv_i18n::t!("toolbar.edit")
+        }))
         .help(if editing { lmdv_i18n::t!("toolbar.readHint") } else { lmdv_i18n::t!("toolbar.editHint") })
         .shortcut("Ctrl+E")
         .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
@@ -793,25 +798,69 @@ fn start_page(state: &WindowState, kit: &Kit) -> El {
         })
         .build(kit)
         .key("open-file");
+    // H-01: the clipboard is the second way in; its hint names Ctrl+V.
+    let paste = Button::new(lmdv_i18n::t!("empty.paste"))
+        .icon(&icons::CLIPBOARD)
+        .variant(ButtonVariant::Ghost)
+        .help(lmdv_i18n::t!("empty.pasteHint"))
+        .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
+            let _ = state.run_command("file.paste", tx);
+        })
+        .build(kit)
+        .key("paste-clipboard");
+
+    // H-03: the three tips are catalog messages with the help pages' inline
+    // vocabulary (`<code>`, `<kbd>`), so they draw with the same code/keycap
+    // styling as the guide.
+    let mut tips = col().key("start-tips").w_full().max_w(430.0).gap(4.0);
+    for (index, message) in
+        [lmdv_i18n::t!("empty.tip1"), lmdv_i18n::t!("empty.tip2"), lmdv_i18n::t!("empty.tip3")].into_iter().enumerate()
+    {
+        tips = tips.child(
+            crate::help::inline_el(&crate::help::message_inline(message), kit.ty.small, c.text_muted, kit)
+                .key(format!("start-tip-{}", index + 1))
+                .w_full()
+                .align(Align::Center),
+        );
+    }
+    let hint = crate::help::message_inline(lmdv_i18n::t!("empty.hint"));
 
     let page = col()
         .key("start-page")
         .w_full()
-        .pt(56.0)
-        .pb(32.0)
+        .pt(44.0)
+        .pb(28.0)
         .center()
-        .gap(10.0)
-        .child(text("lmdv").font(TextStyle::new(32.0, 650.0)).color(c.text_base))
+        .gap(8.0)
+        // H-01: the app's own mark (assets/lmdv.svg's page and bookmark).
+        .child(icon(&icons::APP, 30.0).color(c.icon_muted).a11y_hidden())
+        .child(text("lmdv").font(TextStyle::new(28.0, 650.0)).color(c.text_base))
         .child(text(lmdv_i18n::t!("start.tagline")).font(kit.ty.body).color(c.text_muted))
-        .child(row().h(8.0))
-        .child(open)
+        .child(row().h(6.0))
+        .child(
+            text(lmdv_i18n::t!("empty.title")).key("empty-title").font(TextStyle::new(19.0, 600.0)).color(c.text_base),
+        )
+        .child(
+            text(lmdv_i18n::t!("empty.lead"))
+                .key("empty-lead")
+                .font(kit.ty.body)
+                .color(c.text_muted)
+                .align(Align::Center),
+        )
+        .child(row().h(4.0))
+        .child(row().key("start-actions").gap(8.0).center_y().child(open).child(paste))
+        .child(row().h(4.0))
         .child(recents_panel(state, kit))
+        .child(row().h(4.0))
+        .child(tips)
+        .child(row().h(6.0))
         .child(
             text(lmdv_i18n::t!("start.version", "version" => env!("CARGO_PKG_VERSION")))
+                .key("start-version")
                 .font(kit.ty.small)
                 .color(c.text_faint),
         )
-        .child(row().h(4.0));
+        .child(crate::help::inline_el(&hint, kit.ty.small, c.text_faint, kit).key("start-hint").align(Align::Center));
 
     col().key("start-page-scroll").w_full().h_full().scroll(ScrollSpec { stick_bottom: false }).child(page)
 }
@@ -832,8 +881,29 @@ fn recents_panel(state: &WindowState, kit: &Kit) -> El {
         return panel;
     }
 
+    // H-02/P-05: the heading carries the Clear control that empties the list.
     panel = panel.child(
-        text(lmdv_i18n::t!("start.recentFiles")).key("recents-title").font(kit.ty.small_medium).color(c.text_muted),
+        row()
+            .key("recents-head")
+            .w_full()
+            .gap(8.0)
+            .center_y()
+            .child(
+                text(lmdv_i18n::t!("start.recentFiles"))
+                    .key("recents-title")
+                    .font(kit.ty.small_medium)
+                    .color(c.text_muted)
+                    .grow(1.0),
+            )
+            .child(
+                Button::new(lmdv_i18n::t!("empty.clear"))
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Small)
+                    .help(lmdv_i18n::t!("empty.clear"))
+                    .on_press(|state: &mut WindowState| state.shared().clear_recents())
+                    .build(kit)
+                    .key("recents-clear"),
+            ),
     );
     for (index, recent) in recents.iter().enumerate() {
         let path = recent.path.clone();
@@ -856,7 +926,14 @@ fn recents_panel(state: &WindowState, kit: &Kit) -> El {
                 // The new tab must draw at its own place on this frame, not at
                 // the offset the shared article viewport still carries.
                 state.apply_pending_scroll(tx);
-            })
+            });
+        // H-02: a middle click opens the file behind the current tab, as the
+        // browser rows and palette files do.
+        let background = recent.path.clone();
+        line = line.on_middle_press(move |state: &mut WindowState, _: &mut Tx| {
+            state.open_path_background(background.clone());
+        });
+        line = line
             .child(icon(&icons::DOCUMENT, 16.0).color(c.icon_muted))
             .child(text(recent.name.clone()).font(kit.ty.ui_medium).color(c.text_base).truncate().grow(1.0));
         if !recent.dir.as_os_str().is_empty() {
@@ -872,7 +949,8 @@ fn recents_panel(state: &WindowState, kit: &Kit) -> El {
     panel
 }
 
-/// A compact age for a recent file: “just now”, “12 min”, “3 h”, “5 d”.
+/// A compact age for a recent file (H-02): “just now”, “12 min”, “3 h”,
+/// “yesterday”, then the localized short date.
 ///
 /// The units are catalog plurals (`rel.minutes.one`/`.other`, …), so each
 /// locale picks its own CLDR form; the number uses the locale's grouping.
@@ -882,7 +960,6 @@ fn relative_time(opened_at: u64, now: u64) -> Option<String> {
     }
     const MINUTES: lmdv_i18n::PluralKey = lmdv_i18n::plural_key("rel.minutes");
     const HOURS: lmdv_i18n::PluralKey = lmdv_i18n::plural_key("rel.hours");
-    const DAYS: lmdv_i18n::PluralKey = lmdv_i18n::plural_key("rel.days");
     let unit = |key: lmdv_i18n::PluralKey, n: u64| {
         let count = lmdv_i18n::number(n as i64);
         lmdv_i18n::render(lmdv_i18n::plural(key, n), &[("n", &count)])
@@ -892,7 +969,8 @@ fn relative_time(opened_at: u64, now: u64) -> Option<String> {
         0..=59 => lmdv_i18n::t!("rel.justNow").to_owned(),
         60..=3_599 => unit(MINUTES, seconds / 60),
         3_600..=86_399 => unit(HOURS, seconds / 3_600),
-        _ => unit(DAYS, seconds / 86_400),
+        86_400..=172_799 => lmdv_i18n::t!("rel.yesterday").to_owned(),
+        _ => crate::share::medium_date(opened_at / 1_000, lmdv_i18n::locale()),
     })
 }
 
@@ -1571,7 +1649,7 @@ fn editor_dialog(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
     let Some(prompt) = state.prompt() else { return };
     let title = prompt.title();
     let body = match prompt {
-        crate::editor::Prompt::DiscardEdit { .. } => lmdv_i18n::t!("prompt.discardBody").to_owned(),
+        crate::editor::Prompt::DiscardEdit { .. } => lmdv_i18n::t!("msg.discardQ").to_owned(),
         crate::editor::Prompt::CloseTab { tab, .. } => {
             let name = state.tab(*tab).map(Tab::full_title).unwrap_or_else(|| "lmdv".to_owned());
             lmdv_i18n::t!("prompt.closeTabBody", "name" => name)
@@ -1592,7 +1670,17 @@ fn editor_dialog(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
     };
     let mut actions = row().key("prompt-actions").w_full().gap(8.0).justify_end();
     match prompt {
-        crate::editor::Prompt::DiscardEdit { .. } | crate::editor::Prompt::CloseTab { .. } => {
+        crate::editor::Prompt::DiscardEdit { .. } => {
+            // E-13: leaving edit mode asks Discard / Cancel, not Save.
+            actions = actions.child(
+                Button::new(lmdv_i18n::t!("msg.discard"))
+                    .variant(ButtonVariant::Outline)
+                    .on_press_tx(|state: &mut WindowState, tx: &mut Tx| state.prompt_discard_edit(tx))
+                    .build(kit)
+                    .key("prompt-primary"),
+            );
+        }
+        crate::editor::Prompt::CloseTab { .. } => {
             actions = actions
                 .child(
                     Button::new(lmdv_i18n::t!("msg.save"))
@@ -2144,8 +2232,25 @@ fn drop_overlay(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
     );
 }
 
+/// The status bar at the foot of the window (H-06/H-07/A-10).
+///
+/// One message at a time, with its kind's icon and colour, an optional action
+/// and the dismiss ×. The message is the live region: non-errors are a polite
+/// `status`, errors an assertive `alert`. Rune announces a live region when its
+/// text changes, so a notice numbers itself (`Notice::seq`) and a repeat gets an
+/// alternating zero-width mark — the clear-before-write rule, spelled the same
+/// way Rune's own `Tx::announce` spells it, without blanking the bar for a
+/// frame. The action and dismiss labels sit outside the region, so a reader
+/// hears the message alone.
 fn notice_bar(notice: &Notice, kit: &Kit) -> El {
     let c = &kit.c;
+    let (state, glyph) = match notice.kind {
+        NoticeKind::Info => (c.info, &icons::INFO),
+        NoticeKind::Success => (c.success, &icons::CHECK),
+        NoticeKind::Warning => (c.warning, &icons::WARNING),
+        NoticeKind::Error => (c.danger, &icons::ERROR),
+    };
+    let spoken = if notice.seq.is_multiple_of(2) { format!("{}\u{200B}", notice.text) } else { notice.text.clone() };
     let mut bar = row()
         .key("notice")
         .w_full()
@@ -2153,8 +2258,18 @@ fn notice_bar(notice: &Notice, kit: &Kit) -> El {
         .py(8.0)
         .gap(12.0)
         .center_y()
-        .fill(c.layer_02)
-        .child(text(notice.text.clone()).font(kit.ty.small).color(c.text_base).wrap().grow(1.0));
+        .fill(state.bg)
+        .child(icon(glyph, 14.0).color(state.icon).key("notice-icon").a11y_hidden())
+        .child(
+            text(spoken)
+                .key("notice-text")
+                .role(if notice.kind.is_error() { "alert" } else { "status" })
+                .live_region(if notice.kind.is_error() { LiveRegion::Assertive } else { LiveRegion::Polite })
+                .font(kit.ty.small)
+                .color(c.text_base)
+                .wrap()
+                .grow(1.0),
+        );
     if let Some(action) = &notice.action {
         bar = bar.child(
             Button::new(action.label())
@@ -2176,72 +2291,74 @@ fn notice_bar(notice: &Notice, kit: &Kit) -> El {
     )
 }
 
+/// The compact `?` key list (H-05): four groups — Reading, App, Editing, Tabs —
+/// with localized key caps from the `key.*` catalog entries (`Strg`,
+/// `Umschalt`, `Leertaste`, …). `?` again or Escape closes it.
 fn help_dialog(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, layer: &mut Vec<El>) {
     let c = &kit.c;
+    // The dialog's title already says what this is; the hint explains the keys
+    // that close it and where the full guide is.
     let mut rows = col().key("help-keys").w_full().gap(6.0).child(
-        text(lmdv_i18n::t!("help.description"))
-            .key("help-keys-description")
-            .font(kit.ty.small)
-            .color(c.text_muted)
-            .w_full()
-            .wrap(),
+        crate::help::inline_el(
+            &crate::help::message_inline(lmdv_i18n::t!("keys.hint")),
+            kit.ty.small,
+            c.text_muted,
+            kit,
+        )
+        .key("help-keys-description")
+        .w_full(),
     );
-    for command in COMMANDS {
-        let keys = if command.default_keys.is_empty() { "—".to_owned() } else { command.default_keys.join(" · ") };
-        rows = rows.child(
-            row()
-                .key(format!("help-{}", command.id))
-                .w_full()
-                .gap(12.0)
-                .center_y()
-                .child(
-                    text(crate::commands::command_title(state, command))
-                        .font(kit.ty.small)
-                        .color(c.text_muted)
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .wrap(),
-                )
-                .child(text(keys).font(kit.ty.mono).color(c.text_base).shrink().wrap()),
-        );
-    }
-    rows = rows.child(el().w_full().h(1.0).my(4.0).fill(c.border_muted)).child(
-        text(lmdv_i18n::t!("keys.editing")).key("help-editing-heading").font(kit.ty.small_medium).color(c.text_base),
+
+    let reading: &[(&str, &[&str])] = &[
+        (lmdv_i18n::t!("keys.scroll"), &["j", "k"]),
+        (lmdv_i18n::t!("keys.page"), &["Space", "Shift+Space"]),
+        (lmdv_i18n::t!("keys.heading"), &[".", ","]),
+        (lmdv_i18n::t!("keys.topEnd"), &["g g", "G"]),
+        (lmdv_i18n::t!("keys.find"), &["Ctrl+F"]),
+        (lmdv_i18n::t!("keys.findMatch"), &["Enter", "Shift+Enter", "F3"]),
+        (lmdv_i18n::t!("keys.textSize"), &["Ctrl+=", "Ctrl+-", "Ctrl+0"]),
+    ];
+    let app: &[(&str, &[&str])] = &[
+        (lmdv_i18n::t!("keys.open"), &["Ctrl+O"]),
+        (lmdv_i18n::t!("keys.paste"), &["Ctrl+V"]),
+        (lmdv_i18n::t!("keys.edit"), &["Ctrl+E"]),
+        (lmdv_i18n::t!("keys.save"), &["Ctrl+S"]),
+        (lmdv_i18n::t!("keys.panels"), &["Ctrl+B", "Ctrl+I"]),
+        (lmdv_i18n::t!("keys.searchFolder"), &["Ctrl+Shift+F"]),
+        (lmdv_i18n::t!("keys.palette"), &["Ctrl+K"]),
+        (lmdv_i18n::t!("keys.share"), &["Ctrl+Shift+E"]),
+        (lmdv_i18n::t!("keys.copyRich"), &["Ctrl+Shift+C"]),
+        (lmdv_i18n::t!("keys.print"), &["Ctrl+P"]),
+        (lmdv_i18n::t!("keys.reload"), &["Ctrl+R", "F5"]),
+        (lmdv_i18n::t!("keys.newWindow"), &["Ctrl+Shift+N"]),
+        (lmdv_i18n::t!("keys.backForward"), &["Alt+Left", "Alt+Right"]),
+        (lmdv_i18n::t!("keys.closeWindow"), &["Ctrl+Shift+W", "Ctrl+Q"]),
+    ];
+    let tabs: &[(&str, &[&str])] = &[
+        (lmdv_i18n::t!("keys.newTab"), &["Ctrl+T"]),
+        (lmdv_i18n::t!("keys.closeTab"), &["Ctrl+W"]),
+        (lmdv_i18n::t!("keys.reopenTab"), &["Ctrl+Shift+T"]),
+        (lmdv_i18n::t!("keys.nextTab"), &["Ctrl+Tab", "Ctrl+Shift+Tab"]),
+        (lmdv_i18n::t!("keys.tabN"), &["Ctrl+1", "\u{2026}", "Ctrl+9"]),
+        (lmdv_i18n::t!("keys.moveTab"), &["Ctrl+Shift+PgUp", "Ctrl+Shift+PgDn"]),
+    ];
+    rows = help_group(rows, lmdv_i18n::t!("keys.reading"), "reading", reading, kit);
+    rows = help_group(rows, lmdv_i18n::t!("keys.app"), "app", app, kit);
+    // The editor's own table is the single source of the editing chords
+    // (E-23–E-31); the compact list only re-draws them with localized caps.
+    rows = rows.child(el().w_full().h(1.0).my(6.0).fill(c.border_muted)).child(
+        text(lmdv_i18n::t!("keys.editing"))
+            .key("help-editing-heading")
+            .font(kit.ty.small_medium)
+            .color(c.text_base)
+            .w_full(),
     );
-    for (index, (label, keys)) in crate::edit_ui::editor_keys().into_iter().enumerate() {
-        rows = rows.child(
-            row()
-                .key(format!("help-editor-{index}"))
-                .w_full()
-                .gap(12.0)
-                .center_y()
-                .child(text(label).font(kit.ty.small).color(c.text_muted).grow(1.0).min_w(0.0).wrap())
-                .child(text(keys).font(kit.ty.mono).color(c.text_base).shrink().wrap()),
-        );
+    for (index, (label, keys)) in crate::edit_ui::editor_keys().iter().enumerate() {
+        let chords: Vec<&str> = keys.split(" \u{b7} ").collect();
+        rows = rows.child(help_key_row(&format!("help-editing-{index}"), label, &chords, kit));
     }
-    // T-08/T-09/T-10: the tab keys the command table cannot spell as one
-    // chord each — the numbered tabs and the clamped move (the original's
-    // compact key list has the same rows).
-    rows = rows
-        .child(el().w_full().h(1.0).my(4.0).fill(c.border_muted))
-        .child(text(lmdv_i18n::t!("keys.tabs")).key("help-tabs-heading").font(kit.ty.small_medium).color(c.text_base));
-    for (index, (label, keys)) in [
-        (lmdv_i18n::t!("keys.tabN"), "Ctrl+1 \u{2026} Ctrl+8 \u{b7} Ctrl+9"),
-        (lmdv_i18n::t!("keys.moveTab"), "Ctrl+Shift+PgUp \u{b7} Ctrl+Shift+PgDn"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        rows = rows.child(
-            row()
-                .key(format!("help-tab-key-{index}"))
-                .w_full()
-                .gap(12.0)
-                .center_y()
-                .child(text(label).font(kit.ty.small).color(c.text_muted).grow(1.0).min_w(0.0).wrap())
-                .child(text(keys).font(kit.ty.mono).color(c.text_base).shrink().wrap()),
-        );
-    }
+    rows = help_group(rows, lmdv_i18n::t!("keys.tabs"), "tabs", tabs, kit);
+
     Dialog::new("help", lmdv_i18n::t!("cmd.keys"))
         .open(state.help_view() == Some(HelpView::Shortcuts))
         .fit()
@@ -2259,11 +2376,67 @@ fn help_dialog(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, layer: 
         .build(kit, layer);
 }
 
+/// One compact-key group: a divider, the localized heading and one row per
+/// entry (H-05).
+fn help_group(rows: El, title: &str, group: &str, entries: &[(&str, &[&str])], kit: &Kit) -> El {
+    let c = &kit.c;
+    let mut rows = rows
+        .child(el().w_full().h(1.0).my(6.0).fill(c.border_muted))
+        .child(text(title).key(format!("help-{group}-heading")).font(kit.ty.small_medium).color(c.text_base).w_full());
+    for (index, (label, chords)) in entries.iter().enumerate() {
+        rows = rows.child(help_key_row(&format!("help-{group}-{index}"), label, chords, kit));
+    }
+    rows
+}
+
+/// One compact-key row: the action on the left and its localized caps on the
+/// right (H-05).
+///
+/// `chords` are raw `Ctrl+Shift+E` spellings; [`crate::commands::keycaps`]
+/// translates the names the catalogs carry. A chord list is separated by a
+/// faint dot, a sequence ("g g") draws its caps side by side, and the literal
+/// `…` marks the chords between two caps.
+fn help_key_row(key: &str, label: &str, chords: &[&str], kit: &Kit) -> El {
+    let c = &kit.c;
+    let mut caps = row().gap(4.0).center_y().shrink();
+    for (index, chord) in chords.iter().enumerate() {
+        if index > 0 {
+            caps = caps.child(text("\u{b7}").font(kit.ty.small).color(c.text_faint).a11y_hidden());
+        }
+        if *chord == "\u{2026}" {
+            caps = caps.child(text("\u{2026}").font(kit.ty.small).color(c.text_faint));
+            continue;
+        }
+        let keys: Vec<String> = chord.split(' ').flat_map(crate::commands::keycaps).collect();
+        caps = caps.child(rune_kit::Keybind::new(&keys).build(kit));
+    }
+    row()
+        .key(key)
+        .w_full()
+        .gap(12.0)
+        .center_y()
+        .child(text(label).font(kit.ty.small).color(c.text_muted).grow(1.0).min_w(0.0).wrap())
+        .child(caps)
+}
+
 /// The still, deterministic start page scene.
+///
+/// H-01/H-02: the page's recents, their ages, the Clear control and the
+/// middle-click open all need rows. The scene seeds them in memory so a
+/// headless run never rewrites the user's `recents.json`; the four ages cover
+/// “minutes”, “hours”, “yesterday” and the short date.
 pub fn scene_start(state: &mut WindowState) {
     state.reset_to_start_page();
     state.left.set_open(false);
     state.right.set_open(false);
+    let now = crate::shared::unix_millis();
+    state.shared().preview_recents([
+        (std::path::PathBuf::from("/home/you/Notes/release-checklist.md"), now.saturating_sub(3 * 60_000)),
+        (std::path::PathBuf::from("/home/you/Notes/reading/quiet-page.md"), now.saturating_sub(5 * 3_600_000)),
+        (std::path::PathBuf::from("/home/you/Documents/v0.6.0-notes.md"), now.saturating_sub(30 * 3_600_000)),
+        (std::path::PathBuf::from("/home/you/Documents/archive/old-plan.md"), now.saturating_sub(10 * 86_400_000)),
+    ]);
+    state.ui.now_unix_ms = now;
 }
 
 /// Three synthetic documents so the strip, panes and source preview are all
@@ -3161,7 +3334,10 @@ mod tests {
         assert_eq!(relative_time(0, 0).as_deref(), None);
         assert_eq!(relative_time(1_000, 1_000 + 12 * 60_000).as_deref(), Some("12 min"));
         assert_eq!(relative_time(1_000, 1_000 + 3 * 3_600_000).as_deref(), Some("3 h"));
-        assert_eq!(relative_time(1_000, 1_000 + 5 * 86_400_000).as_deref(), Some("5 d"));
+        // H-02: “yesterday”, then the localized short date.
+        assert_eq!(relative_time(1_000, 1_000 + 30 * 3_600_000).as_deref(), Some("yesterday"));
+        assert_eq!(relative_time(1_000, 1_000 + 8 * 86_400_000).as_deref(), Some("Jan 1, 1970"));
+        assert_eq!(relative_time(1_000, 1_000 + 47 * 3_600_000).as_deref(), Some("yesterday"));
     }
 
     #[test]
@@ -3220,5 +3396,280 @@ mod tests {
         let elements = render(state);
         assert!(elements.iter().any(|element| element.key.as_deref() == Some("document-status")));
         assert!(!elements.iter().any(|element| element.key.as_deref() == Some("document-lines")));
+    }
+
+    // ---- start page, notices and the keys overlay (H-01–H-07, A-03) ------
+
+    /// One node of the accessibility JSON, by element key.
+    fn a11y<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        if node.get("key").and_then(|value| value.as_str()) == Some(key) {
+            return Some(node);
+        }
+        node.get("children")?.as_array()?.iter().find_map(|child| a11y(child, key))
+    }
+
+    fn a11y_states(node: &serde_json::Value) -> Vec<&str> {
+        node.get("states")
+            .and_then(|value| value.as_array())
+            .map(|states| states.iter().filter_map(|state| state.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    fn by_key<'a>(elements: &'a [ElementInfo], key: &str) -> &'a ElementInfo {
+        elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no element keyed {key}"))
+    }
+
+    #[test]
+    fn the_start_page_shows_every_spec_element() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_start(&mut state);
+        let elements = render(state);
+
+        // H-01: title, lead, both ways in, the recents list, the hints.
+        assert_eq!(by_key(&elements, "empty-title").text.as_deref(), Some("No document open"));
+        assert_eq!(by_key(&elements, "empty-lead").text.as_deref(), Some("Drop a Markdown file here, or"));
+        assert_eq!(by_key(&elements, "open-file").role, "button");
+        assert_eq!(by_key(&elements, "paste-clipboard").role, "button");
+        assert!(
+            elements.iter().any(|element| element.text.as_deref() == Some(lmdv_i18n::t!("empty.paste"))),
+            "the clipboard button is named"
+        );
+        assert!(has_key(&elements, "start-page-scroll"), "a long page scrolls");
+
+        // H-03: the three tips, with their `<code>`/`<kbd>` styling flattened to text.
+        for index in 1..=3 {
+            assert!(has_key(&elements, &format!("start-tip-{index}")), "tip {index}");
+        }
+        assert!(
+            elements.iter().any(|element| element.key.as_deref() == Some("start-tip-1")
+                && element.text.as_deref().is_some_and(|text| text.contains(".md"))),
+            "the first tip names the extension"
+        );
+        assert!(
+            elements.iter().any(|element| element.key.as_deref() == Some("start-tip-3")
+                && element.text.as_deref().is_some_and(|text| text.contains("Ctrl+O"))),
+            "the third tip carries its key caps"
+        );
+
+        // H-13: the version, and H-01's F1/? hint.
+        let version = lmdv_i18n::format(lmdv_i18n::key("start.version"), &[("version", &env!("CARGO_PKG_VERSION"))]);
+        assert_eq!(by_key(&elements, "start-version").text.as_deref(), Some(version.as_str()));
+        assert!(
+            by_key(&elements, "start-hint").text.as_deref().is_some_and(|text| text.contains("F1")),
+            "the hint names F1"
+        );
+
+        // H-02: recents with Clear, a folder and an age.
+        assert!(has_key(&elements, "recents-title"));
+        assert!(has_key(&elements, "recents-clear"));
+        assert_eq!(by_key(&elements, "recent-0").role, "button");
+        assert!(
+            elements.iter().any(|element| element.text.as_deref() == Some("3 min")),
+            "the newest recent shows its age"
+        );
+        assert!(
+            elements.iter().any(|element| element.text.as_deref() == Some("yesterday")),
+            "a day-old recent says yesterday"
+        );
+    }
+
+    #[test]
+    fn an_empty_start_page_says_there_are_no_recents() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_start(&mut state);
+        state.shared().preview_recents(std::iter::empty());
+        let elements = render(state);
+        assert!(has_key(&elements, "recents-empty"));
+        assert!(!has_key(&elements, "recents-clear"), "nothing to clear");
+        assert!(!has_key(&elements, "recent-0"));
+    }
+
+    #[test]
+    fn clear_empties_the_recents_and_the_page_says_so() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_start(&mut state);
+        assert_eq!(state.shared().recents().len(), 4);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let rect = by_key(&runtime.elements(), "recents-clear").rect;
+        let (x, y) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+        runtime.pointer_move(x, y);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+
+        assert!(runtime.state.shared().recents().is_empty(), "H-02: Clear empties the list");
+        // The rows and the Clear control leave with the list; the elements list
+        // keeps exiting nodes for a few frames, so wait for them to be gone.
+        for frame in 2..40 {
+            runtime.frame(f64::from(frame) / 60.0);
+        }
+        let elements = runtime.elements();
+        assert!(has_key(&elements, "recents-empty"), "the page says there are none");
+        assert!(!has_key(&elements, "recents-clear"), "the Clear control goes with the rows");
+        assert!(!has_key(&elements, "recent-0"));
+    }
+
+    #[test]
+    fn a_middle_click_on_a_recent_opens_it_in_a_background_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_start(&mut state);
+        let path = temp.path().join("background-notes.md");
+        std::fs::write(&path, "# Background notes\n").unwrap();
+        let now = crate::shared::unix_millis();
+        state.shared().preview_recents([(path, now)]);
+
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let (x, y) = runtime.find("recent-0").expect("the recent row");
+        runtime.button_down(x, y, PointerButton::Middle);
+        runtime.button_up(x, y, PointerButton::Middle);
+        runtime.frame(1.0 / 60.0);
+
+        let state = &runtime.state;
+        assert_eq!(state.tabs().len(), 2, "the file opened behind the start page");
+        assert!(state.active_tab().is_some_and(Tab::is_start), "the start page stayed in front");
+        assert_eq!(state.tabs()[1].full_title(), "background-notes.md");
+    }
+
+    #[test]
+    fn a_notice_carries_its_kind_icon_and_colour() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let kit = crate::appearance::palette(state.shared().prefs().theme, true);
+        state.notice_kind("Could not save the document.", NoticeKind::Error);
+        let elements = render(state);
+        assert_eq!(by_key(&elements, "notice").fill, kit.c.danger.bg, "the error bar is the danger tint");
+        assert!(has_key(&elements, "notice-icon"), "H-06: the kind draws its icon");
+        assert_eq!(by_key(&elements, "notice-text").role, "alert", "H-07: errors are alerts");
+
+        let mut state = window(&temp);
+        state.notice_kind("The file is large.", NoticeKind::Warning);
+        let elements = render(state);
+        assert_eq!(by_key(&elements, "notice").fill, kit.c.warning.bg, "the warning bar is the warning tint");
+        assert_eq!(by_key(&elements, "notice-text").role, "status");
+
+        let mut state = window(&temp);
+        // The save's own words are a success without the caller naming a kind.
+        state.notice(lmdv_i18n::t!("msg.saved"));
+        assert_eq!(state.ui.notice.as_ref().expect("the notice").kind, NoticeKind::Success);
+        let elements = render(state);
+        assert_eq!(by_key(&elements, "notice").fill, kit.c.success.bg, "the saved bar is the success tint");
+    }
+
+    #[test]
+    fn the_notice_bar_is_a_live_region_and_a_repeat_changes_its_words() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        // A start-page window has no document, so the notice is the only subject.
+        state.notice("Path copied to the clipboard.");
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json();
+        let status = a11y(&tree, "notice-text").expect("the notice text");
+        assert_eq!(status.get("role").and_then(|value| value.as_str()), Some("status"));
+        assert!(
+            a11y_states(status).contains(&"live-polite"),
+            "H-07: a non-error is a polite live region: {:?}",
+            a11y_states(status)
+        );
+        assert_eq!(status.get("name").and_then(|value| value.as_str()), Some("Path copied to the clipboard."));
+
+        // The same words twice: the second carries an invisible mark, so a reader
+        // is told again (the clear-before-write rule).
+        runtime.update(|state, _| state.notice("Path copied to the clipboard."));
+        runtime.frame(1.0 / 60.0);
+        let tree = runtime.accessibility_json();
+        let second = a11y(&tree, "notice-text").and_then(|node| node.get("name")).and_then(|value| value.as_str());
+        let second = second.expect("the repeat's words").to_owned();
+        assert_ne!(second, "Path copied to the clipboard.", "the live text changed");
+        assert_eq!(second.trim_end_matches('\u{200B}'), "Path copied to the clipboard.");
+
+        // Errors are assertive alerts.
+        runtime.update(|state, _| state.notice_kind("Could not save the document.", NoticeKind::Error));
+        runtime.frame(2.0 / 60.0);
+        let tree = runtime.accessibility_json();
+        let alert = a11y(&tree, "notice-text").expect("the error");
+        assert_eq!(alert.get("role").and_then(|value| value.as_str()), Some("alert"));
+        assert!(a11y_states(alert).contains(&"live-assertive"));
+    }
+
+    #[test]
+    fn the_find_bar_and_the_notice_bar_share_the_window_without_overlapping() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_editor(&mut state);
+        state.notice_kind(lmdv_i18n::t!("msg.exportFailed", "err" => "disk full"), NoticeKind::Error);
+        let elements = render(state);
+        let find = by_key(&elements, "find-bar");
+        let notice = by_key(&elements, "notice");
+        assert!(find.rect[3] > 0.0 && notice.rect[3] > 0.0, "both bars draw");
+        let [fx, fy, fw, fh] = find.rect;
+        let [nx, ny, nw, nh] = notice.rect;
+        let overlap = fx < nx + nw && nx < fx + fw && fy < ny + nh && ny < fy + fh;
+        assert!(!overlap, "H-06: the find bar {find:?} and the notice {notice:?} never overlap");
+    }
+
+    #[test]
+    fn the_keys_overlay_has_four_groups_in_order_with_localized_caps() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_help(&mut state);
+        let elements = render(state);
+        let order: Vec<f32> = ["help-reading-heading", "help-app-heading", "help-editing-heading", "help-tabs-heading"]
+            .into_iter()
+            .map(|key| by_key(&elements, key).rect[1])
+            .collect();
+        assert!(order[0] < order[1] && order[1] < order[2] && order[2] < order[3], "four groups in order: {order:?}");
+        assert_eq!(by_key(&elements, "help-reading-heading").text.as_deref(), Some("Reading"));
+        assert_eq!(by_key(&elements, "help-tabs-heading").text.as_deref(), Some("Tabs"));
+        // H-05: Space paging is listed, even though no handler spells it.
+        assert!(
+            elements.iter().any(|element| element.key.as_deref() == Some("help-reading-1")),
+            "the page row is there"
+        );
+        assert!(
+            elements.iter().any(|element| element.role == "group" && element.label.as_deref() == Some("Shift Space")),
+            "the page row's caps are Shift and Space: {:?}",
+            elements.iter().filter_map(|element| element.label.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(by_key(&elements, "help-dialog").role, "dialog");
+    }
+
+    // ---- A-03's tree assertion -------------------------------------------
+
+    #[test]
+    fn a_toolbar_control_exposes_its_name_and_keyboard_shortcut() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_reader(&mut state);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json();
+
+        let open = a11y(&tree, "open-file-toolbar").expect("the toolbar's open button");
+        assert_eq!(open.get("role").and_then(|value| value.as_str()), Some("button"));
+        assert_eq!(
+            open.get("name").and_then(|value| value.as_str()),
+            Some("Open file…"),
+            "the name is the localized label without the chord"
+        );
+        assert_eq!(
+            open.get("shortcut").and_then(|value| value.as_str()),
+            Some("Ctrl+O"),
+            "and the chord is aria-keyshortcuts"
+        );
+
+        // A toggle carries its shortcut too, and the chord stays out of its name.
+        let outline = a11y(&tree, "toggle-outline").expect("the outline toggle");
+        assert_eq!(outline.get("shortcut").and_then(|value| value.as_str()), Some("Ctrl+I"));
+        assert_eq!(outline.get("name").and_then(|value| value.as_str()), Some("Toggle outline"));
     }
 }

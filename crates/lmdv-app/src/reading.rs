@@ -135,6 +135,8 @@ pub(crate) struct ReadingState {
     pub(crate) landing_flash: Option<LandingFlash>,
     /// The drawn footnote entries and their first references (OI-162).
     pub(crate) footnote_tops: std::cell::RefCell<Vec<MeasuredFootnote>>,
+    /// The outline row the scroll spy last revealed (O-03).
+    pub(crate) outline_revealed: Option<String>,
 }
 
 impl WindowState {

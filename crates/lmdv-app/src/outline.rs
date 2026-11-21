@@ -135,19 +135,25 @@ impl WindowState {
         let now = tx.clock();
         let scroll = self.reading.scroll.get();
         let index = key.strip_prefix('h').and_then(|digits| digits.parse::<usize>().ok());
-        let destination = index
-            .and_then(|index| self.heading_top(index).map(|top| (index, top)))
-            .filter(|_| scroll.max > 0.0)
-            .map(|(_, top)| crate::nav::heading_destination(scroll, top, crate::nav::JUMP_INSET));
+        // L-01: 24 points below the top, plus a measured sticky table header
+        // the landing point would sit under. The measured top is only useful
+        // while the page can scroll.
+        let measured = index.and_then(|index| self.heading_top(index));
+        let inset = crate::nav::landing_inset(&self.section_line.tables(), scroll, measured.unwrap_or(0.0));
+        let destination =
+            measured.filter(|_| scroll.max > 0.0).map(|top| crate::nav::heading_destination(scroll, top, inset));
         match destination {
             Some(y) => tx.scroll_to(crate::reader::ARTICLE_SCROLL_KEY, 0.0, y),
-            None => tx.scroll_key_to(key, crate::nav::JUMP_INSET),
+            None => tx.scroll_key_to(key, inset),
         }
         if let (Some(index), Some(revision)) = (index, self.active_reader().map(|doc| doc.revision)) {
             let signal = self.scroll_signal();
             self.reading_keys.pin_heading(index, revision, now, signal);
         }
         tx.scroll_into_view(format!("outline-{key}"));
+        // O-03: the pane already shows this row; the per-frame spy check must
+        // not issue its own reveal while the jump's pin owns the highlight.
+        self.reading.outline_revealed = Some(key.to_owned());
         // O-09/OI-142: the line stays away until the glide settles, and the
         // landed heading lights up for a moment (O-10). The landing poll
         // releases the line and wakes the view; no fixed timer here.
@@ -155,6 +161,57 @@ impl WindowState {
             self.section_line.hold_until_landing();
         }
     }
+
+    /// Keeps the scroll spy's active row inside the outline's viewport (O-03).
+    ///
+    /// Once per active-heading change rather than every frame: a reader who
+    /// scrolls the outline by hand keeps that place until the page moves the
+    /// spy. A jump already reveals its own row ([`Self::scroll_to_heading`]),
+    /// so this only answers the spy and the pinned heading.
+    pub(crate) fn reveal_active_outline_row(&mut self, tx: &mut Tx) -> bool {
+        if !self.right.is_open() {
+            self.reading.outline_revealed = None;
+            return false;
+        }
+        let Some(doc) = self.active_reader() else { return false };
+        let active = self.pinned_heading(&doc).or_else(|| {
+            spy_heading(&doc, &self.reading.heading_tops.borrow(), self.scroll_snapshot()).map(lmdv_render::heading_key)
+        });
+        let Some(key) = active else { return false };
+        if self.reading.outline_revealed.as_deref() == Some(key.as_str()) {
+            return false;
+        }
+        self.reading.outline_revealed = Some(key.clone());
+        tx.scroll_into_view(format!("outline-{key}"));
+        true
+    }
+}
+
+/// The scroll spy's active heading from the tops the reading view measured (O-03).
+///
+/// [`crate::reader::active_heading`] reads the same layout through `Cx` in the
+/// view. `poll` has no `Cx`, so this copy works from the tops and viewport the
+/// view published: the same activation line, including its slide through the
+/// last viewport so the trailing headings can still become active.
+pub(crate) fn spy_heading(
+    doc: &lmdv_md::MdDoc,
+    tops: &[crate::section::MeasuredHeading],
+    scroll: crate::reader::ScrollSnapshot,
+) -> Option<usize> {
+    let activation = crate::reader::activation_line(scroll.viewport, scroll);
+    let mut active = None;
+    for (index, heading) in doc.headings.iter().enumerate() {
+        // A footnote definition's heading is not a document block (OI-028).
+        if !heading.in_toc || heading.block == usize::MAX {
+            continue;
+        }
+        let Some(measured) = tops.iter().find(|measured| measured.index == index) else { continue };
+        if measured.top > activation {
+            break;
+        }
+        active = Some(index);
+    }
+    active.or_else(|| toc_headings(doc).next().map(|(index, _)| index))
 }
 
 /// The inspector's content for the active tab.
@@ -325,6 +382,75 @@ mod tests {
         state.open_synthetic("Note", "# One\n\nText.[^1]\n\n[^1]: Body\n");
         assert!(state.has_active_headings());
         assert_eq!(state.first_visible_heading_key().as_deref(), Some("h0"));
+    }
+
+    #[test]
+    fn the_spy_heading_follows_the_activation_line_and_the_last_viewport() {
+        use crate::reader::ScrollSnapshot;
+        use crate::section::MeasuredHeading;
+
+        let doc = lmdv_md::parse("# One\n\n## Two\n\n### Three\n");
+        let tops = |values: &[(usize, f32)]| -> Vec<MeasuredHeading> {
+            values
+                .iter()
+                .map(|(index, top)| MeasuredHeading { index: *index, top: *top, bottom: *top + 20.0 })
+                .collect()
+        };
+
+        // Far from the end the line is the fixed 90 pt.
+        let scroll = ScrollSnapshot { offset: 100.0, max: 2000.0, viewport: 700.0 };
+        assert_eq!(spy_heading(&doc, &tops(&[(0, -300.0), (1, -100.0), (2, 140.0)]), scroll), Some(1));
+        // At the end the line reaches the viewport's bottom, so the last
+        // heading activates even though it never reaches the top (O-03).
+        let end = ScrollSnapshot { offset: 2000.0, max: 2000.0, viewport: 700.0 };
+        assert_eq!(spy_heading(&doc, &tops(&[(0, -2000.0), (1, -1500.0), (2, 600.0)]), end), Some(2));
+        // Without a measurement the first outline heading stands in.
+        assert_eq!(spy_heading(&doc, &[], ScrollSnapshot::default()), Some(0));
+    }
+
+    #[test]
+    fn the_scroll_spy_reveals_the_active_row_in_the_outline() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let mut markdown = String::from("# Top\n\n");
+        for index in 0..40 {
+            markdown.push_str(&format!("## Section {index}\n\nA paragraph.\n\n"));
+        }
+        state.open_synthetic("Long", &markdown);
+        state.right.set_open(true);
+        if let Some(tab) = state.active_tab_mut() {
+            tab.view.outline_hidden = false;
+        }
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        for _ in 0..6 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(!runtime.state.reading.heading_tops.borrow().is_empty(), "the reading view measured the headings");
+
+        runtime.update(|_, tx| tx.scroll_to_bottom_instant(crate::reader::ARTICLE_SCROLL_KEY));
+        for _ in 0..12 {
+            runtime.frame(1.0 / 60.0);
+        }
+
+        let doc = runtime.state.active_reader().expect("a model");
+        let last = crate::reader::toc_headings(&doc).last().map(|(index, _)| index).expect("the last heading");
+        let key = format!("outline-{}", lmdv_render::heading_key(last));
+        assert_eq!(
+            runtime.state.reading.outline_revealed.as_deref(),
+            Some(lmdv_render::heading_key(last).as_str()),
+            "O-03: the spy moved the outline to the last heading"
+        );
+        let elements = runtime.elements();
+        let row = elements.iter().find(|element| element.key.as_deref() == Some(key.as_str())).expect("the last row");
+        let scroll = runtime.state.scroll_snapshot();
+        assert!((scroll.offset - scroll.max).abs() < 1.0, "the page really is at the end: {scroll:?}");
+        assert!(
+            row.visible[3] >= row.rect[3] - 0.5 && row.visible[3] > 0.0,
+            "O-03: the active row is scrolled into the pane: rect {:?}, visible {:?}",
+            row.rect,
+            row.visible
+        );
     }
 
     #[test]

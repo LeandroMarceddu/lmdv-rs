@@ -916,6 +916,15 @@ impl Writer {
         self.last_write.insert(key.clone(), Instant::now());
         let result = match (key, &pending.value) {
             (Key::Prefs, Value::Prefs(prefs)) => write_json(&self.dirs.prefs_path(), prefs),
+            // P-05: an empty list removes the key, like the original's
+            // `localStorage.removeItem("recents-files")`.
+            (Key::Recents, Value::Recents(recents)) if recents.is_empty() => {
+                match fs::remove_file(self.dirs.recents_path()) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                }
+            }
             (Key::Recents, Value::Recents(recents)) => write_json(&self.dirs.recents_path(), recents),
             (Key::Positions, Value::Positions(positions)) => write_json(&self.dirs.positions_path(), positions),
             (Key::Session, Value::Session(session)) => write_json(&self.dirs.session_path(), session),
@@ -1983,6 +1992,20 @@ mod tests {
         let loaded = load_ui_reported(&dirs);
         assert_eq!(loaded.value, UiPrefs::default());
         assert!(loaded.issue.is_none(), "first run is not a problem");
+    }
+
+    #[test]
+    fn clearing_recents_removes_the_file() {
+        let temp = TempDir::new().unwrap();
+        let dirs = dirs(&temp);
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Recents(vec![Recent::new("/tmp/lmdv-a.md", 1)]));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert!(dirs.recents_path().exists());
+
+        handle.patch(StorePatch::Recents(Vec::new()));
+        assert!(handle.flush(Duration::from_secs(2)));
+        assert!(!dirs.recents_path().exists(), "P-05: an empty list removes the key");
     }
 
     #[test]

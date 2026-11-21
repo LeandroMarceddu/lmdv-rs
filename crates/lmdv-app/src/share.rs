@@ -42,7 +42,7 @@ use lmdv_md::MdDoc;
 use rune::{ClipboardContent, FileDialogOptions, Tx};
 
 use crate::shared::unix_millis;
-use crate::window::{Notice, NoticeAction, WindowState};
+use crate::window::{NoticeAction, NoticeKind, WindowState};
 
 /// How long the Share button shows its check after a successful export (X-13).
 pub const SHARE_FLASH_SECONDS: f64 = 1.2;
@@ -486,11 +486,11 @@ impl WindowState {
                 self.share.flash_until = Some(self.ui.last_now + SHARE_FLASH_SECONDS);
                 self.share.flash_armed = false;
                 tx.copy_rich(ClipboardContent::new(copy.markdown).with_html(copy.html));
-                self.show_share_notice(lmdv_i18n::t!("msg.copiedRich"), None);
+                self.show_share_notice(lmdv_i18n::t!("msg.copiedRich"), None, NoticeKind::Success);
                 true
             }
             Err(error) => {
-                self.show_share_notice(lmdv_i18n::t!("msg.copyFailed", "err" => error), None);
+                self.show_share_notice(lmdv_i18n::t!("msg.copyFailed", "err" => error), None, NoticeKind::Error);
                 true
             }
         }
@@ -519,14 +519,18 @@ impl WindowState {
                     ExportFormat::Pdf if open_viewer => self.show_share_notice(
                         format!("{} {}", lmdv_i18n::t!("msg.pdfSaved"), outcome.path.display()),
                         None,
+                        NoticeKind::Success,
                     ),
                     ExportFormat::Pdf => {
                         let action =
                             outcome.path.parent().map(|parent| NoticeAction::ShowInFolder(parent.to_path_buf()));
-                        self.show_share_notice(lmdv_i18n::t!("msg.pdfSaved"), action);
+                        self.show_share_notice(lmdv_i18n::t!("msg.pdfSaved"), action, NoticeKind::Success);
                     }
-                    ExportFormat::Html | ExportFormat::Docx => self
-                        .show_share_notice(format!("{} {}", lmdv_i18n::t!("msg.saved"), outcome.path.display()), None),
+                    ExportFormat::Html | ExportFormat::Docx => self.show_share_notice(
+                        format!("{} {}", lmdv_i18n::t!("msg.saved"), outcome.path.display()),
+                        None,
+                        NoticeKind::Success,
+                    ),
                 }
                 true
             }
@@ -537,7 +541,7 @@ impl WindowState {
                     lmdv_i18n::t!("msg.exportFailed", "err" => error)
                 };
                 let action = (format == ExportFormat::Pdf).then_some(NoticeAction::UsePrintDialog);
-                self.show_share_notice(text, action);
+                self.show_share_notice(text, action, NoticeKind::Error);
                 true
             }
         }
@@ -548,15 +552,17 @@ impl WindowState {
         match result {
             Ok(()) => false,
             Err(error) => {
-                self.notice(lmdv_i18n::t!("msg.openFailed", "name" => path.display(), "err" => error));
+                self.notice_kind(
+                    lmdv_i18n::t!("msg.openFailed", "name" => path.display(), "err" => error),
+                    NoticeKind::Error,
+                );
                 true
             }
         }
     }
 
-    fn show_share_notice(&mut self, text: impl Into<String>, action: Option<NoticeAction>) {
-        let deadline = self.ui.last_now + SHARE_NOTICE_SECONDS;
-        self.ui.notice = Some(Notice { text: text.into(), deadline, action });
+    fn show_share_notice(&mut self, text: impl Into<String>, action: Option<NoticeAction>, kind: NoticeKind) {
+        self.show_notice(text.into(), kind, action, SHARE_NOTICE_SECONDS);
     }
 
     /// Keeps the export/menu state consistent with the tabs: a menu with no

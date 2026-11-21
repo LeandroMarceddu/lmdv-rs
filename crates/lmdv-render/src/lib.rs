@@ -135,6 +135,10 @@ pub fn highlight_key(index: usize) -> String {
 }
 
 /// The link destination that copies a code block's source.
+///
+/// `key` is the block's position in [`lmdv_md::MdDoc::code_texts`] (M-13): the
+/// renderer numbers every code block in drawing order, so nested, duplicated
+/// and raw-HTML blocks each copy their own text.
 pub fn copy_code_link(key: &str) -> String {
     format!("copy-code:{key}")
 }
@@ -614,6 +618,7 @@ pub fn render(doc: &MdDoc, theme: &DocTheme, opts: &RenderOptions<'_>) -> El {
         theme_hash: theme.fingerprint(),
         current_block: std::cell::Cell::new(usize::MAX),
         list_depth: std::cell::Cell::new(0),
+        code_base: std::cell::Cell::new(0),
         preview: std::cell::RefCell::new(PreviewBlock::default()),
     };
     r.article()

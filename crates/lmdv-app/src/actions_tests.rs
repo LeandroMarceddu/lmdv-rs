@@ -67,6 +67,43 @@ fn notice_text(state: &WindowState) -> String {
     state.ui.notice.as_ref().map(|notice| notice.text.clone()).unwrap_or_default()
 }
 
+// ---- notice kinds and localized key caps (H-05/H-06) ---------------------
+
+#[test]
+fn the_confirmations_keep_their_honest_notice_kind() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+
+    // The messages the older handlers raise through `notice` are successes...
+    for message in ["msg.saved", "msg.pathCopied", "msg.tableCopied", "msg.imageCopied"] {
+        state.notice(lmdv_i18n::text(lmdv_i18n::key(message)));
+        let notice = state.ui.notice.as_ref().expect("a notice");
+        assert_eq!(notice.kind, crate::window::NoticeKind::Success, "{message}");
+    }
+    // ...anything else stays a neutral status unless the caller names a kind.
+    state.notice("The folder has no Markdown files.");
+    assert_eq!(state.ui.notice.as_ref().map(|notice| notice.kind), Some(crate::window::NoticeKind::Info));
+    state.notice_kind("The file is larger than 8 MiB.", crate::window::NoticeKind::Warning);
+    assert_eq!(state.ui.notice.as_ref().map(|notice| notice.kind), Some(crate::window::NoticeKind::Warning));
+    state.notice_kind("Save failed.", crate::window::NoticeKind::Error);
+    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.kind.is_error()));
+}
+
+#[test]
+fn key_caps_are_localized_per_catalog() {
+    let index = |id: &str| lmdv_i18n::find_locale(id).expect("a catalog");
+    assert_eq!(crate::commands::keycaps_in(0, "Ctrl+Shift+PgDn"), ["Ctrl", "Shift", "PgDn"]);
+    assert_eq!(
+        crate::commands::keycaps_in(index("de"), "Ctrl+Shift+PgDn"),
+        ["Strg", "Umschalt", "Bild\u{2193}"],
+        "H-05: German names the keys"
+    );
+    assert_eq!(crate::commands::keycaps_in(index("de"), "Space"), ["Leertaste"]);
+    assert_eq!(crate::commands::keycaps_in(index("de"), "Shift+Space"), ["Umschalt", "Leertaste"]);
+    assert_eq!(crate::commands::keycaps_in(index("fr"), "Esc"), ["\u{c9}chap"]);
+    assert_eq!(crate::commands::keycaps_in(index("it"), "Ctrl+="), ["Ctrl", "="], "unnamed keys are their own cap");
+}
+
 fn anchor(id: &str, offset: f32) -> ScrollAnchor {
     ScrollAnchor { id: id.to_owned(), offset }
 }

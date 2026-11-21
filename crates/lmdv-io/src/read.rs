@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use lmdv_core::{FileMeta, SourceBuffer};
 
-use crate::path_policy::{PathError, reject_network_or_device};
+use crate::path_policy::PathError;
 
 /// The largest document that may be opened: 32 MiB.
 pub const MAX_DOC_BYTES: u64 = 32 * 1024 * 1024;
@@ -85,9 +85,13 @@ fn io_error(path: &Path, source: io::Error) -> ReadError {
 /// retried briefly for transient `EBUSY`/`EAGAIN`-style locks left by editors
 /// that replace files, and never for permission or not-found errors.
 pub fn read_document(path: &Path) -> Result<LoadedFile, ReadError> {
-    reject_network_or_device(path)?;
+    // L-10/M-30: an explicit open may name a file on a network share; the
+    // canonical form keeps that permission so Windows' `\\?\UNC\…` is read
+    // too. Device namespaces and drives are still refused.
+    let share = crate::path_policy::network_share(path);
+    crate::path_policy::reject_network_or_device_within(path, share.as_deref())?;
     let canonical = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
-    reject_network_or_device(&canonical)?;
+    crate::path_policy::reject_network_or_device_within(&canonical, share.as_deref())?;
 
     // Check before opening: opening a FIFO blocks until a writer appears.
     let before = fs::metadata(&canonical).map_err(|source| io_error(&canonical, source))?;
@@ -226,9 +230,10 @@ fn is_transient(error: &io::Error) -> bool {
 
 /// Reads metadata for a regular file, following symlinks.
 pub fn probe(path: &Path) -> Result<FileMeta, ReadError> {
-    reject_network_or_device(path)?;
+    let share = crate::path_policy::network_share(path);
+    crate::path_policy::reject_network_or_device_within(path, share.as_deref())?;
     let canonical = fs::canonicalize(path).map_err(|source| io_error(path, source))?;
-    reject_network_or_device(&canonical)?;
+    crate::path_policy::reject_network_or_device_within(&canonical, share.as_deref())?;
     let metadata = fs::metadata(&canonical).map_err(|source| io_error(&canonical, source))?;
     if !metadata.is_file() {
         return Err(ReadError::NotRegular(path.to_path_buf()));
@@ -300,6 +305,25 @@ mod tests {
         let invalid = temp.path().join("invalid.md");
         fs::write(&invalid, [0xff, 0xfe, b'a']).unwrap();
         assert!(matches!(read_document(&invalid), Err(ReadError::NotUtf8(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_document_on_a_share_opens_while_a_device_namespace_does_not() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("shared.md");
+        fs::write(&path, "# Shared\n").unwrap();
+        let spelled = std::path::PathBuf::from(format!("//{}", temp.path().to_string_lossy().trim_start_matches('/')));
+
+        let loaded = read_document(&spelled.join("shared.md")).expect("an explicit open may name a share");
+        assert_eq!(loaded.buffer.text(), "# Shared\n");
+        assert!(matches!(read_document(std::path::Path::new(r"\\?\C:\x.md")), Err(ReadError::Path(PathError::Device))));
+
+        // Another share is not the document's own and is never read.
+        assert!(matches!(
+            read_document(std::path::Path::new("//elsewhere/share/x.md")),
+            Err(ReadError::NotFound(_) | ReadError::Io { .. })
+        ));
     }
 
     #[test]

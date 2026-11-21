@@ -35,7 +35,7 @@ pub(crate) mod scroll_sync;
 use scroll_sync::{ENTRY_SUPPRESS, EditorTop, PreviewGeometry, PreviewSync};
 
 /// How long after the last keystroke the preview parses (E-05).
-pub const PREVIEW_DEBOUNCE: f64 = 0.12;
+pub const PREVIEW_DEBOUNCE: f64 = 0.2;
 /// How long after the last keystroke the crash draft is written (E-16).
 pub const DRAFT_DEBOUNCE: f64 = 1.0;
 /// How long after the last keystroke the source is spellchecked (E-SPELL).
@@ -225,6 +225,16 @@ impl SpellState {
     }
 }
 
+/// What a reload does with the text the worker reads back (R-21/R-22).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReloadIntent {
+    /// Replace the buffer and reparse (an explicit reload, a conflict reload).
+    Replace,
+    /// Compare first: an unchanged read only updates the saved baseline, so
+    /// an mtime-only `touch` changes nothing on screen.
+    Compare,
+}
+
 /// Editor-side window state. `scratch` keeps the `on_edit` accessor total when
 /// no tab is in edit mode.
 pub struct EditorState {
@@ -294,6 +304,13 @@ pub struct EditorState {
     pub sync_suppressed_until: Option<Instant>,
     /// The Linux spellchecker's debounce, worker and last ranges (ADR-008).
     pub spell: SpellState,
+    /// The failed preview parse already announced for a tab (E-05), so one
+    /// failure shows one notice and a good parse re-arms it.
+    pub preview_error: Option<(TabId, String)>,
+    /// Watcher reloads whose read is compared with the buffer before it
+    /// replaces anything (R-21). A quiet reload whose text is unchanged only
+    /// updates the saved baseline.
+    pub compare_reloads: BTreeSet<DocumentId>,
 }
 
 impl Default for EditorState {
@@ -329,6 +346,8 @@ impl Default for EditorState {
             reveal_until: 0.0,
             sync_suppressed_until: None,
             spell: SpellState::default(),
+            preview_error: None,
+            compare_reloads: BTreeSet::new(),
         }
     }
 }
@@ -598,6 +617,13 @@ impl WindowState {
             self.flush_active_draft();
             self.editor.prompt = Some(Prompt::DiscardEdit { doc });
         }
+    }
+
+    /// The E-13 prompt's **Discard** action: reload the saved text into the
+    /// preview, remove the draft and leave edit mode.
+    pub(crate) fn prompt_discard_edit(&mut self, tx: &mut Tx) {
+        self.editor.prompt = None;
+        self.discard_editor(tx);
     }
 
     /// Discards the editor buffer and returns to the saved text.
@@ -1646,6 +1672,9 @@ impl WindowState {
             }
             _ => (false, None, false, None),
         };
+        // E-05: a failed parse keeps the last good article on screen and asks
+        // once for attention through the dismissible notice bar.
+        changed |= self.poll_preview_error();
         if preview_pending && preview_due.is_none() {
             if let Some(tab) = self.active_tab_mut() {
                 tab.view.preview_due = Some(now + PREVIEW_DEBOUNCE);
@@ -1680,6 +1709,35 @@ impl WindowState {
         // scrolling never reaches it.
         self.poll_scroll_sync(now, tx);
         changed
+    }
+
+    /// E-05: announces a failed preview parse once, keeping the last good
+    /// article on screen.
+    ///
+    /// [`crate::window::TabView::reader_error`] is the failure the parse
+    /// completion recorded; a later good parse clears it. Only a tab that
+    /// already has a preview shows the notice — a first parse that fails has
+    /// nothing to keep, and the viewer's source preview carries the reason.
+    fn poll_preview_error(&mut self) -> bool {
+        let failure = self.active_tab().and_then(|tab| {
+            if tab.view.mode != Mode::Editor {
+                return None;
+            }
+            let reason = tab.view.reader_error.as_ref()?;
+            Some((tab.id, reason.clone(), tab.view.reader.is_some()))
+        });
+        let Some((tab_id, reason, has_preview)) = failure else {
+            self.editor.preview_error = None;
+            return false;
+        };
+        if !has_preview || self.editor.preview_error.as_ref().is_some_and(|(id, seen)| *id == tab_id && *seen == reason)
+        {
+            return false;
+        }
+        let message = lmdv_i18n::t!("msg.previewError", "err" => reason.clone());
+        self.editor.preview_error = Some((tab_id, reason));
+        self.notice(message);
+        true
     }
 
     /// Applies watcher events since this window last looked.
@@ -1747,7 +1805,9 @@ impl WindowState {
                 }
                 changed = true;
             } else if !self.editor.after_save.contains_key(&doc_id) {
-                self.reload_document(doc_id, path.to_path_buf());
+                // R-21: only different text reloads; an mtime-only touch is
+                // compared on the read's return and updates the baseline then.
+                self.start_reload(doc_id, path.to_path_buf(), ReloadIntent::Compare);
                 changed = true;
             }
         }
@@ -1781,6 +1841,10 @@ impl WindowState {
                 tab.refresh_title();
             }
         }
+        // R-23: name the file the manager action moved it to. The document,
+        // its places and its drafts already followed above; this is the one
+        // user-visible sentence.
+        self.notice(lmdv_i18n::t!("msg.renamedTo", "name" => title_for_path(to)));
         self.flush_all_drafts();
         self.sync_editor_titles();
         true
@@ -1816,18 +1880,26 @@ impl WindowState {
             }
             return;
         }
-        self.start_reload(doc, path);
+        self.start_reload(doc, path, ReloadIntent::Replace);
     }
 
     /// Starts the load and queues the anchor restore; no dirty check.
-    fn start_reload(&mut self, doc: DocumentId, path: PathBuf) {
+    fn start_reload(&mut self, doc: DocumentId, path: PathBuf, intent: ReloadIntent) {
+        let compare = intent == ReloadIntent::Compare;
+        if compare {
+            self.editor.compare_reloads.insert(doc);
+        } else {
+            self.editor.compare_reloads.remove(&doc);
+        }
         let anchor = self
             .tabs
             .iter()
             .find(|tab| tab.document_id() == Some(doc))
             .map(|tab| tab.view.anchor.clone())
             .unwrap_or_default();
-        if self.active_document_id() == Some(doc) {
+        // A watcher read is only restored once it proves to hold different
+        // text; a `touch` must not move the page (R-21).
+        if !compare && self.active_document_id() == Some(doc) {
             self.begin_restore(&anchor);
         }
         self.start_load(doc, path);
@@ -1851,20 +1923,18 @@ impl WindowState {
             tab.view.draft_pending = false;
             tab.view.disk_changed = false;
         }
-        self.start_reload(doc, path);
+        self.start_reload(doc, path, ReloadIntent::Replace);
     }
 
-    /// `Ctrl+R`/F5: reload the active document; dirty buffers warn first.
+    /// `Ctrl+R`/F5: reload the active file document (R-20).
+    ///
+    /// In edit mode a dirty buffer is left alone (the watcher's warning, R-22,
+    /// is the only path that asks); pasted text has no file and does nothing.
     pub(crate) fn request_reload(&mut self, _tx: &mut Tx) {
         let Some(doc) = self.active_document_id() else { return };
         let Some(document) = self.shared.docs().get(doc) else { return };
-        let Some(path) = document.key.borrow().path().map(Path::to_path_buf) else {
-            self.notice(lmdv_i18n::t!("msg.pastedReload"));
-            return;
-        };
+        let Some(path) = document.key.borrow().path().map(Path::to_path_buf) else { return };
         if document.is_dirty() || self.tabs.iter().any(|tab| tab.document_id() == Some(doc) && tab.view.dirty) {
-            self.flush_all_drafts();
-            self.editor.prompt = Some(Prompt::DiskChanged { doc });
             return;
         }
         self.reload_document(doc, path);
@@ -2127,8 +2197,7 @@ impl WindowState {
         let Some(prompt) = self.editor.prompt.clone() else { return };
         match prompt {
             Prompt::DiscardEdit { .. } => {
-                self.editor.prompt = None;
-                self.discard_editor(&mut Tx::default());
+                self.prompt_discard_edit(&mut Tx::default());
             }
             Prompt::CloseTab { tab, .. } => {
                 self.editor.prompt = None;

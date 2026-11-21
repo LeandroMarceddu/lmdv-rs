@@ -31,6 +31,11 @@ pub(crate) struct Renderer<'a> {
     pub(crate) current_block: Cell<usize>,
     /// How many lists the block being drawn sits in, for copied indentation.
     pub(crate) list_depth: Cell<u32>,
+    /// The copy destination's index for the next code block in the top-level
+    /// block being drawn (M-13). It starts at the number of code blocks before
+    /// that block, so it does not depend on which blocks a memo reused, and it
+    /// matches [`lmdv_md::MdDoc::code_texts`].
+    pub(crate) code_base: Cell<usize>,
     /// The block being drawn's inline text and key scope, for [`crate::BlockWire`].
     /// Only filled while a block wire is set.
     pub(crate) preview: RefCell<PreviewBlock>,
@@ -45,21 +50,30 @@ impl<'a> Renderer<'a> {
             c = c.child(parts::front_matter(self, front));
             first = false;
         }
+        // M-13: each block's code destinations start after all the code
+        // blocks before it; the running count keeps the article one pass.
+        let mut code_base = 0;
         for (index, block) in self.doc.blocks.iter().enumerate() {
-            c = c.child(self.block_at(index, block, first));
+            c = c.child(self.block_at(index, block, first, code_base));
             first = false;
+            code_base += self.doc.code_count_in(index);
         }
         c
     }
 
     /// One top-level block, keyed and spaced like a CSS block.
-    fn block_at(&self, index: usize, block: &Block, first: bool) -> El {
+    fn block_at(&self, index: usize, block: &Block, first: bool, code_base: usize) -> El {
         let key = self.doc.block_key(index).map(str::to_owned).unwrap_or_else(|| format!("b{index}"));
         let (top, bottom) = self.margins(block);
         let top = if first { 0.0 } else { top };
         let build = || {
             let previous = self.current_block.replace(index);
+            // M-13: this block's code blocks are numbered from all the code
+            // blocks before it, never from a per-frame counter: a memoised
+            // block's build does not run, and its neighbours must not shift.
+            let previous_code = self.code_base.replace(code_base);
             let drawn = self.draw_block(block, index);
+            self.code_base.set(previous_code);
             self.current_block.set(previous);
             col().w_full().mt(top).mb(bottom).child(drawn)
         };
@@ -306,6 +320,12 @@ impl<'a> Renderer<'a> {
     /// `source` is the block's source range for a real code block, so find and
     /// `--line` highlights can paint inside it; a Mermaid/math fallback passes
     /// `None` because its text is not drawn from the block's source map.
+    ///
+    /// M-13: a real code block's copy action names the block by its position in
+    /// [`lmdv_md::MdDoc::code_texts`] — the same drawing order — so any number
+    /// of code blocks, nested or duplicated, copy their own text. The Mermaid
+    /// and math fallbacks draw their source too but are not Markdown code
+    /// blocks, so they carry no copy action.
     pub(crate) fn code_block(
         &self,
         lang: Option<&str>,
@@ -326,7 +346,11 @@ impl<'a> Renderer<'a> {
         } else {
             head = head.child(col().grow(1.0));
         }
-        head = head.child(self.action_chip(&self.theme.labels.copy, crate::copy_code_link(key)));
+        if key == "code" {
+            let index = self.code_base.get();
+            self.code_base.set(index.saturating_add(1));
+            head = head.child(self.action_chip(&self.theme.labels.copy, crate::copy_code_link(&index.to_string())));
+        }
         let mut body = rich(code.to_owned(), spans).font(self.theme.code).color(self.theme.text).w_full();
         if let Some(source) = source {
             body = self.highlight_code(body, code, source);

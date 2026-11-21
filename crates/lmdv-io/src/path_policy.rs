@@ -26,6 +26,10 @@ pub const MAX_SVG_DIM: u32 = 4096;
 pub struct PathPolicy {
     /// The canonical folder of the document.
     pub doc_root: PathBuf,
+    /// The network share the document lives on, when its spelling names one
+    /// (M-30/M-31/L-10): paths on that same share are allowed, another share
+    /// is not.
+    pub doc_share: Option<PathBuf>,
     /// A user opt-in that permits assets outside [`Self::doc_root`].
     pub allow_outside: bool,
     /// Maximum asset size; default [`MAX_ASSET_BYTES`].
@@ -73,9 +77,12 @@ pub enum LinkResolution {
 ///
 /// This is blocking I/O and belongs on a worker.
 pub fn resolve_document_link(root: &Path, rel: &Path) -> Result<Option<LinkResolution>, PathError> {
-    reject_network_or_device(rel)?;
+    // L-10/M-30: the document's own share may be reached; another share, a
+    // device namespace or a drive may not.
+    let share = network_share(root);
+    reject_network_or_device_within(rel, share.as_deref())?;
     let base = if rel.is_absolute() { rel.to_path_buf() } else { root.join(rel) };
-    reject_network_or_device(&base)?;
+    reject_network_or_device_within(&base, share.as_deref())?;
 
     for candidate in link_candidates(&base) {
         let Ok(metadata) = fs::metadata(&candidate) else { continue };
@@ -83,14 +90,15 @@ pub fn resolve_document_link(root: &Path, rel: &Path) -> Result<Option<LinkResol
             continue;
         }
         let Ok(canonical) = fs::canonicalize(&candidate) else { continue };
-        reject_network_or_device(&canonical)?;
+        let on_share = network_share(&candidate).or_else(|| share.clone());
+        reject_network_or_device_within(&canonical, on_share.as_deref())?;
         reject_system_path(&canonical)?;
         return Ok(Some(LinkResolution::File { markdown: is_markdown_path(&canonical), path: canonical }));
     }
 
     if fs::metadata(&base).is_ok_and(|metadata| metadata.is_dir()) {
         let canonical = fs::canonicalize(&base).map_err(map_io(&base))?;
-        reject_network_or_device(&canonical)?;
+        reject_network_or_device_within(&canonical, share.as_deref())?;
         reject_system_path(&canonical)?;
         return Ok(Some(LinkResolution::Directory(canonical)));
     }
@@ -169,8 +177,10 @@ impl PathError {
 impl PathPolicy {
     /// A policy rooted at `doc_root` with the default caps and no opt-in.
     pub fn new(doc_root: impl Into<PathBuf>) -> Self {
+        let doc_root = doc_root.into();
         Self {
-            doc_root: doc_root.into(),
+            doc_share: network_share(&doc_root),
+            doc_root,
             allow_outside: false,
             max_bytes: MAX_ASSET_BYTES,
             max_pixels: MAX_IMAGE_PIXELS,
@@ -191,7 +201,7 @@ impl PathPolicy {
     /// target stays under the canonical root. The size cap is checked from
     /// metadata before any content is read.
     pub fn resolve_asset(&self, path: &Path) -> Result<ResolvedFile, PathError> {
-        reject_network_or_device(path)?;
+        reject_network_or_device_within(path, self.doc_share.as_deref())?;
         let candidate = if path.is_absolute() { path.to_path_buf() } else { self.doc_root.join(path) };
         let resolved = self.resolve_existing(&candidate)?;
 
@@ -212,7 +222,7 @@ impl PathPolicy {
     /// the spelling is relative. Used for document navigation and explicit
     /// opens, which may leave the current document folder.
     pub fn resolve_file(&self, path: &Path) -> Result<ResolvedFile, PathError> {
-        reject_network_or_device(path)?;
+        reject_network_or_device_within(path, self.doc_share.as_deref())?;
         let candidate = if path.is_absolute() { path.to_path_buf() } else { self.doc_root.join(path) };
         self.resolve_existing(&candidate)
     }
@@ -232,8 +242,11 @@ impl PathPolicy {
     fn resolve_existing(&self, candidate: &Path) -> Result<ResolvedFile, PathError> {
         let canonical = fs::canonicalize(candidate).map_err(map_io(candidate))?;
         // A symlink may point into a forbidden area even when the spelling
-        // did not; check the resolved path too.
-        reject_network_or_device(&canonical)?;
+        // did not; check the resolved path too. A path the spelling put on the
+        // document's own share keeps that permission through canonicalization
+        // (Windows spells it `\\?\UNC\…`).
+        let share = network_share(candidate).or_else(|| self.doc_share.clone());
+        reject_network_or_device_within(&canonical, share.as_deref())?;
         reject_system_path(&canonical)?;
 
         let metadata = fs::metadata(&canonical).map_err(map_io(&canonical))?;
@@ -251,11 +264,21 @@ impl PathPolicy {
 /// This checks the spelling, not the target: a symlink into a network mount
 /// is caught later by canonicalization.
 pub fn reject_network_or_device(path: &Path) -> Result<(), PathError> {
+    reject_network_or_device_within(path, None)
+}
+
+/// [`reject_network_or_device`] that permits a path on `share` (L-10/M-30).
+///
+/// The same-share exception is textual: a document opened from
+/// `//server/share/…` may reach its own share, while any other share, device
+/// namespace or drive stays refused. Device names, reserved names and system
+/// paths are still rejected on the allowed share.
+pub fn reject_network_or_device_within(path: &Path, share: Option<&Path>) -> Result<(), PathError> {
     if path.as_os_str().is_empty() {
         return Err(PathError::Empty);
     }
 
-    reject_network_prefix(path)?;
+    reject_network_prefix_within(path, share)?;
 
     for component in path.components() {
         if let Component::Normal(name) = component
@@ -268,24 +291,43 @@ pub fn reject_network_or_device(path: &Path) -> Result<(), PathError> {
     reject_system_path(path)
 }
 
-/// The path-spelling check for share and device forms.
+/// The network share root a path's spelling names, if any (M-30/M-31).
 ///
-/// On Unix a share (`//host/share`, `\\server\share`) and a drive- or
-/// device-like spelling (`C:`, `\\?\…`, `\\.\…`) are only unsafe as *text*, so
-/// the bytes are inspected directly.
+/// `//server/share/x` and `\\server\share\x` name `//server/share` (Windows
+/// keeps its own spelling); a device namespace (`\\?\`, `\\.\`) names no share.
+/// A path that is not a network spelling names none.
+pub fn network_share(path: &Path) -> Option<PathBuf> {
+    share_root(path)
+}
+
+/// Whether `path` is a network spelling on the share `root` lives on
+/// (L-10/M-30): the one exception to the network-path refusal.
+pub fn on_document_share(root: &Path, path: &Path) -> bool {
+    let Some(own) = share_root(root) else { return false };
+    share_root(path).is_some_and(|other| shares_match(&other, &own))
+}
+
+/// The path-spelling check for share and device forms, with the same-share
+/// exception of [`reject_network_or_device_within`].
 #[cfg(unix)]
-fn reject_network_prefix(path: &Path) -> Result<(), PathError> {
+fn reject_network_prefix_within(path: &Path, share: Option<&Path>) -> Result<(), PathError> {
     use std::os::unix::ffi::OsStrExt;
 
     let bytes = path.as_os_str().as_bytes();
-    if bytes.starts_with(b"//") {
-        return Err(PathError::Network);
-    }
     if bytes.starts_with(b"\\\\") {
         if bytes.starts_with(b"\\\\?\\") || bytes.starts_with(b"\\\\.\\") {
             return Err(PathError::Device);
         }
-        return Err(PathError::Network);
+        return match share_root(path) {
+            Some(root) if share.is_some_and(|share| shares_match(&root, share)) => Ok(()),
+            _ => Err(PathError::Network),
+        };
+    }
+    if bytes.starts_with(b"//") && !bytes.starts_with(b"///") {
+        return match share_root(path) {
+            Some(root) if share.is_some_and(|share| shares_match(&root, share)) => Ok(()),
+            _ => Err(PathError::Network),
+        };
     }
     if is_drive_prefix(bytes) {
         return Err(PathError::Device);
@@ -293,14 +335,15 @@ fn reject_network_prefix(path: &Path) -> Result<(), PathError> {
     Ok(())
 }
 
-/// The path-spelling check for share and device forms.
+/// The path-spelling check for share and device forms, with the same-share
+/// exception of [`reject_network_or_device_within`].
 ///
 /// Windows encodes all of them in the first component, so the parsed prefix is
 /// inspected instead of the bytes. A drive (`C:\…`, and the verbatim form
 /// `\\?\C:\…` that [`std::fs::canonicalize`] returns) is an ordinary local
 /// root here; only shares and device namespaces are refused.
 #[cfg(windows)]
-fn reject_network_prefix(path: &Path) -> Result<(), PathError> {
+fn reject_network_prefix_within(path: &Path, share: Option<&Path>) -> Result<(), PathError> {
     use std::path::Prefix;
 
     let Some(Component::Prefix(prefix)) = path.components().next() else {
@@ -308,8 +351,59 @@ fn reject_network_prefix(path: &Path) -> Result<(), PathError> {
     };
     match prefix.kind() {
         Prefix::Disk(_) | Prefix::VerbatimDisk(_) => Ok(()),
-        Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _) => Err(PathError::Network),
+        Prefix::UNC(_, _) | Prefix::VerbatimUNC(_, _) => match share_root(path) {
+            Some(root) if share.is_some_and(|share| shares_match(&root, share)) => Ok(()),
+            _ => Err(PathError::Network),
+        },
         Prefix::DeviceNS(_) | Prefix::Verbatim(_) => Err(PathError::Device),
+    }
+}
+
+/// The `//server/share` (or `\\server\share`) root a network spelling names.
+#[cfg(unix)]
+fn share_root(path: &Path) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let text = std::str::from_utf8(path.as_os_str().as_bytes()).ok()?;
+    let rest = text.strip_prefix("//").or_else(|| text.strip_prefix(r"\\"))?;
+    if rest.starts_with('?') || rest.starts_with('.') || rest.starts_with(['/', '\\']) {
+        return None;
+    }
+    let mut parts = rest.split(['/', '\\']).filter(|part| !part.is_empty());
+    let server = parts.next()?;
+    let share = parts.next()?;
+    let (prefix, separator) = if text.starts_with("//") { ("//", "/") } else { (r"\\", r"\") };
+    Some(PathBuf::from(format!("{prefix}{server}{separator}{share}")))
+}
+
+/// The `\\server\share` root a network spelling names.
+#[cfg(windows)]
+fn share_root(path: &Path) -> Option<PathBuf> {
+    use std::path::Prefix;
+
+    let component = path.components().next()?;
+    let Component::Prefix(prefix) = component else { return None };
+    let (server, share) = match prefix.kind() {
+        Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => (server, share),
+        _ => return None,
+    };
+    let mut root = PathBuf::from(r"\\");
+    root.push(server);
+    root.push(share);
+    Some(root)
+}
+
+/// Whether two share roots name the same share (case-insensitively on Windows).
+fn shares_match(a: &Path, b: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let a = a.as_os_str().to_string_lossy().replace('/', r"\");
+        let b = b.as_os_str().to_string_lossy().replace('/', r"\");
+        a.eq_ignore_ascii_case(&b)
+    }
+    #[cfg(unix)]
+    {
+        a == b
     }
 }
 
@@ -438,6 +532,75 @@ mod tests {
         assert!(matches!(policy.resolve_file(Path::new("/dev/null")), Err(PathError::System(_))));
         // A prefix that is not a path component is fine.
         assert!(!matches!(policy.resolve_file(Path::new("/devnull/x.png")), Err(PathError::System(_))));
+    }
+
+    #[test]
+    fn a_share_is_the_first_two_components_of_a_network_spelling() {
+        assert_eq!(network_share(Path::new("//server/share/a/b.md")), Some(PathBuf::from("//server/share")));
+        assert_eq!(network_share(Path::new(r"\\server\share\a.png")), Some(PathBuf::from(r"\\server\share")));
+        assert_eq!(network_share(Path::new("//server/")), None, "a server without a share names no share");
+        assert_eq!(network_share(Path::new(r"\\?\C:\x")), None, "a device namespace is not a share");
+        assert_eq!(network_share(Path::new("///local/path")), None, "`///` is an ordinary absolute path");
+        assert_eq!(network_share(Path::new("/tmp/a.png")), None);
+        assert_eq!(network_share(Path::new("relative/a.png")), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_document_on_a_share_may_reach_that_share_and_no_other() {
+        let own = Path::new("//server/share");
+        assert!(reject_network_or_device_within(Path::new("//server/share/x.png"), Some(own)).is_ok());
+        assert!(matches!(
+            reject_network_or_device_within(Path::new("//server/other/x.png"), Some(own)),
+            Err(PathError::Network)
+        ));
+        assert!(matches!(
+            reject_network_or_device_within(Path::new("//elsewhere/share/x.png"), Some(own)),
+            Err(PathError::Network)
+        ));
+        assert!(matches!(
+            reject_network_or_device_within(Path::new(r"\\server\share\x.png"), Some(own)),
+            Err(PathError::Network),
+        ));
+        // Device namespaces and reserved names stay refused on the own share.
+        assert!(matches!(reject_network_or_device_within(Path::new(r"\\?\C:\x"), Some(own)), Err(PathError::Device)));
+        assert!(matches!(
+            reject_network_or_device_within(Path::new("//server/share/NUL"), Some(own)),
+            Err(PathError::Device)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_same_share_exception_reaches_assets_and_document_links() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        // Spell the temporary folder as a share: `//tmp/<dir>`.
+        let spelled = PathBuf::from(format!("//{}", root.to_string_lossy().trim_start_matches('/')));
+        write(&root.join("img/a.png"), b"png");
+        write(&root.join("other.md"), b"# Other\n");
+
+        let policy = PathPolicy::new(&spelled);
+        assert_eq!(
+            policy.resolve_asset(Path::new("img/a.png")).unwrap().path,
+            fs::canonicalize(root.join("img/a.png")).unwrap()
+        );
+        let target = spelled.join("img/a.png");
+        assert!(
+            policy.resolve_asset(&target).is_ok(),
+            "a picture reached through the document's own share spelling resolves"
+        );
+        assert!(matches!(policy.resolve_asset(Path::new("//elsewhere/share/a.png")), Err(PathError::Network)));
+
+        let resolved = resolve_document_link(&spelled, &spelled.join("other.md")).unwrap();
+        assert_eq!(
+            resolved,
+            Some(LinkResolution::File { path: fs::canonicalize(root.join("other.md")).unwrap(), markdown: true })
+        );
+        assert!(matches!(
+            resolve_document_link(&spelled, Path::new("//elsewhere/share/other.md")),
+            Err(PathError::Network)
+        ));
     }
 
     #[test]

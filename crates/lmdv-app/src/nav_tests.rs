@@ -8,7 +8,7 @@ use rune::{Env, Key, KeyEvent, Mods, PointerButton, Runtime, Tx};
 use tempfile::TempDir;
 
 use crate::reader::{ScrollSnapshot, ViewportAnchor};
-use crate::section::MeasuredHeading;
+use crate::section::{MeasuredHeading, MeasuredTable};
 use crate::test_support;
 use crate::window::{Tab, WindowState};
 
@@ -95,6 +95,46 @@ fn opening_the_same_document_records_nothing() {
 }
 
 #[test]
+fn a_heading_lands_twenty_four_points_below_the_top() {
+    // L-01: the specified top margin, and the destination the scroll request
+    // uses is the heading's measured top less exactly that.
+    assert_eq!(crate::nav::JUMP_INSET, 24.0);
+    let scroll = ScrollSnapshot { offset: 500.0, max: 4000.0, viewport: 700.0 };
+    assert_eq!(crate::nav::heading_destination(scroll, 100.0, crate::nav::JUMP_INSET), 576.0);
+    assert_eq!(crate::nav::landing_inset(&[], scroll, 100.0), 24.0);
+
+    let mut state = window(&TempDir::new().unwrap());
+    state.open_synthetic("Long", "# One\n\nfirst\n\n## Two\n\nsecond\n");
+    let mut tx = Tx::default();
+    state.scroll_to_heading("h1", &mut tx);
+    assert!(state.reading.landing.is_some(), "the landing poll and flash are armed");
+    // The heading is unmeasured in this frame, so the key request carries the
+    // 24-point margin; the exact pixel is Rune's business.
+}
+
+#[test]
+fn a_stuck_table_header_adds_its_height_to_a_jump() {
+    // L-01: the landing point sits under a sticky header only while the table
+    // still spans it; the header's measured height is added so the heading
+    // clears it.
+    let scroll = ScrollSnapshot { offset: 500.0, max: 4000.0, viewport: 700.0 };
+    let stuck = MeasuredTable { top: -20.0, bottom: 300.0, header: 38.0 };
+    assert_eq!(crate::nav::landing_inset(&[stuck], scroll, 100.0), 24.0 + 38.0);
+
+    // The table's top is still below the viewport's: its header is not stuck.
+    let below = MeasuredTable { top: 40.0, bottom: 300.0, header: 38.0 };
+    assert_eq!(crate::nav::landing_inset(&[below], scroll, 100.0), 24.0);
+
+    // The landing point is past the table's bottom: nothing covers it.
+    let gone = MeasuredTable { top: -300.0, bottom: -40.0, header: 38.0 };
+    assert_eq!(crate::nav::landing_inset(&[gone], scroll, 100.0), 24.0);
+
+    // A header the frame did not measure adds nothing.
+    let unmeasured = MeasuredTable { top: -20.0, bottom: 300.0, header: 0.0 };
+    assert_eq!(crate::nav::landing_inset(&[unmeasured], scroll, 100.0), 24.0);
+}
+
+#[test]
 fn a_local_link_records_the_place_left_and_opens_the_target() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
@@ -104,7 +144,9 @@ fn a_local_link_records_the_place_left_and_opens_the_target() {
 
     let mut tx = Tx::default();
     state.open_link("next.md", &mut tx);
-    poll_until(&mut state, "the linked document", ready);
+    poll_until(&mut state, "the linked document", |state| {
+        state.active_path().as_deref() == Some(temp.path().join("next.md").canonicalize().unwrap().as_path())
+    });
     poll_until(&mut state, "the linked parse", parsed);
 
     let target = state.active_tab().expect("a tab").id;
@@ -124,7 +166,9 @@ fn a_file_link_with_a_section_lands_on_that_heading() {
 
     let mut tx = Tx::default();
     state.open_link("other.md#part", &mut tx);
-    poll_until(&mut state, "the linked document", ready);
+    poll_until(&mut state, "the linked document", |state| {
+        state.active_path().as_deref() == Some(temp.path().join("other.md").canonicalize().unwrap().as_path())
+    });
     poll_until(&mut state, "the heading landing", |state| {
         state.active_tab().is_some_and(|tab| tab.view.reader.is_some() && tab.view.fragment.is_none())
     });
@@ -155,7 +199,7 @@ fn a_same_document_anchor_that_names_nothing_records_nothing() {
     place_reader_at(&mut state, 500.0, Some(0));
     let mut tx = Tx::default();
     state.open_link("#missing", &mut tx);
-    assert!(state.ui.notice.is_some(), "the missing heading is reported");
+    assert!(state.ui.notice.is_none(), "L-01: a missing target does nothing");
     assert!(nav_of(&state, tab).back.is_empty());
 }
 
@@ -181,12 +225,12 @@ fn a_jump_that_lands_within_eight_points_records_nothing() {
     let mut state = window(&temp);
     let tab = state.open_synthetic("Long", "# One\n\nfirst\n\n## Two\n\nsecond\n");
     place_reader_at(&mut state, 900.0, Some(0));
-    // The heading sits 14 points below the viewport top: the jump to its
-    // 12-point landing would move the page 2 points.
-    state.set_heading_tops(vec![MeasuredHeading { index: 0, top: 14.0, bottom: 44.0 }]);
+    // The heading sits 30 points below the viewport top: the jump to its
+    // 24-point landing would move the page 6 points.
+    state.set_heading_tops(vec![MeasuredHeading { index: 0, top: 30.0, bottom: 60.0 }]);
     let mut tx = Tx::default();
     state.jump_to_heading("h0", &mut tx);
-    assert!(nav_of(&state, tab).back.is_empty(), "a two-point jump is not a place");
+    assert!(nav_of(&state, tab).back.is_empty(), "a six-point jump is not a place");
 
     state.set_heading_tops(vec![MeasuredHeading { index: 0, top: 60.0, bottom: 90.0 }]);
     let mut tx = Tx::default();

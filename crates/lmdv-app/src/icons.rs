@@ -5,6 +5,14 @@
 
 use rune::Icon;
 
+/// The app's mark (`assets/lmdv.svg`): a page with its ochre bookmark ribbon,
+/// drawn in ink for the start page (H-01).
+pub static APP: Icon = Icon {
+    name: "lmdv-app",
+    view: 16.0,
+    body: r#"<path d="M4 1.6h4.9l3.5 3.5v9.2a.6.6 0 0 1-.6.6H4a.6.6 0 0 1-.6-.6V2.2a.6.6 0 0 1 .6-.6Z" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linejoin="round"/><path d="M8.9 1.7v5l1.3-.9 1.3.9v-5" fill="currentColor"/><path d="M5.6 9.1h4.8M5.6 11.2h3.1" stroke="currentColor" stroke-width="1" stroke-linecap="round"/>"#,
+};
+
 /// A Markdown document.
 pub static DOCUMENT: Icon = Icon {
     name: "lmdv-document",
@@ -96,11 +104,32 @@ pub static SHARE: Icon = Icon {
     body: r#"<path d="M8 10.5V2.6M5.4 5.1 8 2.5l2.6 2.6" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/><path d="M4.2 8.4h-1a.7.7 0 0 0-.7.7v4.3c0 .4.3.7.7.7h9.6c.4 0 .7-.3.7-.7V9.1a.7.7 0 0 0-.7-.7h-1" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 
-/// A successful export, shown for 1.2 s on Share (X-13).
+/// A successful export, shown for 1.2 s on Share (X-13), and a success notice.
 pub static CHECK: Icon = Icon {
     name: "lmdv-check",
     view: 16.0,
     body: r#"<path d="m3.4 8.4 3 3 6.2-6.6" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+/// An information notice (H-06).
+pub static INFO: Icon = Icon {
+    name: "lmdv-info",
+    view: 16.0,
+    body: r#"<circle cx="8" cy="8" r="6.1" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="M8 7.1v4.3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="4.5" r=".85" fill="currentColor"/>"#,
+};
+
+/// A warning notice (H-06).
+pub static WARNING: Icon = Icon {
+    name: "lmdv-warning",
+    view: 16.0,
+    body: r#"<path d="M8 2.1 14.4 13a.6.6 0 0 1-.5.9H2.1a.6.6 0 0 1-.5-.9Z" stroke="currentColor" stroke-width="1.2" fill="none" stroke-linejoin="round"/><path d="M8 6.1v3.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><circle cx="8" cy="11.8" r=".85" fill="currentColor"/>"#,
+};
+
+/// An error notice (H-06).
+pub static ERROR: Icon = Icon {
+    name: "lmdv-error",
+    view: 16.0,
+    body: r#"<circle cx="8" cy="8" r="6.1" stroke="currentColor" stroke-width="1.2" fill="none"/><path d="m5.9 5.9 4.2 4.2M10.1 5.9l-4.2 4.2" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>"#,
 };
 
 /// Help.

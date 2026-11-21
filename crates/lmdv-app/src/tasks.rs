@@ -32,7 +32,7 @@ use rune::{El, Key, KeyEvent, Tx};
 
 use crate::editor::{Prompt, draft_key};
 use crate::shared::unix_millis;
-use crate::window::{Mode, Notice, NoticeAction, WindowState, title_for_path};
+use crate::window::{Mode, NoticeAction, NoticeKind, WindowState, title_for_path};
 
 /// How long a task notice keeps its Undo action, in virtual clock seconds. It
 /// is longer than a plain status notice because it is the only way back.
@@ -377,7 +377,7 @@ impl WindowState {
         // tick in the buffer and lets that save write it; a pasted document has
         // no file at all. Neither may start a viewer write.
         if dirty || leased || path.is_none() {
-            self.show_task_notice(lmdv_i18n::t!("task.bufferChanged"), None);
+            self.show_task_notice(lmdv_i18n::t!("task.bufferChanged"), None, NoticeKind::Info);
             return;
         }
         let path = path.expect("the path was checked above");
@@ -426,6 +426,13 @@ impl WindowState {
             NoticeAction::ShowInFolder(path) => {
                 self.shared.open_external(self.worker().clone(), path);
             }
+            NoticeAction::OpenFile(path) => {
+                // L-07: the desktop's own handler opens a whitelisted
+                // document, media file or archive. A script never reaches here.
+                self.shared.open_external(self.worker().clone(), path);
+            }
+            // L-09: poll has the frame's `Tx` that a native dialog needs.
+            NoticeAction::SaveAs(doc) => self.ui.save_as_requested = Some(doc),
             NoticeAction::UsePrintDialog => self.print_document(),
         }
     }
@@ -457,7 +464,7 @@ impl WindowState {
         }
         self.sync_tab_dirty(&document);
         if was_dirty || leased {
-            self.show_task_notice(lmdv_i18n::t!("task.bufferUndone"), None);
+            self.show_task_notice(lmdv_i18n::t!("task.bufferUndone"), None, NoticeKind::Info);
             return;
         }
         let expected = document.saved.borrow().meta;
@@ -532,7 +539,7 @@ impl WindowState {
             };
             let checked = save.after != b' ';
             let text = if checked { lmdv_i18n::t!("msg.taskChecked") } else { lmdv_i18n::t!("msg.taskUnchecked") };
-            self.show_task_notice(text, Some(undo));
+            self.show_task_notice(text, Some(undo), NoticeKind::Success);
         } else {
             self.dismiss_notice();
         }
@@ -599,9 +606,8 @@ impl WindowState {
         self.notice(lmdv_i18n::t!("task.keptTheirs"));
     }
 
-    fn show_task_notice(&mut self, text: impl Into<String>, undo: Option<TaskUndo>) {
-        let deadline = self.ui.last_now + TASK_UNDO_SECONDS;
+    fn show_task_notice(&mut self, text: impl Into<String>, undo: Option<TaskUndo>, kind: NoticeKind) {
         let action = undo.map(NoticeAction::TaskUndo);
-        self.ui.notice = Some(Notice { text: text.into(), deadline, action });
+        self.show_notice(text.into(), kind, action, TASK_UNDO_SECONDS);
     }
 }

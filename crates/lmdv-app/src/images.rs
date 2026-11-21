@@ -63,8 +63,13 @@ impl ImageCacheState {
     /// tells `poll` when to rebuild for the real aspect ratio, and when a
     /// decoder failed so the placeholder replaces the empty frame.
     pub fn resolve(&self, root: &Path, src: &str, size_pt: f32, scale: f32) -> Option<Image> {
-        let src = src.split('#').next().unwrap_or(src).trim();
-        if src.is_empty() || is_not_a_local_path(src) {
+        // M-24: a query (`?raw=1`) is a fetch hint and a fragment
+        // (`#gh-dark-mode-only`) is a theme hint; neither is part of the file
+        // on disk, so both are dropped before resolution. The renderer keeps
+        // reading the fragment from the source as written.
+        let (path, _fragment) = lmdv_md::url_path_and_fragment(src);
+        let src = path.trim();
+        if src.is_empty() || is_not_a_local_path(root, src) {
             return None;
         }
         let key = (root.to_path_buf(), src.to_owned());
@@ -130,10 +135,11 @@ impl ImageCacheState {
 }
 
 /// Whether `src` names something other than a local file: a URL, a data URL,
-/// a device path or a Windows drive.
-fn is_not_a_local_path(src: &str) -> bool {
-    if src.starts_with("//") || src.starts_with(r"\\") {
-        return true;
+/// a device path or a Windows drive. A network spelling is local only on the
+/// document's own share (M-30/L-10).
+fn is_not_a_local_path(root: &Path, src: &str) -> bool {
+    if crate::links::is_network_spelling(src) {
+        return !lmdv_io::on_document_share(root, Path::new(src));
     }
     if let Some((scheme, _)) = src.split_once(':') {
         let looks_like_scheme = !scheme.is_empty()
@@ -268,6 +274,35 @@ mod tests {
         fs::write(temp.path().join("dark.png"), PNG).unwrap();
         let images = state();
         assert!(images.resolve(temp.path(), "dark.png#gh-dark-mode-only", 32.0, 2.0).is_some());
+    }
+
+    #[test]
+    fn a_source_query_is_dropped_and_the_fragment_stays_a_hint() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("pic.png"), PNG).unwrap();
+        let images = state();
+        for src in ["pic.png?raw=1", "pic.png?raw=1#gh-light-mode-only", "pic.png#gh-dark-mode-only"] {
+            assert!(images.resolve(temp.path(), src, 32.0, 2.0).is_some(), "{src} resolves to pic.png");
+        }
+        assert!(images.resolve(temp.path(), "gone.png?raw=1", 32.0, 2.0).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_network_source_resolves_only_on_the_documents_own_share() {
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("pic.png"), PNG).unwrap();
+        let spelled = PathBuf::from(format!("//{}", temp.path().to_string_lossy().trim_start_matches('/')));
+        let images = state();
+        assert!(
+            images.resolve(&spelled, spelled.join("pic.png").to_str().unwrap(), 32.0, 2.0).is_some(),
+            "the document's own share is reached (L-10)"
+        );
+        assert!(
+            images.resolve(&spelled, "//elsewhere/share/pic.png", 32.0, 2.0).is_none(),
+            "another share stays missing"
+        );
+        assert!(images.resolve(temp.path(), "//elsewhere/share/pic.png", 32.0, 2.0).is_none());
     }
 
     #[test]

@@ -714,6 +714,47 @@ mod tests {
     }
 
     #[test]
+    fn a_cold_start_burst_queues_ten_launches_in_one_window_with_its_own_file_first() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let write = |name: &str| {
+            let path = temp.path().join(name);
+            std::fs::write(&path, "# one\n").unwrap();
+            path
+        };
+        let own = write("own.md");
+        // The single-instance thread queues ten forwards before the first page
+        // listens; two name a file already open (one is the window's own), so
+        // the burst must suppress both duplicates.
+        let forwarded: Vec<std::path::PathBuf> =
+            ["f01.md", "own.md", "f02.md", "f03.md", "f04.md", "f05.md", "f03.md", "f06.md", "f07.md", "f08.md"]
+                .iter()
+                .map(|name| write(name))
+                .collect();
+
+        let mut state =
+            WindowState::start(Rc::clone(&shared), &Launch { path: Some(own.clone()), ..Launch::default() });
+        for (index, path) in forwarded.iter().enumerate() {
+            let launch = Launch { path: Some(path.clone()), line: Some(index + 1), ..Launch::default() };
+            shared.launch_inbox().push(lmdv_io::instance::LaunchRequest::new(launch));
+        }
+        let mut tx = Tx::default();
+        state.poll(0.0, &mut tx);
+
+        assert_eq!(shared.windows().len(), 1, "the burst stays in the one window it started");
+        let titles: Vec<String> = state.tabs().iter().map(crate::window::Tab::full_title).collect();
+        assert_eq!(
+            titles,
+            ["own.md", "f01.md", "f02.md", "f03.md", "f04.md", "f05.md", "f06.md", "f07.md", "f08.md"],
+            "the window's own launch is first and the forwards follow in arrival order"
+        );
+        let mut unique = titles.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(unique.len(), titles.len(), "no forwarded launch opened a second tab for a path");
+    }
+
+    #[test]
     fn a_new_window_cascades_32_points_from_the_focused_window() {
         let temp = TempDir::new().unwrap();
         let shared = test_support::shared(&temp);

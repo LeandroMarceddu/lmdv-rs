@@ -255,7 +255,8 @@ pub struct FormatState {
     pub strike: bool,
     /// It is inline code.
     pub code: bool,
-    /// The ATX heading level of the first selected line (0: none).
+    /// The heading level of the first selected line (0: none). ATX markers and
+    /// Setext underlines (`===` H1, `---` H2) both count (E-25).
     pub heading: u8,
     /// The first selected line is a bullet list.
     pub bullet: bool,
@@ -318,7 +319,7 @@ pub fn format_state(tab: &Tab) -> FormatState {
     let (from, to) = (selection.start.min(text.len()), selection.end.min(text.len()));
     let (from, to) = if from <= to { (from, to) } else { (to, from) };
     let line_start = text[..from].rfind('\n').map_or(0, |offset| offset + 1);
-    let line_end = text[to..].find('\n').map_or(text.len(), |offset| to + offset);
+    let line_end = text[from..].find('\n').map_or(text.len(), |offset| from + offset);
     let line = &text[line_start..line_end];
 
     let mut state = FormatState {
@@ -326,7 +327,7 @@ pub fn format_state(tab: &Tab) -> FormatState {
         italic: marker_active(text, from, to, "*"),
         strike: marker_active(text, from, to, "~~"),
         code: marker_active(text, from, to, "`"),
-        heading: heading_level(line),
+        heading: heading_level(text, line_start, line_end),
         ..FormatState::default()
     };
     if let Some((_, kind)) = list_prefix(line) {
@@ -1197,17 +1198,81 @@ enum ListKind {
     Task,
 }
 
-fn heading_level(line: &str) -> u8 {
+/// The heading level at the caret's first selected line (E-25).
+///
+/// ATX markers win on their own line; otherwise a Setext underline gives H1
+/// (`===`) or H2 (`---`), whether the caret is on the text line or on the
+/// underline. The commands still toggle ATX headings: Setext is only read for
+/// the format bar's active state.
+fn heading_level(text: &str, line_start: usize, line_end: usize) -> u8 {
+    let line = &text[line_start..line_end];
+    if let Some(level) = atx_heading(line) {
+        return level;
+    }
+    if let Some(level) = setext_underline(line) {
+        // The underline alone is not a heading unless it follows heading text;
+        // after a blank line (or a block marker) it is a rule or a list item.
+        let above_end = line_start.saturating_sub(1);
+        let above_start = text[..above_end].rfind('\n').map_or(0, |offset| offset + 1);
+        let has_text_above = above_end > above_start && setext_text_line(&text[above_start..above_end]);
+        return if has_text_above { level } else { 0 };
+    }
+    if !setext_text_line(line) || line_end >= text.len() {
+        return 0;
+    }
+    let next_start = line_end + 1;
+    let next_end = text[next_start..].find('\n').map_or(text.len(), |offset| next_start + offset);
+    setext_underline(&text[next_start..next_end]).unwrap_or(0)
+}
+
+/// Whether a line can be the text above a Setext underline: a paragraph line,
+/// not a heading, list item, quote, table row or rule.
+fn setext_text_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    if trimmed.is_empty() || setext_underline(line).is_some() {
+        return false;
+    }
+    if matches!(trimmed.as_bytes()[0], b'#' | b'>' | b'<' | b'|') {
+        return false;
+    }
+    let body = trimmed.trim();
+    if body.len() == 1 && matches!(body.as_bytes()[0], b'+' | b'-' | b'*') {
+        return false;
+    }
+    let marker = *body.as_bytes().first().unwrap_or(&b' ');
+    if matches!(marker, b'*' | b'_') && body.bytes().all(|byte| byte == marker) {
+        return false;
+    }
+    list_prefix(trimmed).is_none()
+}
+
+fn atx_heading(line: &str) -> Option<u8> {
     let trimmed = line.trim_start();
     let hashes = trimmed.bytes().take_while(|&byte| byte == b'#').count();
     if hashes == 0 || hashes > 6 {
-        return 0;
+        return None;
     }
     if hashes == trimmed.len() || trimmed.as_bytes().get(hashes).is_some_and(|&byte| byte == b' ' || byte == b'\t') {
-        hashes as u8
+        Some(hashes as u8)
     } else {
-        0
+        None
     }
+}
+
+/// A Setext underline: one or more `=` (H1) or `-` (H2) marks with at most
+/// three leading spaces and only trailing whitespace after them.
+fn setext_underline(line: &str) -> Option<u8> {
+    if line.len() - line.trim_start_matches(' ').len() > 3 {
+        return None;
+    }
+    let trimmed = line.trim();
+    let marker = *trimmed.as_bytes().first()?;
+    let level = match marker {
+        b'=' => 1,
+        b'-' => 2,
+        _ => return None,
+    };
+    trimmed.bytes().all(|byte| byte == marker).then_some(level)
 }
 
 fn list_prefix(line: &str) -> Option<(usize, ListKind)> {
@@ -1364,10 +1429,17 @@ mod tests {
 
     #[test]
     fn headings_and_lists_are_detected_for_the_format_bar() {
-        assert_eq!(heading_level("## Two"), 2);
-        assert_eq!(heading_level("  ### Three"), 3);
-        assert_eq!(heading_level("#tag"), 0);
-        assert_eq!(heading_level("text"), 0);
+        assert_eq!(heading_level("## Two", 0, 6), 2);
+        assert_eq!(heading_level("  ### Three", 0, 11), 3);
+        assert_eq!(heading_level("#tag", 0, 4), 0);
+        assert_eq!(heading_level("text", 0, 4), 0);
+        assert_eq!(heading_level("Title\n=====", 0, 5), 1, "a Setext text line is H1");
+        assert_eq!(heading_level("Title\n=====", 6, 11), 1, "and so is its underline");
+        assert_eq!(heading_level("Subtitle\n-----", 0, 8), 2, "a `-` underline is H2");
+        assert_eq!(heading_level("text\n\n---", 6, 9), 0, "a rule after a blank line is not a heading");
+        assert_eq!(heading_level("- item\n-", 7, 8), 0, "a list item above a lone `-` is not a heading");
+        assert_eq!(heading_level("# Heading\n---", 10, 13), 0, "a heading is not Setext text");
+        assert_eq!(heading_level("***\n---", 4, 7), 0, "a rule is not Setext text");
         assert_eq!(list_prefix("- [x] task").map(|(_, kind)| kind), Some(ListKind::Task));
         assert_eq!(list_prefix("12. ordered").map(|(_, kind)| kind), Some(ListKind::Ordered));
         assert_eq!(list_prefix("  - bullet").map(|(_, kind)| kind), Some(ListKind::Bullet));

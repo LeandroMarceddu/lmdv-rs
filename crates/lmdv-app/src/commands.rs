@@ -6,7 +6,7 @@
 //! predicate. P1 ships File, View and Help commands; later slices append to the
 //! same table.
 
-use crate::window::WindowState;
+use crate::window::{NoticeKind, WindowState};
 use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 /// The menu/palette group a command belongs to.
@@ -83,7 +83,7 @@ fn open_file(_: &mut WindowState, tx: &mut Tx) {
             state.apply_pending_scroll(tx);
         }
         Ok(None) => {}
-        Err(error) => state.notice(lmdv_i18n::t!("msg.fileDialogFailed", "err" => error)),
+        Err(error) => state.notice_kind(lmdv_i18n::t!("msg.fileDialogFailed", "err" => error), NoticeKind::Error),
     });
 }
 
@@ -1800,7 +1800,7 @@ fn open_string(command: &CommandSpec, message: &str) -> String {
 }
 
 /// `text` without a trailing parenthesized shortcut: “Save (Ctrl+S)” → “Save”.
-fn strip_trailing_keys(text: &str) -> &str {
+pub(crate) fn strip_trailing_keys(text: &str) -> &str {
     let trimmed = text.trim_end();
     let Some(open) = trimmed.rfind(" (") else { return trimmed };
     if !trimmed.ends_with(')') {
@@ -1809,6 +1809,37 @@ fn strip_trailing_keys(text: &str) -> &str {
     let inside = &trimmed[open + 2..trimmed.len() - 1];
     let shortcut = inside.contains('+') || inside.starts_with('F') || matches!(inside, "Esc" | "Del" | "Ins" | "Tab");
     if shortcut { &trimmed[..open] } else { trimmed }
+}
+
+/// One chord's localized key caps (H-05): `Ctrl+Shift+PgDn` →
+/// `["Strg", "Umschalt", "Bild↓"]` in German.
+///
+/// The six `key.*` catalog entries name the keys the original translated
+/// (Ctrl, Shift, Space, Esc, PgUp, PgDn); every other name is its own cap, as
+/// in the original's `formatKeys`. [`Keybind`](rune_kit::Keybind) draws them.
+pub fn keycaps(chord: &str) -> Vec<String> {
+    keycaps_in(lmdv_i18n::locale(), chord)
+}
+
+/// [`keycaps`] in an explicit locale, so a test reads another language's caps
+/// without switching the process-wide one.
+pub fn keycaps_in(locale: usize, chord: &str) -> Vec<String> {
+    chord
+        .split('+')
+        .filter(|cap| !cap.is_empty())
+        .map(|cap| {
+            let key = match cap {
+                "Ctrl" | "Control" => lmdv_i18n::key("key.ctrl"),
+                "Shift" => lmdv_i18n::key("key.shift"),
+                "Space" => lmdv_i18n::key("key.space"),
+                "Esc" => lmdv_i18n::key("key.esc"),
+                "PgUp" => lmdv_i18n::key("key.pgUp"),
+                "PgDn" => lmdv_i18n::key("key.pgDn"),
+                _ => return cap.to_owned(),
+            };
+            lmdv_i18n::text_in(locale, key).to_owned()
+        })
+        .collect()
 }
 
 /// Looks a command up by its default shortcut.

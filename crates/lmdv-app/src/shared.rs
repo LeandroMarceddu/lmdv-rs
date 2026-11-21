@@ -508,6 +508,25 @@ impl AppShared {
         Ref::map(self.recents.borrow(), Vec::as_slice)
     }
 
+    /// Empties the recent list (H-02/P-05): the start page's rows and the
+    /// stored list together.
+    pub fn clear_recents(&self) {
+        let mut recents = self.recents.borrow_mut();
+        if recents.is_empty() {
+            return;
+        }
+        recents.clear();
+        drop(recents);
+        self.queue_store(StorePatch::Recents(Vec::new()));
+    }
+
+    /// Replaces the recent list in memory without writing it: the start page's
+    /// scene shows real rows, names and ages without touching the user's
+    /// `recents.json`.
+    pub(crate) fn preview_recents(&self, entries: impl IntoIterator<Item = (PathBuf, u64)>) {
+        *self.recents.borrow_mut() = entries.into_iter().map(|(path, at)| Recent::new(path, at)).collect();
+    }
+
     /// Remembered reading positions, keyed by canonical document path.
     pub fn positions(&self) -> Ref<'_, PositionTable> {
         self.positions.borrow()
@@ -1646,6 +1665,20 @@ mod tests {
             1,
             "the old entry moved to the front instead of duplicating"
         );
+    }
+
+    #[test]
+    fn clearing_the_recents_empties_the_list_and_writes_it() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        shared.record_recent(PathBuf::from("/tmp/a.md"), 1);
+        shared.record_recent(PathBuf::from("/tmp/b.md"), 2);
+        assert_eq!(shared.recents().len(), 2);
+
+        shared.clear_recents();
+        assert!(shared.recents().is_empty(), "H-02: Clear empties the list");
+        assert!(shared.flush_store(Duration::from_secs(2)), "the store writer answered");
+        assert!(lmdv_io::store::load_recents(shared.dirs()).is_empty(), "P-05: the stored list is empty after Clear");
     }
 
     #[test]

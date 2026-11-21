@@ -554,7 +554,8 @@ fn the_key_target_starts_over_after_the_window_expires() {
 #[test]
 fn a_heading_lands_an_inset_below_the_top_and_clamps_to_the_document() {
     let scroll = ScrollSnapshot { offset: 200.0, max: 1000.0, viewport: 700.0 };
-    assert_eq!(heading_destination(scroll, 40.0, JUMP_INSET), 228.0);
+    assert_eq!(JUMP_INSET, 24.0, "L-01's top margin");
+    assert_eq!(heading_destination(scroll, 40.0, JUMP_INSET), 216.0);
     assert_eq!(heading_destination(scroll, -500.0, JUMP_INSET), 0.0);
     assert_eq!(heading_destination(scroll, 2000.0, JUMP_INSET), 1000.0);
 }

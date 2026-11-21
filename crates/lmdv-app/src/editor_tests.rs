@@ -306,6 +306,122 @@ fn a_clean_document_reloads_on_a_watch_change_and_keeps_its_anchor() {
 }
 
 #[test]
+fn an_mtime_only_touch_updates_the_baseline_without_reloading() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("touched.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    poll_until(&mut state, "the first parse", |state| {
+        state.active_tab().is_some_and(|tab| tab.view.reader_revision.is_some())
+    });
+    if let Some(tab) = state.active_tab_mut() {
+        tab.view.anchor = ScrollAnchor { id: String::new(), offset: 64.0 };
+    }
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    let revision = doc.revision();
+    let parse_revision = state.active_tab().and_then(|tab| tab.view.reader_revision);
+    let old_meta = doc.saved.borrow().meta;
+
+    // R-21: a `touch`-style metadata bump — same bytes, new mtime.
+    let touched = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(touched))
+        .unwrap();
+    let touched_ns = std::fs::metadata(&path)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    assert_ne!(old_meta.mtime_ns, touched_ns, "the test really changed the mtime");
+
+    assert!(state.apply_file_event(FileEvent::Changed { path: path.clone() }));
+    poll_until(&mut state, "the quiet reload", |state| {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.saved.borrow().meta.mtime_ns == touched_ns)
+    });
+    assert_eq!(doc.text().text(), "one\n", "the text did not change");
+    assert_eq!(doc.revision(), revision, "the buffer was not replaced");
+    assert_eq!(
+        state.active_tab().and_then(|tab| tab.view.reader_revision),
+        parse_revision,
+        "the same text was not parsed again"
+    );
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    assert_eq!(state.active_tab().map(|tab| tab.view.anchor.offset), Some(64.0), "the anchor was not restored");
+    assert!(state.ui.notice.is_none(), "an attribute touch says nothing");
+    assert!(state.prompt().is_none());
+    assert!(!doc.is_dirty(), "the new baseline still matches the buffer");
+    assert!(state.editor.compare_reloads.is_empty(), "the quiet reload completed");
+
+    // Different text still reloads and reparses.
+    std::fs::write(&path, "two\n").unwrap();
+    assert!(state.apply_file_event(FileEvent::Changed { path }));
+    poll_until(&mut state, "the real reload", |state| {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
+    });
+}
+
+#[test]
+fn a_watcher_rename_names_the_new_file_and_rehighlights_the_tree() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("before-rename.md");
+    let renamed = root.join("after-rename.md");
+    std::fs::write(&path, "text\n").unwrap();
+
+    let mut state = window(&temp);
+    let list = |state: &mut WindowState| {
+        state.browser.root = Some(root.clone());
+        state.browser.root_name = "notes".to_owned();
+        state.browser.tree_generation += 1;
+        state.left.set_open(true);
+        let generation = state.browser.tree_generation;
+        let listing = lmdv_io::tree::list_tree(&root).unwrap();
+        assert!(state.finish_tree_listing(generation, root.clone(), Ok(listing)));
+    };
+    list(&mut state);
+    open_loaded(&mut state, &path);
+    // `open_path`'s poll already ran `follow_browser_active`.
+    assert_eq!(state.browser.active(), Some(path.to_string_lossy().as_ref()), "the open file is highlighted");
+
+    std::fs::rename(&path, &renamed).unwrap();
+    assert!(state.apply_file_event(FileEvent::Renamed { from: path.clone(), to: renamed.clone() }));
+    assert_eq!(
+        state.ui.notice.as_ref().map(|notice| notice.text.clone()),
+        Some(lmdv_i18n::t!("msg.renamedTo", "name" => "after-rename.md")),
+        "R-23: the rename is announced with the new name"
+    );
+
+    // The tree watcher re-lists the folder (F-08/A-11); the moved document
+    // keeps its row highlighted under the new name.
+    list(&mut state);
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    assert_eq!(state.browser.active(), Some(renamed.to_string_lossy().as_ref()));
+
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+    runtime.frame(0.0);
+    let elements: Vec<ElementInfo> = runtime.elements();
+    let row = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some(renamed.to_string_lossy().as_ref()))
+        .expect("the renamed file has a tree row");
+    assert!(row.item_selected, "the tree row carries the active document's highlight");
+    assert!(
+        !elements.iter().any(|element| element.key.as_deref() == Some(path.to_string_lossy().as_ref())),
+        "the old row is gone"
+    );
+}
+
+#[test]
 fn a_dirty_document_never_auto_reloads_it_asks() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("dirty-watch.md");
@@ -376,8 +492,10 @@ fn reload_after_the_dirty_warning_replaces_the_buffer_and_clears_the_draft() {
     enter_editor(&mut state);
     type_text(&mut state, "mine ");
     std::fs::write(&path, "external\n").unwrap();
+    // R-22: the watcher warns; its Reload discards the edits (R-20's F5 does
+    // nothing on a dirty buffer, tested below).
+    assert!(state.apply_file_event(FileEvent::Changed { path: path.clone() }));
     let mut tx = Tx::default();
-    state.request_reload(&mut tx);
     assert!(matches!(state.prompt(), Some(Prompt::DiskChanged { .. })));
     state.prompt_primary(&mut tx);
     poll_until(&mut state, "the forced reload", |state| {
@@ -386,6 +504,109 @@ fn reload_after_the_dirty_warning_replaces_the_buffer_and_clears_the_draft() {
     let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
     assert!(!doc.is_dirty());
     assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor), "still editing the reloaded text");
+}
+
+#[test]
+fn f5_reloads_a_clean_file_at_the_same_place() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("f5-clean.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    if let Some(tab) = state.active_tab_mut() {
+        tab.view.anchor = ScrollAnchor { id: String::new(), offset: 120.0 };
+    }
+    std::fs::write(&path, "two\n").unwrap();
+
+    let mut tx = Tx::default();
+    let f5 = rune::KeyEvent { key: rune::Key::Function(5), mods: rune::Mods::default() };
+    assert!(crate::app::on_key(&mut state, &f5, &mut tx), "F5 is the window's reload command");
+    poll_until(&mut state, "the F5 reload", |state| {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
+    });
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    assert_eq!(state.active_tab().map(|tab| tab.view.anchor.offset), Some(120.0), "the reading anchor survived");
+    assert!(state.ui.notice.is_none(), "a reload says nothing extra");
+}
+
+#[test]
+fn ctrl_r_reloads_a_clean_edit_mode_file_at_the_same_place() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("ctrl-r-clean.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    if let Some(tab) = state.active_tab_mut() {
+        tab.view.anchor = ScrollAnchor { id: String::new(), offset: 64.0 };
+    }
+    std::fs::write(&path, "two\n").unwrap();
+
+    let mut tx = Tx::default();
+    let ctrl_r = rune::KeyEvent {
+        key: rune::Key::Command('r'),
+        mods: rune::Mods { cmd: true, ctrl: true, ..rune::Mods::default() },
+    };
+    assert!(crate::app::on_key(&mut state, &ctrl_r, &mut tx), "Ctrl+R is the editor's reload");
+    poll_until(&mut state, "the Ctrl+R reload", |state| {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
+    });
+    assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor), "a clean reload stays in edit mode");
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    assert_eq!(state.active_tab().map(|tab| tab.view.anchor.offset), Some(64.0), "the reading anchor survived");
+}
+
+#[test]
+fn f5_does_nothing_on_a_dirty_edit_mode_buffer() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("f5-dirty.md");
+    std::fs::write(&path, "disk\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    type_text(&mut state, "mine ");
+    std::fs::write(&path, "theirs\n").unwrap();
+
+    let mut tx = Tx::default();
+    let f5 = rune::KeyEvent { key: rune::Key::Function(5), mods: rune::Mods::default() };
+    assert!(crate::app::on_key(&mut state, &f5, &mut tx), "the key is consumed");
+    assert!(state.prompt().is_none(), "R-20: no disk-changed question from an explicit reload");
+
+    for _ in 0..20 {
+        state.poll(0.0, &mut tx);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    assert_eq!(doc.text().text(), "mine disk\n", "the dirty buffer was untouched");
+    assert!(doc.is_dirty());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "theirs\n", "the disk was untouched");
+    assert!(state.editor.compare_reloads.is_empty(), "nothing was queued to reload");
+}
+
+#[test]
+fn f5_does_nothing_on_pasted_text() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Pasted", "# Pasted\n");
+    let before = state.active_document_id();
+
+    let mut tx = Tx::default();
+    let f5 = rune::KeyEvent { key: rune::Key::Function(5), mods: rune::Mods::default() };
+    assert!(crate::app::on_key(&mut state, &f5, &mut tx), "the key is consumed");
+    assert!(state.ui.notice.is_none(), "R-20: pasted text has no file and does nothing");
+    assert!(state.prompt().is_none());
+    assert_eq!(state.active_document_id(), before, "the same pasted tab stays in front");
+    assert!(state.editor.compare_reloads.is_empty(), "no reload was queued for a file that does not exist");
+
+    // The same in edit mode: the editor's own F5 path also does nothing.
+    let mut tx = Tx::default();
+    assert!(state.enter_editor(None, &mut tx));
+    assert!(crate::app::on_key(&mut state, &f5, &mut tx), "the editor consumes F5");
+    assert!(state.ui.notice.is_none());
+    assert!(state.prompt().is_none());
+    assert!(state.editor.compare_reloads.is_empty());
 }
 
 #[test]
@@ -914,24 +1135,85 @@ fn typing_parses_the_preview_after_the_debounce_and_keeps_the_last_good_model_me
     type_text(&mut state, "New ");
     let mut tx = Tx::default();
     state.poll(0.0, &mut tx);
+    assert_eq!(crate::editor::PREVIEW_DEBOUNCE, 0.2, "E-05's 200 ms");
     assert_eq!(
         state.active_tab().and_then(|tab| tab.view.reader_revision),
         Some(before),
         "the debounce holds the old model"
     );
     assert!(state.active_tab().is_some_and(|tab| tab.view.preview_pending));
+    state.poll(0.19, &mut tx);
     assert_eq!(
         state.active_tab().and_then(|tab| tab.view.reader_revision),
         Some(before),
-        "no parse during the debounce"
+        "no parse during the 200 ms debounce"
     );
 
-    state.poll(0.2, &mut tx);
+    state.poll(0.21, &mut tx);
     poll_until(&mut state, "the preview parse", |state| {
         state.active_tab().and_then(|tab| tab.view.reader_revision) != Some(before)
     });
     let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("new model");
     assert!(model.source.starts_with("New "), "the preview parsed the edited source");
+}
+
+#[test]
+fn an_invalid_mermaid_block_is_a_local_fallback_and_never_a_parse_error() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Diagram", "# First\n");
+    enter_editor(&mut state);
+    let before = state.active_tab().and_then(|tab| tab.view.reader_revision).expect("first model");
+    type_text(&mut state, "```mermaid\nnot a diagram ->\n```\n\n");
+
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    state.poll(0.21, &mut tx);
+    poll_until(&mut state, "the diagram parse", |state| {
+        state.active_tab().and_then(|tab| tab.view.reader_revision) != Some(before)
+    });
+    let tab = state.active_tab().expect("tab");
+    let model = tab.view.reader.as_ref().expect("preview model");
+    assert!(tab.view.reader_error.is_none(), "an invalid diagram is an M-14 block fallback, not a failed parse");
+    assert!(
+        model.blocks.iter().any(|block| matches!(block, lmdv_md::Block::Mermaid { .. })),
+        "the fence is still a diagram block whose source the renderer can fall back to"
+    );
+    assert!(state.ui.notice.is_none(), "no preview-error notice for a block that renders its own fallback");
+}
+
+#[test]
+fn a_failed_preview_parse_keeps_the_last_good_model_and_shows_a_dismissible_notice() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Preview error", "# First\n");
+    enter_editor(&mut state);
+    let good = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("last good model");
+    type_text(&mut state, "New ");
+
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx); // arms the 200 ms debounce, so no parse runs yet
+    // What `adopt_parsed(Err(..))` leaves: the last good model is untouched and
+    // the revision's failure is recorded for the preview.
+    if let Some(tab) = state.active_tab_mut() {
+        tab.view.reader_error = Some("the Markdown parser failed: boom".to_owned());
+    }
+    state.poll(0.0, &mut tx);
+    let tab = state.active_tab().expect("tab");
+    assert_eq!(
+        tab.view.reader.as_ref().map(|model| model.revision),
+        Some(good.revision),
+        "the preview keeps the last good model"
+    );
+    let notice = state.ui.notice.as_ref().expect("E-05's notice");
+    assert!(notice.text.contains("Preview error"), "{}", notice.text);
+    assert!(notice.text.contains("boom"), "the parser's reason is shown: {}", notice.text);
+    assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor));
+
+    state.dismiss_notice();
+    assert!(state.ui.notice.is_none(), "the notice is dismissible");
+    state.poll(0.0, &mut tx);
+    assert!(state.ui.notice.is_none(), "one failure is announced once, even after dismissal");
 }
 
 #[test]
@@ -1145,6 +1427,54 @@ fn leaving_edit_mode_can_save_first_and_returns_to_the_viewer() {
     });
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "saved base\n");
     assert!(!state.active_tab().is_some_and(|tab| tab.view.dirty));
+}
+
+#[test]
+fn leaving_edit_mode_discards_on_request_and_cancel_keeps_editing() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("leave-discard.md");
+    std::fs::write(&path, "base\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    type_text(&mut state, "draft ");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    let key = crate::editor::draft_key(&doc).expect("a file draft key");
+
+    let mut tx = Tx::default();
+    state.toggle_editor_mode(&mut tx);
+    assert!(matches!(state.prompt(), Some(Prompt::DiscardEdit { .. })));
+
+    // Cancel changes nothing: the mode, the buffer and its crash copy stay.
+    state.prompt_cancel();
+    assert!(state.prompt().is_none());
+    assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor));
+    assert_eq!(
+        state.active_tab().and_then(Tab::document).map(|doc| doc.text().text().to_owned()).as_deref(),
+        Some("draft base\n")
+    );
+    assert!(state.active_tab().is_some_and(|tab| tab.view.dirty));
+    flush_store(&state);
+    assert!(lmdv_io::store::load_draft(&test_support::dirs(&temp), &key).is_some(), "Cancel keeps the draft");
+
+    // Discard reloads the saved text, leaves edit mode and removes the draft.
+    state.toggle_editor_mode(&mut tx);
+    assert!(matches!(state.prompt(), Some(Prompt::DiscardEdit { .. })));
+    state.prompt_discard_edit(&mut tx);
+    assert!(state.prompt().is_none());
+    assert_eq!(state.active_tab().map(|tab| tab.view.mode), Some(Mode::Viewer));
+    let discarded = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    assert_eq!(discarded.text().text(), "base\n", "the saved version is back in the buffer");
+    assert!(!discarded.is_dirty() && !state.active_tab().is_some_and(|tab| tab.view.dirty));
+    flush_store(&state);
+    assert!(lmdv_io::store::load_draft(&test_support::dirs(&temp), &key).is_none(), "the draft was removed");
+
+    // The viewer's preview is the saved version, not the discarded text.
+    poll_until(&mut state, "the discarded preview", |state| {
+        state.active_tab().is_some_and(|tab| tab.view.reader_revision == tab.document().map(|doc| doc.revision()))
+    });
+    let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("preview model");
+    assert_eq!(&*model.source, "base\n");
 }
 
 #[test]

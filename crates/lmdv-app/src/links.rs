@@ -2,32 +2,38 @@
 //!
 //! `lmdv-render` turns link runs into Rune links whose destination is exactly
 //! what the Markdown wrote: `#slug`, `fn:label`, `fnref:label`,
-//! `copy-code:<key>`, `details:<key>`, `media:<src>`, or an ordinary relative or
+//! `copy-code:<n>`, `details:<key>`, `media:<src>`, or an ordinary relative or
 //! external URL. One [`LinkWire`] per window attaches the handler, and every
 //! destination is classified here before anything happens (M-30, M-31, R-15).
 //!
-//! The rules: fragments resolve through [`MdDoc::resolve_heading`]; footnote
-//! references and entries scroll inside the article; `http`/`https`/`mailto`
-//! open externally on the explicit click; relative links either open a
-//! Markdown tab through the normal load job (at the `#section` they name when
-//! they carry one) or, when their spelling does not already end in a Markdown
-//! extension, probe the wiki-style spellings on a worker first (L-03);
-//! network/device spellings and script URLs are refused with a notice. A
-//! click's placement follows its modifiers and button (L-11): plain in front,
-//! Ctrl or middle in a background tab, Ctrl+Shift in a foreground tab, Shift in
-//! a new window. Nothing here follows a link on its own.
+//! The rules: fragments resolve through [`MdDoc::resolve_heading`] and land at
+//! L-01's 24-point margin with a landing flash, silently when the document has
+//! no such target; footnote references and entries scroll inside the article;
+//! `http`/`https`/`mailto`/`tel` open externally while any other scheme is
+//! ignored without a notice and script/`file:`/`data:` URLs stay refused
+//! (L-02); every local spelling — with or without a Markdown extension — is
+//! probed on a worker first, so an existing Markdown file opens at the
+//! `#section` it names (L-03), an unresolved one says “Not found” and does not
+//! navigate (L-08), and an existing non-Markdown file offers **Open** or
+//! **Show in folder** instead of opening as text (L-07); pasted text offers
+//! **Save as…** (L-09). Network/device spellings are refused with the
+//! “another computer” notice unless the document's own share is named
+//! (M-30/L-10). A click's placement follows its modifiers and button (L-11):
+//! plain in front, Ctrl or middle in a background tab, Ctrl+Shift in a
+//! foreground tab, Shift in a new window. Nothing here follows a link on its
+//! own.
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use lmdv_core::{DocumentId, DocumentKey, TabId};
 use lmdv_io::Launch;
-use lmdv_md::{Block, MdDoc};
+use lmdv_md::MdDoc;
 use lmdv_render::{DetailsState, LinkWire, heading_key};
 use rune::{Mods, PointerButton, Tx};
 
 use crate::commands::MARKDOWN_EXTENSIONS;
-use crate::window::{TabView, WindowState};
+use crate::window::{NOTICE_SECONDS, NoticeAction, NoticeKind, TabView, WindowState};
 use crate::windows::{WindowKind, WindowOpenRequest};
 
 /// What one link destination means.
@@ -47,7 +53,7 @@ pub enum LinkTarget {
     Media(String),
     /// An inline (text-span) picture, by block key and object index.
     InlineImage { block: String, index: usize },
-    /// `http`, `https` or `mailto`.
+    /// `http`, `https`, `mailto` or `tel`.
     External(String),
     /// A local path from a relative or absolute destination.
     Local {
@@ -56,6 +62,12 @@ pub enum LinkTarget {
         /// The `#section` the destination names, if any.
         fragment: Option<String>,
     },
+    /// A local link in pasted text: there is no document folder yet, so the
+    /// notice offers Save as… instead of a lookup (L-09).
+    NeedsFile,
+    /// A scheme the app does not follow: nothing happens, with no notice
+    /// (L-02).
+    Ignored,
     /// A destination the app refuses, with the reason to show.
     Refused(String),
 }
@@ -161,17 +173,34 @@ impl WindowState {
         }
         if let Some((scheme, _)) = dest.split_once(':') {
             let scheme = scheme.to_ascii_lowercase();
-            if matches!(scheme.as_str(), "http" | "https" | "mailto") {
+            // `C:x` is a drive-relative device spelling, not a scheme (M-31).
+            if scheme.len() == 1 && scheme.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                return LinkTarget::Refused(lmdv_i18n::t!("msg.otherComputer", "name" => dest));
+            }
+            if matches!(scheme.as_str(), "http" | "https" | "mailto" | "tel") {
                 return LinkTarget::External(dest.to_owned());
             }
             if scheme.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
                 && scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
             {
-                return LinkTarget::Refused(lmdv_i18n::t!("link.refusedScheme", "scheme" => scheme));
+                // L-02: a scheme the app does not follow is ignored without a
+                // notice. The script and local-file forms stay refused.
+                return if matches!(scheme.as_str(), "javascript" | "vbscript" | "data" | "file") {
+                    LinkTarget::Refused(lmdv_i18n::t!("link.refusedScheme", "scheme" => scheme))
+                } else {
+                    LinkTarget::Ignored
+                };
             }
         }
-        if dest.starts_with("//") || dest.starts_with(r"\\") {
-            return LinkTarget::Refused(lmdv_i18n::t!("link.networkPath").to_owned());
+        if is_network_spelling(dest) {
+            // M-30/L-10: a network path is refused unless the document itself
+            // lives on that same share.
+            return if self.active_document_root().is_some_and(|root| lmdv_io::on_document_share(&root, Path::new(dest)))
+            {
+                self.local_target(dest, false)
+            } else {
+                LinkTarget::Refused(lmdv_i18n::t!("msg.otherComputer", "name" => dest))
+            };
         }
         self.local_target(dest, false)
     }
@@ -218,15 +247,24 @@ impl WindowState {
                     self.notice(lmdv_i18n::t!("msg.openFailed", "name" => url, "err" => error));
                 }
             }
-            // L-03: a spelling that already names a Markdown file is the first
-            // candidate itself and opens at once, keeping same-document jumps,
-            // Back/Forward recording and the editor lease rules on the frame
-            // the click happened. Every other local spelling probes the wiki
-            // candidates on a worker.
-            LinkTarget::Local { path, markdown: true, fragment } => {
-                self.place_linked_document(path, fragment, placement, tx);
-            }
-            LinkTarget::Local { path, markdown: false, fragment } => {
+            // L-02: a scheme the app does not follow does nothing at all.
+            LinkTarget::Ignored => {}
+            // L-09: pasted text has no folder yet, so the notice offers Save
+            // as… instead of a lookup. In-page anchors never reach here.
+            LinkTarget::NeedsFile => self.show_pasted_link_notice(),
+            // L-03/L-08: every local spelling — with or without a Markdown
+            // extension — is probed on a worker before anything opens, so a
+            // missing target reports “Not found” instead of an error tab. The
+            // one exception is a `#section` in the document already on screen,
+            // which jumps without touching the disk.
+            LinkTarget::Local { path, fragment, .. } => {
+                let path = lmdv_io::absolute_lexical(&path);
+                if fragment.is_some() && self.active_path().as_deref() == Some(path.as_path()) {
+                    if let Some(fragment) = fragment {
+                        self.jump_fragment(&fragment, tx);
+                    }
+                    return;
+                }
                 self.resolve_local_link(path, dest, fragment, placement);
             }
             LinkTarget::Refused(reason) => self.notice(reason),
@@ -270,16 +308,55 @@ impl WindowState {
             Ok(Some(lmdv_io::LinkResolution::File { path, markdown: true })) => {
                 self.place_linked_document(path, fragment, placement, tx);
             }
-            // L-07 is not part of the wiki resolver: an existing non-Markdown
-            // file takes the same folder attempt as before and reports
-            // "not a Markdown file" when the listing refuses it.
-            Ok(Some(lmdv_io::LinkResolution::File { path, markdown: false })) => self.open_folder_link(path),
+            // L-07: an existing non-Markdown file never opens as text. The
+            // notice offers Open for a document/media/archive extension and
+            // Show in folder otherwise, so a program or script is only ever
+            // revealed, never run.
+            Ok(Some(lmdv_io::LinkResolution::File { path, markdown: false })) => {
+                self.show_non_markdown_notice(&path);
+            }
             // L-05: a link resolving to a directory roots the file pane there
             // and shows it, with no tab.
             Ok(Some(lmdv_io::LinkResolution::Directory(path))) => self.open_folder_link(path),
-            Ok(None) | Err(_) => self.notice(lmdv_i18n::t!("msg.notFound", "name" => dest)),
+            // L-08: no navigation. The pane's listing and search are refreshed
+            // in case the target was moved or deleted behind the link.
+            Ok(None) => {
+                self.notice(lmdv_i18n::t!("msg.notFound", "name" => dest));
+                self.refresh_browser();
+            }
+            Err(error) => self.notice(lmdv_i18n::t!("msg.openFailed", "name" => dest, "err" => error)),
         }
         true
+    }
+
+    /// L-09's notice for a relative link in pasted text.
+    ///
+    /// The action names the pasted document, so a tab switch before the press
+    /// cannot turn it into Save as on a file.
+    fn show_pasted_link_notice(&mut self) {
+        let action = self.active_document_id().map(NoticeAction::SaveAs);
+        self.show_notice(lmdv_i18n::t!("msg.pastedLink").to_owned(), NoticeKind::Info, action, NOTICE_SECONDS);
+    }
+
+    /// L-07's notice for an existing file that is not a Markdown document.
+    fn show_non_markdown_notice(&mut self, path: &Path) {
+        let name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        let action = if can_open_externally(path) {
+            NoticeAction::OpenFile(path.to_path_buf())
+        } else {
+            // A program or script is never passed to a handler: revealing its
+            // folder shows it without running anything.
+            NoticeAction::ShowInFolder(path.parent().map_or_else(|| path.to_path_buf(), Path::to_path_buf))
+        };
+        self.show_notice(
+            lmdv_i18n::t!("msg.notMarkdown", "name" => name),
+            NoticeKind::Warning,
+            Some(action),
+            NOTICE_SECONDS,
+        );
     }
 
     /// Applies a click placement to an opened Markdown document.
@@ -361,22 +438,30 @@ impl WindowState {
     }
 
     /// Scrolls to a heading by its GitHub id, legacy id or anchor name (R-15).
+    ///
+    /// L-01: a target the document does not have does nothing — no notice, no
+    /// scroll, no history entry.
     fn jump_fragment(&mut self, fragment: &str, tx: &mut Tx) {
         let Some(doc) = self.active_doc().cloned() else {
+            // A click before the article exists has nothing to land on, but the
+            // reader is told why instead of nothing happening.
             self.notice(lmdv_i18n::t!("msg.docLoading"));
             return;
         };
-        match doc.resolve_heading(fragment) {
-            Some(index) => self.jump_to_heading(&heading_key(index), tx),
-            None => self.notice(lmdv_i18n::t!("link.noHeading")),
+        if let Some(index) = doc.resolve_heading(fragment) {
+            self.jump_to_heading(&heading_key(index), tx);
         }
     }
 
     /// A relative path against the active document's folder, or a refusal.
     fn local_target(&self, dest: &str, media: bool) -> LinkTarget {
         let Some(root) = self.active_document_root() else {
-            return LinkTarget::Refused(lmdv_i18n::t!("link.needsFile").to_owned());
+            // L-09: pasted text has no folder; the notice offers Save as…
+            return LinkTarget::NeedsFile;
         };
+        // M-24: a picture's or media file's URL query is a fetch hint that has
+        // no meaning for a local file, so it never becomes part of the path.
+        let dest = if media { dest.split_once('?').map_or(dest, |(path, _)| path) } else { dest };
         let (dest, fragment) = match dest.split_once('#') {
             Some((dest, fragment)) if !fragment.is_empty() => (dest, Some(fragment.to_owned())),
             Some((dest, _)) => (dest, None),
@@ -398,28 +483,16 @@ impl WindowState {
         }
     }
 
-    /// The source of the code block a copy action names.
+    /// The source of the code block a copy action names (M-13).
     ///
-    /// The renderer keys every code block `code`, so the destination does not
-    /// identify its block. When the document has exactly one top-level code
-    /// block the source is unambiguous; otherwise the app declines instead of
-    /// copying the wrong block (a block-keyed destination is a renderer
-    /// follow-up).
-    fn code_text(&self, _key: &str) -> Option<String> {
+    /// The renderer numbers every code block in drawing order, so the
+    /// destination's key is that number and the model's own
+    /// [`MdDoc::code_texts`] answers with exactly the block that was clicked —
+    /// top-level, nested, duplicated and raw-HTML blocks alike.
+    fn code_text(&self, key: &str) -> Option<String> {
+        let index = key.parse::<usize>().ok()?;
         let doc = self.active_doc()?;
-        let mut found: Option<&Block> = None;
-        for block in &doc.blocks {
-            if matches!(block, Block::Code { .. }) {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(block);
-            }
-        }
-        match found {
-            Some(Block::Code { text, .. }) => Some(text.clone()),
-            _ => None,
-        }
+        doc.code_texts().get(index).map(|text| text.to_string())
     }
 
     /// Opens a local file with the desktop's handler, on an explicit click only.
@@ -447,6 +520,38 @@ impl WindowState {
             DocumentKey::Untitled(_) | DocumentKey::Start => None,
         }
     }
+}
+
+/// Whether a destination is written as a network path: `//server/share/…` or
+/// `\\server\share\…` (a `///abs` spelling is an ordinary absolute path).
+pub(crate) fn is_network_spelling(dest: &str) -> bool {
+    (dest.starts_with("//") && !dest.starts_with("///")) || dest.starts_with(r"\\")
+}
+
+/// The extensions L-07's notice may hand to the desktop: documents, media,
+/// archives and web pages. A program or script is never on this list, so it is
+/// only ever revealed in the file manager.
+pub const OPENABLE_EXTENSIONS: &[&str] = &[
+    // Documents.
+    "pdf", "txt", "text", "csv", "tsv", "json", "jsonl", "xml", "yaml", "yml", "toml", "doc", "docx", "odt", "rtf",
+    "xls", "xlsx", "ods", "ppt", "pptx", "odp", "epub", //
+    // Images.
+    "png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "avif", "tif", "tiff", "ico", "heic", // Audio.
+    "mp3", "wav", "ogg", "oga", "flac", "m4a", "opus", "aac", "wma", // Video.
+    "mp4", "m4v", "webm", "mkv", "mov", "avi", "wmv", // Archives.
+    "zip", "7z", "tar", "gz", "tgz", "bz2", "xz", "zst", "rar", // Web pages.
+    "html", "htm", "xhtml",
+];
+
+/// Whether a non-Markdown file may be opened by the desktop's handler (L-07).
+///
+/// Extensions are compared case-insensitively; a file with no extension, or
+/// one whose extension is not on the list (a shell script, a binary), is only
+/// revealed.
+pub fn can_open_externally(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| OPENABLE_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known)))
 }
 
 /// Whether a path names a Markdown document the app can open in a tab.
@@ -556,7 +661,7 @@ mod tests {
         );
         state.open_link("drawing.png", &mut Tx::default());
         poll_until(&mut state, "the non-Markdown folder attempt", |state| {
-            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown file"))
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown document"))
         });
         assert!(state.browser.root().is_some(), "a file that is not a folder says so and goes back");
     }
@@ -744,22 +849,248 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_action_copies_the_single_code_block() {
+    fn every_code_block_copies_its_own_text() {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
-        state.open_synthetic("Note", "```rust\nlet x = 1;\n```\n");
-        assert_eq!(state.code_text("code").as_deref(), Some("let x = 1;"));
-        state.open_synthetic("Two", "```\na\n```\n\n```\nb\n```\n");
-        assert_eq!(state.code_text("code"), None, "two blocks are ambiguous");
+        state.open_synthetic(
+            "Note",
+            "```rust\nlet top = 1;\n```\n\n> ```rust\n> let quoted = 2;\n> ```\n\n```\nlet top = 1;\n```\n",
+        );
+        // M-13: the renderer numbers blocks in drawing order, which is the
+        // model's own order; duplicates stay separate and each keeps its text.
+        assert_eq!(state.code_text("0").as_deref(), Some("let top = 1;"));
+        assert_eq!(state.code_text("1").as_deref(), Some("let quoted = 2;"));
+        assert_eq!(state.code_text("2").as_deref(), Some("let top = 1;"));
+        assert_eq!(state.code_text("3"), None, "there is no fourth block");
+        assert_eq!(state.code_text("code"), None, "the old ambiguous key names nothing");
+
+        // The click path copies the block the destination names.
+        let board = rune::clipboard::memory();
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.use_clipboard(&board);
+        runtime.update(|state: &mut WindowState, tx: &mut Tx| state.open_link("copy-code:1", tx));
+        assert_eq!(board.content().expect("the clipboard").text(), "let quoted = 2;");
     }
 
     #[test]
-    fn a_missing_heading_is_reported_not_followed() {
+    fn a_missing_heading_does_nothing() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let tab = state.open_synthetic("Note", "# One\n");
+        let mut tx = Tx::default();
+        state.open_link("#gone", &mut tx);
+        assert!(state.ui.notice.is_none(), "L-01: a missing target is silent");
+        assert!(state.tab(tab).expect("the tab").view.nav.back.is_empty());
+        assert!(state.reading.landing_flash.is_none() && state.reading.landing.is_none());
+    }
+
+    #[test]
+    fn a_media_source_drops_its_query_and_keeps_its_fragment_out_of_the_path() {
+        // M-24: video/audio placeholders resolve the file without `?…`, and a
+        // `#t=…` fragment never becomes part of the path either.
+        let temp = TempDir::new().unwrap();
+        let root = canonical(temp.path());
+        write(&temp, "media/clip.mp4");
+        let note = write(&temp, "note.md");
+        let mut state = window(&temp);
+        open_file(&mut state, note);
+
+        assert_eq!(state.classify_media("./media/clip.mp4?start=3#t=10"), Some(root.join("media/clip.mp4")));
+        assert_eq!(state.classify_media("./media/clip.mp4#t=10"), Some(root.join("media/clip.mp4")));
+    }
+
+    #[test]
+    fn external_and_unknown_schemes_classify_as_specified() {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
         state.open_synthetic("Note", "# One\n");
-        state.open_link("#gone", &mut Tx::default());
-        assert!(state.ui.notice.is_some());
+
+        // L-02: the four schemes the desktop follows.
+        for url in ["https://example.test/a", "http://example.test/a", "mailto:me@example.test", "tel:+391234567"] {
+            assert_eq!(state.classify_link(url), LinkTarget::External(url.to_owned()), "{url} opens externally");
+        }
+        // Any other scheme is ignored without a notice.
+        for url in ["ssh://example.test/x", "obsidian://open?vault=x", "ftp://example.test/x", "sms:+39123"] {
+            assert_eq!(state.classify_link(url), LinkTarget::Ignored, "{url} does nothing");
+        }
+        // Script and local-file forms stay refused for safety.
+        for url in ["javascript:alert(1)", "vbscript:msgbox", "data:text/html,x", "file:///etc/passwd"] {
+            assert!(matches!(state.classify_link(url), LinkTarget::Refused(_)), "{url} is refused");
+        }
+        // A drive-relative spelling is a device path, not a scheme (M-31).
+        assert!(matches!(state.classify_link("C:/pictures/a.png"), LinkTarget::Refused(_)));
+        // An ignored scheme never touches the notice either.
+        state.open_link("obsidian://open", &mut Tx::default());
+        assert!(state.ui.notice.is_none());
+    }
+
+    #[test]
+    fn a_network_link_is_refused_with_the_other_computer_notice() {
+        let temp = TempDir::new().unwrap();
+        let index = write(&temp, "index.md");
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+
+        let refused = state.classify_link("//server/share/a.md");
+        assert_eq!(
+            refused,
+            LinkTarget::Refused(lmdv_i18n::t!("msg.otherComputer", "name" => "//server/share/a.md")),
+            "M-30/L-10: another computer's share is refused"
+        );
+        assert!(matches!(state.classify_link(r"\\server\share\a.md"), LinkTarget::Refused(_)));
+        // An absolute web URL is an ordinary external link.
+        assert_eq!(
+            state.classify_link("https://example.test/a"),
+            LinkTarget::External("https://example.test/a".to_owned())
+        );
+        state.open_link("//server/share/a.md", &mut Tx::default());
+        let notice = state.ui.notice.as_ref().expect("the refusal notice");
+        assert!(notice.text.contains("another computer"), "{}", notice.text);
+        assert_eq!(state.tabs().len(), 1, "nothing opens");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_document_on_a_share_may_follow_a_link_on_that_share() {
+        // L-10/M-30: the same-share exception is textual. `//tmp/<dir>` is a
+        // share spelling for this temporary folder; while the document's key
+        // carries it, a link on that share is a normal local link while
+        // another share keeps the refusal. (On Windows the canonical
+        // `\\?\UNC\server\share\…` key keeps the share too; on Linux the
+        // canonical spelling drops the double slash, so the io policy is what
+        // enforces the same rule there.)
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::write(root.join("a.md"), "# A\n").unwrap();
+        std::fs::write(root.join("b.md"), "# B\n").unwrap();
+        let spelled = PathBuf::from(format!("//{}", root.to_string_lossy().trim_start_matches('/')));
+
+        let mut state = window(&temp);
+        state.open_path(spelled.join("a.md"));
+        assert_eq!(state.active_document_root(), Some(spelled.clone()));
+
+        let own = spelled.join("b.md").to_string_lossy().into_owned();
+        assert!(
+            matches!(state.classify_link(&own), LinkTarget::Local { markdown: true, .. }),
+            "the own share is local"
+        );
+        assert!(matches!(state.classify_link("//elsewhere/share/b.md"), LinkTarget::Refused(_)));
+    }
+
+    #[test]
+    fn a_non_markdown_file_offers_open_or_show_in_folder() {
+        let temp = TempDir::new().unwrap();
+        let index = write(&temp, "index.md");
+        std::fs::write(temp.path().join("manual.pdf"), b"%PDF-1.4").unwrap();
+        std::fs::write(temp.path().join("build.sh"), b"#!/bin/sh\n").unwrap();
+        let mut state = window(&temp);
+        open_file(&mut state, index.clone());
+
+        let mut tx = Tx::default();
+        state.open_link("manual.pdf", &mut tx);
+        poll_until(&mut state, "the PDF notice", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("is not a Markdown"))
+        });
+        let notice = state.ui.notice.clone().expect("the notice");
+        assert_eq!(notice.text, lmdv_i18n::t!("msg.notMarkdown", "name" => "manual.pdf"));
+        assert_eq!(
+            notice.action,
+            Some(NoticeAction::OpenFile(canonical(&temp.path().join("manual.pdf")))),
+            "L-07: a whitelisted document offers Open"
+        );
+        assert!(!shows(&state, &temp.path().join("manual.pdf")), "it never opens as text");
+
+        // Pressing Open hands the file to the desktop's handler.
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        state.shared().set_external_sink({
+            let seen = Rc::clone(&seen);
+            Box::new(move |path: &Path| seen.borrow_mut().push(path.to_path_buf()))
+        });
+        state.run_notice_action();
+        assert_eq!(seen.borrow().as_slice(), [canonical(&temp.path().join("manual.pdf"))]);
+
+        state.activate_tab(state.active_tab().expect("the tab").id);
+        let mut tx = Tx::default();
+        state.open_link("build.sh", &mut tx);
+        poll_until(&mut state, "the script notice", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("build.sh"))
+        });
+        let notice = state.ui.notice.clone().expect("the notice");
+        assert_eq!(
+            notice.action,
+            Some(NoticeAction::ShowInFolder(canonical(temp.path()))),
+            "L-07: a script is only ever revealed, never run"
+        );
+        assert_eq!(notice.text, lmdv_i18n::t!("msg.notMarkdown", "name" => "build.sh"));
+        // The reveal opens the folder, never the script itself.
+        seen.borrow_mut().clear();
+        state.run_notice_action();
+        assert_eq!(seen.borrow().as_slice(), [canonical(temp.path())]);
+        assert!(can_open_externally(Path::new("a.pdf")));
+        assert!(can_open_externally(Path::new("a.PNG")));
+        assert!(!can_open_externally(Path::new("a.sh")), "a program is not on the Open list");
+        assert!(!can_open_externally(Path::new("a.py")));
+        assert!(!can_open_externally(Path::new("a")));
+    }
+
+    #[test]
+    fn an_unresolved_markdown_link_reports_not_found_without_opening() {
+        let temp = TempDir::new().unwrap();
+        let index = write(&temp, "index.md");
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+
+        // An explicit `.md` spelling is probed too (L-08).
+        let mut tx = Tx::default();
+        state.open_link("gone.md", &mut tx);
+        poll_until(&mut state, "the not-found notice", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("Not found: gone.md"))
+        });
+        assert_eq!(state.tabs().len(), 1, "no error tab, no navigation");
+    }
+
+    #[test]
+    fn a_pasted_documents_relative_link_offers_save_as() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("Pasted", "# Pasted\n\n[next](next.md)\n\n[top](#pasted)\n");
+
+        let mut tx = Tx::default();
+        state.open_link("next.md", &mut tx);
+        let notice = state.ui.notice.clone().expect("L-09's notice");
+        assert_eq!(notice.text, lmdv_i18n::t!("msg.pastedLink"));
+        assert_eq!(notice.action, Some(NoticeAction::SaveAs(state.active_document_id().expect("the pasted document"))));
+        assert_eq!(state.tabs().len(), 1);
+
+        // The action asks for the dialog; poll opens it on the frame's Tx.
+        state.run_notice_action();
+        assert!(state.ui.save_as_requested.is_some(), "the press asks poll for the dialog");
+        let mut tx = Tx::default();
+        state.poll(0.0, &mut tx);
+        assert!(state.ui.save_as_requested.is_none(), "poll consumed the request");
+
+        // An in-page anchor still works in pasted text (L-09).
+        state.dismiss_notice();
+        state.open_link("#pasted", &mut tx);
+        assert!(state.ui.notice.is_none(), "an anchor in pasted text needs no file");
+    }
+
+    #[test]
+    fn a_percent_encoded_fragment_lands_with_the_landing_wait() {
+        // L-01: the id may be percent-encoded; the jump and its flash apply.
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("Note", "# Résumé notes\n\nBody.\n");
+        let doc = state.active_doc().expect("parsed");
+        assert_eq!(doc.headings[0].id, "résumé-notes");
+        assert_eq!(
+            state.classify_link("#r%C3%A9sum%C3%A9-notes"),
+            LinkTarget::Fragment("r%C3%A9sum%C3%A9-notes".to_owned())
+        );
+        let mut tx = Tx::default();
+        state.open_link("#r%C3%A9sum%C3%A9-notes", &mut tx);
+        assert!(state.reading.landing.is_some(), "the landing poll and flash are armed");
+        assert!(state.ui.notice.is_none());
     }
 
     #[test]

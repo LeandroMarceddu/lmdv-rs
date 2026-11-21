@@ -252,7 +252,26 @@ fn features_renders_headings_paragraphs_tables_and_code() {
     assert!(tree.has_text("export async function openFile(path: string): Promise<void> {"));
     assert!(tree.has_text("typescript"));
     assert!(tree.has_text("python"));
-    assert!(tree.has_key("copy-code:code"));
+    assert!(tree.has_key("copy-code:0"), "the first code block's copy action names it by position");
+}
+
+#[test]
+fn every_code_block_copies_its_own_text() {
+    // M-13: top level, nested in a quote and duplicated blocks each get their
+    // own destination, numbered in the model's drawing order.
+    let scene = Scene::new(concat!(
+        "```rust\nlet top = 1;\n```\n\n",
+        "> ```rust\n> let quoted = 2;\n> ```\n\n",
+        "```\nlet top = 1;\n```\n",
+    ));
+    let tree = scene.render();
+    let texts = scene.doc.code_texts();
+    assert_eq!(texts.len(), 3);
+    for index in 0..texts.len() {
+        assert!(tree.has_key(&format!("copy-code:{index}")), "code block {index} has no copy action");
+    }
+    assert!(!tree.has_key(&format!("copy-code:{}", texts.len())), "there is no block past the last one");
+    assert!(!tree.has_key("copy-code:code"), "the old ambiguous key is gone");
 }
 
 #[test]
@@ -359,6 +378,65 @@ fn mermaid_draws_or_falls_back_to_its_source() {
     // The invalid one keeps its source and a notice.
     assert!(tree.has_text("This is not valid") || tree.has_text("this is not valid mermaid {{{"));
     assert!(tree.has_text("flowchart LR"), "the invalid source stays visible");
+}
+
+#[test]
+fn a_memoised_neighbour_does_not_shift_copy_destinations() {
+    // M-13: a rebuilt block is numbered from the model, so blocks a memo
+    // reused (here, one whose source the highlight does not overlap) cannot
+    // move its copy action onto another block.
+    let source = "```\nalpha\n```\n\nParagraph.\n\n```\nbeta\n```\n";
+    let scene = Scene::new(source);
+    let mut runtime = scene.runtime();
+    runtime.frame(0.0);
+    let start = source.find("beta").expect("the second block");
+    runtime.state.highlights = vec![Highlight { range: start..start + 4, kind: HighlightKind::Find }];
+    runtime.frame(1.0 / 60.0);
+
+    let keys: Vec<String> = runtime
+        .elements()
+        .into_iter()
+        .filter_map(|element| element.key)
+        .filter(|key| key.starts_with("copy-code:"))
+        .collect();
+    assert_eq!(keys, vec!["copy-code:0".to_owned(), "copy-code:1".to_owned()]);
+}
+
+#[test]
+fn html_code_blocks_number_in_the_articles_order() {
+    // M-13: raw HTML's `<pre>` blocks are code blocks too; one inside an HTML
+    // table cell is drawn inline and is not counted.
+    let scene = Scene::new(concat!(
+        "<div><p>intro</p><pre><code>a = 1;</code></pre></div>\n\n",
+        "<div><pre>b = 2;</pre></div>\n\n",
+        "<table><tr><td><pre>inline cell</pre></td></tr></table>\n\n",
+        "```\nc = 3;\n```\n",
+    ));
+    let tree = scene.render();
+    let texts = scene.doc.code_texts();
+    assert_eq!(texts.len(), 3, "two HTML blocks and one fence: {texts:?}");
+    for index in 0..texts.len() {
+        assert!(tree.has_key(&format!("copy-code:{index}")), "code block {index} has its own copy action");
+    }
+    assert!(!tree.has_key(&format!("copy-code:{}", texts.len())));
+    assert!(tree.has_text("inline cell"), "the cell's pre is inline text");
+}
+
+#[test]
+fn a_broken_diagram_only_affects_that_diagram() {
+    // M-34: a Mermaid failure is local; the article around it is untouched.
+    let scene = Scene::new(concat!(
+        "# Before\n\n",
+        "Paragraph before the diagram.\n\n",
+        "```mermaid\nthis is not a diagram ->\n```\n\n",
+        "Paragraph after the diagram.\n",
+    ));
+    let tree = scene.render();
+    assert!(tree.has_text("Before"));
+    assert!(tree.has_text("Paragraph before the diagram."));
+    assert!(tree.has_text("Paragraph after the diagram."));
+    assert!(tree.has_text("this is not a diagram ->"), "the fallback keeps the diagram's source");
+    assert!(!tree.headings().is_empty());
 }
 
 #[test]

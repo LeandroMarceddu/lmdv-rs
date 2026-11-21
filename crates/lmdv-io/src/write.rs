@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use lmdv_core::{Eol, FileMeta};
 
 use crate::atomic::write_atomic_with;
-use crate::path_policy::{PathError, reject_network_or_device};
+use crate::path_policy::{PathError, network_share, reject_network_or_device_within};
 use crate::read::{MAX_DOC_BYTES, probe};
 
 /// The result of a successful save.
@@ -76,7 +76,10 @@ pub fn save_document(
     expected: Option<FileMeta>,
     create: bool,
 ) -> Result<SaveOutcome, WriteError> {
-    reject_network_or_device(path)?;
+    // L-10/M-30: a document opened from a network share saves back to that
+    // share; another share, a device namespace or a drive is still refused.
+    let share = network_share(path);
+    reject_network_or_device_within(path, share.as_deref())?;
 
     let (target, check_expected) = match fs::canonicalize(path) {
         Ok(canonical) => (canonical, true),
@@ -92,7 +95,7 @@ pub fn save_document(
         Err(source) => return Err(WriteError::Io { path: path.to_path_buf(), source }),
     };
     // Canonicalization may have followed a symlink into a forbidden area.
-    reject_network_or_device(&target)?;
+    reject_network_or_device_within(&target, share.as_deref())?;
 
     if let Ok(metadata) = fs::metadata(&target)
         && !metadata.is_file()
@@ -289,13 +292,27 @@ mod tests {
     }
 
     #[test]
-    fn writes_reject_network_and_device_paths() {
+    fn writes_reject_device_paths() {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("note.md");
         assert!(matches!(
-            save_document(Path::new("//host/share/note.md"), "x", Eol::Lf, None, false),
-            Err(WriteError::Path(PathError::Network))
+            save_document(Path::new(r"\\?\C:\x.md"), "x", Eol::Lf, None, false),
+            Err(WriteError::Path(PathError::Device))
         ));
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_document_on_a_share_saves_back_to_that_share() {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("note.md");
+        fs::write(&file, "old\n").unwrap();
+        let spelled = PathBuf::from(format!("//{}", temp.path().to_string_lossy().trim_start_matches('/')));
+
+        let outcome = save_document(&spelled.join("note.md"), "new\n", Eol::Lf, None, false)
+            .expect("the document's own share is writable (L-10)");
+        assert_eq!(fs::read_to_string(&file).unwrap(), "new\n");
+        assert_eq!(outcome.path, fs::canonicalize(&file).unwrap());
     }
 }

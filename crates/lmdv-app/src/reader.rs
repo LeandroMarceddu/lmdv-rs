@@ -34,7 +34,7 @@ pub const READER_MAX_WIDTH: f32 = 760.0;
 /// Reading column side padding in points (R-02).
 pub const READER_PAD_X: f32 = 48.0;
 /// Reading column top padding in points (R-02).
-pub const READER_PAD_TOP: f32 = 40.0;
+pub const READER_PAD_TOP: f32 = 32.0;
 /// Reading column bottom padding in points (R-02).
 pub const READER_PAD_BOTTOM: f32 = 96.0;
 /// Documents above this size keep the source preview: the parser cap from
@@ -594,6 +594,49 @@ Closing paragraph.
         assert_eq!(anchor_from_layouts(&doc, 0.0, false, |_| None), ViewportAnchor::default());
         let doc = lmdv_md::parse("Just a paragraph.\n");
         assert_eq!(anchor_from_layouts(&doc, 100.0, false, |_| Some([0.0, 10.0, 700.0, 20.0])).heading, None);
+    }
+
+    #[test]
+    fn the_reading_column_pads_48_32_at_1280_and_20_at_480() {
+        // R-02: 48/32/96; at pane width ≤640 the sides fall to 20, and at
+        // ≤420 to 14 with a 24 top.
+        assert_eq!((READER_PAD_X, READER_PAD_TOP, READER_PAD_BOTTOM), (48.0, 32.0, 96.0));
+        assert_eq!(column_padding(1280.0), (48.0, 32.0));
+        assert_eq!(column_padding(760.0), (48.0, 32.0), "the column itself keeps the wide steps");
+        assert_eq!(column_padding(641.0), (48.0, 32.0));
+        assert_eq!(column_padding(640.0), (20.0, 32.0), "≤640: sides 20, top still 32");
+        assert_eq!(column_padding(480.0), (20.0, 32.0));
+        assert_eq!(column_padding(421.0), (20.0, 32.0));
+        assert_eq!(column_padding(420.0), (14.0, 24.0), "≤420: sides 14 and top 24");
+        assert_eq!(column_padding(320.0), (14.0, 24.0));
+    }
+
+    #[test]
+    fn the_rendered_reading_column_measures_48_32_at_1280_and_20_at_480() {
+        // R-02's acceptance: the drawn article, not just the constants. The
+        // scene keeps both panes closed, so the pane is the window's content.
+        fn measure(width: f32) -> (f32, f32, f32, f32) {
+            let temp = tempfile::TempDir::new().unwrap();
+            let mut state = crate::window::WindowState::new(crate::test_support::shared(&temp));
+            crate::view::scene_reader(&mut state);
+            let mut runtime = rune::Runtime::new(state, crate::view::view, (width, 900.0), rune::Env::new(false, 1.0));
+            runtime.frame(0.0);
+            let elements = runtime.elements();
+            let by = |key: &str| elements.iter().find(|element| element.key.as_deref() == Some(key)).expect(key);
+            let (article, scroll, heading) = (by("article"), by("article-scroll"), by("h0"));
+            (heading.rect[0] - article.rect[0], heading.rect[1] - scroll.rect[1], article.rect[2], heading.rect[2])
+        }
+
+        let (side, top, column, content) = measure(1280.0);
+        assert_eq!((side, top), (READER_PAD_X, READER_PAD_TOP), "1280: 48 side and 32 top");
+        assert_eq!(column, 760.0, "the default Normal column is capped at 760");
+        assert_eq!(content, 664.0, "760 less both side paddings");
+
+        let (side, top, column, content) = measure(480.0);
+        assert_eq!(side, 20.0, "≤640: the sides fall to 20");
+        assert_eq!(top, READER_PAD_TOP, "the top stays 32 above 420");
+        assert!(column <= 640.0, "the pane itself is narrow: {column}");
+        assert_eq!(content, column - 2.0 * side, "the content follows the narrow padding");
     }
 
     #[test]
