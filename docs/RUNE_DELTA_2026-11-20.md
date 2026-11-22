@@ -1,5 +1,9 @@
 # Rune upstream delta — 2026-11-20
 
+> **Superseded by [`RUNE_DELTA_2026-11-22.md`](RUNE_DELTA_2026-11-22.md).**
+> Upstream moved to `63ad0209`; the patch status and port order were rechecked
+> there. This file is kept as the 2026-11-20 research record.
+
 Research against the pin in [`RUNE_PIN.md`](RUNE_PIN.md).
 
 | | |

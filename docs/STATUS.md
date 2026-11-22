@@ -490,7 +490,7 @@
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms; see the scroll section and OI-193).
 2. Close or accept the 13 remaining P0 rows: most need Rune/rune-kit APIs (T-01/T-03/T-19/D-04/I-10/C-01/O-14/L-11) or held export work (X-02/X-05); E-01/E-07/T-26 and H-04 remain app-side. D-03 image drop (OI-187) and drag-to-scroll (OI-186) follow.
-3. The scheduled Rune port to `7a707454` (OI-189, `docs/RUNE_DELTA_2026-11-20.md`).
+3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — the user asked to hold it for now.
 4. P7 packaging: LICENSE, three-part reverse-DNS id, installer icon, signed checksums (OI-153); Windows runtime only if it becomes a target (OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
