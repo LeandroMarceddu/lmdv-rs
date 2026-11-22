@@ -445,6 +445,15 @@ pub enum CloseOutcome {
     Blocked,
 }
 
+/// E-15(c): puts an editor session's caret at the start of `line` (1-based),
+/// without changing the buffer.
+fn aim_editor_caret(editor: &mut lmdv_edit::EditorSession, line: usize) -> bool {
+    let text = editor.text();
+    let start = text.split('\n').take(line.saturating_sub(1)).map(|line| line.len() + 1).sum::<usize>().min(text.len());
+    editor.set_selection(start..start);
+    true
+}
+
 /// The application state of one window.
 ///
 /// This is the `S` Rune's `AppSpec` runs. It is also the interface later slices
@@ -926,6 +935,7 @@ impl WindowState {
         self.close_palette();
         self.close_tab_list();
         self.share.menu_open = false;
+        self.editor.format_menu = None;
         self.tables.preview = None;
         self.tables.target = None;
         self.lightbox = None;
@@ -984,6 +994,10 @@ impl WindowState {
             if !place.background() {
                 self.record_open(tab, from);
             }
+            // E-15: reopening a file that is already open is also a disk check.
+            // A dirty buffer is never read over; a clean one reloads and keeps
+            // its reading anchor.
+            self.check_open_document(doc.id);
             return (tab, false);
         }
 
@@ -1220,6 +1234,7 @@ impl WindowState {
         self.capture_active_position();
         self.save_outline_filter();
         self.editor.goto_line = None;
+        self.editor.format_menu = None;
         self.ui.block_menu = None;
         self.share.menu_open = false;
         self.tables.preview = None;
@@ -1233,6 +1248,15 @@ impl WindowState {
         self.sync_editor_panes();
         let anchor = self.tabs[index].view.anchor.clone();
         self.begin_restore(&anchor);
+        // E-15(c): a line target that belongs to this tab also reaches the
+        // source pane when the tab comes forward.
+        let pending = self.tabs[index].view.line.filter(|_| self.tabs[index].view.editor.is_some());
+        if let Some(line) = pending {
+            if let Some(editor) = self.tabs[index].view.editor.as_mut() {
+                aim_editor_caret(editor, line);
+            }
+            self.editor.line_reveal = Some(self.tabs[index].id);
+        }
         self.load_outline_filter();
         self.sync_outline();
         self.note_active_tab();
@@ -1251,11 +1275,22 @@ impl WindowState {
     }
 
     /// Sets the pending `--line` target on the active document tab.
+    ///
+    /// E-15(c): on a tab that is editing, the target also moves the source
+    /// caret, so a launch, a search hit or a remembered line lands on both the
+    /// article and the source pane. [`Self::poll_line_reveal`] scrolls the
+    /// source once the frame holds the tab.
     pub fn set_pending_line(&mut self, line: usize) {
-        if let Some(tab) = self.active_tab_mut()
-            && !tab.is_start()
-        {
-            tab.view.line = Some(line.max(1));
+        let line = line.max(1);
+        let Some(tab) = self.active_tab_mut().filter(|tab| !tab.is_start()) else { return };
+        tab.view.line = Some(line);
+        let id = tab.id;
+        let aimed = match tab.view.editor.as_mut() {
+            Some(editor) => aim_editor_caret(editor, line),
+            None => false,
+        };
+        if aimed {
+            self.editor.line_reveal = Some(id);
         }
     }
 
@@ -1337,6 +1372,7 @@ impl WindowState {
             self.begin_restore(&anchor);
             self.load_outline_filter();
         }
+        self.editor.format_menu = None;
         self.note_active_tab();
         self.sync_outline();
         self.shared.docs_mut().collect_unused();
@@ -1346,6 +1382,9 @@ impl WindowState {
     /// Closes the tab, asking first when it is the last view of a dirty
     /// document (E-13/T-05); a lone start page asks the window to close.
     pub fn request_close_tab(&mut self, id: TabId) {
+        // E-22: a dropdown belongs to the tab it was opened over; any close
+        // request dismisses it before a question or a switch can happen.
+        self.editor.format_menu = None;
         // OI-105: no save prompt or close while the exporting document's job is
         // still running; the completion clears the pin.
         if self.tab(id).and_then(Tab::document_id).is_some_and(|doc| self.export_pins(doc)) {
@@ -1686,6 +1725,7 @@ impl WindowState {
         self.apply_pending_scroll(tx);
         changed |= self.apply_pending_fragment(tx);
         changed |= self.apply_line_target(now, tx);
+        changed |= self.poll_line_reveal(tx);
         changed |= self.poll_reader_find(now, tx);
         changed |= self.poll_palette(now, tx);
         changed |= self.poll_tables(now, tx);
@@ -1748,6 +1788,53 @@ impl WindowState {
                     Ok(loaded) => {
                         let path = loaded.path;
                         let meta = loaded.meta;
+                        // E-15: a same-file reopen's disk check. It is compared
+                        // exactly like the watcher's read, but a difference is
+                        // never written over a dirty buffer: the tabs are marked
+                        // and the existing file-changed question asks (R-22),
+                        // while a clean view reloads with its anchor restored.
+                        if self.editor.reopen_checks.remove(&doc) {
+                            let same = {
+                                let current = document.text();
+                                current.text() == loaded.buffer.text()
+                                    && current.eol() == loaded.buffer.eol()
+                                    && current.had_bom() == loaded.buffer.had_bom()
+                            };
+                            let dirty = document.is_dirty()
+                                || self.tabs.iter().any(|tab| tab.document_id() == Some(doc) && tab.view.dirty);
+                            if same {
+                                if dirty {
+                                    // The buffer already says what the disk says,
+                                    // but its saved base is older: only the
+                                    // baseline metadata moves, so the text stays
+                                    // the user's to save.
+                                    document.saved.borrow_mut().meta = meta;
+                                } else {
+                                    document.set_saved(meta, document.hash(), path);
+                                }
+                                return false;
+                            }
+                            if dirty {
+                                for tab in self.tabs.iter_mut().filter(|tab| tab.document_id() == Some(doc)) {
+                                    tab.view.disk_changed = true;
+                                }
+                                if self.editor.prompt.is_none() {
+                                    self.flush_all_drafts();
+                                    self.editor.prompt = Some(crate::editor::Prompt::DiskChanged { doc });
+                                }
+                                self.refresh_titles();
+                                return true;
+                            }
+                            if self.active_document_id() == Some(doc) {
+                                let anchor = self
+                                    .tabs
+                                    .iter()
+                                    .find(|tab| tab.document_id() == Some(doc))
+                                    .map(|tab| tab.view.anchor.clone())
+                                    .unwrap_or_default();
+                                self.begin_restore(&anchor);
+                            }
+                        }
                         // R-21: a watcher reload whose text came back unchanged is
                         // an attribute touch (OneDrive, a backup tool, `touch`):
                         // record the new baseline and leave the buffer, the parse,
@@ -1836,6 +1923,7 @@ impl WindowState {
                     }
                     Err(error) => {
                         self.editor.compare_reloads.remove(&doc);
+                        self.editor.reopen_checks.remove(&doc);
                         self.restored_docs.remove(&doc);
                         let travel = self.navigation.pending.as_ref().is_some_and(|pending| pending.doc == Some(doc));
                         *document.status.borrow_mut() = DocStatus::Error(error.to_string());

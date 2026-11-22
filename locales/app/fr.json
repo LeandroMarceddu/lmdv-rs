@@ -291,6 +291,7 @@
   "fb.tools": "Outils",
   "fb.toolsHint": "Outils : chercher et remplacer, commandes de ligne, orthographe",
   "fb.slashHint": "Tapez <kbd>/</kbd> pour les blocs",
+  "fb.slashPlain": "Tapez / pour les blocs",
   "ins.table": "3 colonnes, 2 lignes",
   "ins.diagram": "Organigramme Mermaid",
   "ins.math": "Bloc de formule KaTeX",

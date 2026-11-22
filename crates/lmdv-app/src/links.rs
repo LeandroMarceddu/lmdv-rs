@@ -404,6 +404,27 @@ impl WindowState {
         }
     }
 
+    /// Opens a recent file with a click's placement (T-12).
+    ///
+    /// Recents, tree rows, search hits and document links share
+    /// [`LinkPlacement`]; this maps its four gestures onto the app's existing
+    /// open paths instead of a second enum: plain in front, Ctrl or middle in
+    /// a background tab, Ctrl+Shift in front, Shift in a new window.
+    pub(crate) fn open_recent_placed(&mut self, path: PathBuf, placement: LinkPlacement, tx: &mut Tx) {
+        match placement {
+            LinkPlacement::Current | LinkPlacement::ForegroundTab => {
+                self.open_path(path);
+            }
+            LinkPlacement::BackgroundTab => {
+                self.open_path_background(path);
+            }
+            LinkPlacement::NewWindow => self.open_link_in_new_window(path),
+        }
+        // The new tab must draw at its own place on this frame, not at the
+        // offset the shared article viewport still carries.
+        self.apply_pending_scroll(tx);
+    }
+
     /// Opens a link target in a window of its own (Shift+click, L-11).
     ///
     /// A `#section` cannot travel: [`Launch`] carries the path and line only, so
@@ -791,6 +812,120 @@ mod tests {
         assert_eq!(opened[0].launch.path.as_deref(), Some(canonical(&e).as_path()));
         assert_eq!(state.active_path().as_deref(), Some(canonical(&d).as_path()), "Shift+click leaves this window");
         assert!(!shows(&state, &e), "the new window does not also open a tab here");
+    }
+
+    #[test]
+    fn a_recent_row_takes_the_four_click_placements() {
+        let temp = TempDir::new().unwrap();
+        let a = write(&temp, "a.md");
+        let b = write(&temp, "b.md");
+        let c = write(&temp, "c.md");
+        let d = write(&temp, "d.md");
+        let e = write(&temp, "e.md");
+        let mut state = window(&temp);
+        open_file(&mut state, a.clone());
+        let mut tx = Tx::default();
+
+        // Plain: in front.
+        state.open_recent_placed(b.clone(), LinkPlacement::Current, &mut tx);
+        poll_until(&mut state, "the plain recent open", |state| {
+            state.active_path().as_deref() == Some(canonical(&b).as_path())
+        });
+
+        // Ctrl: a background tab; the front document stays in front.
+        state.open_recent_placed(c.clone(), LinkPlacement::BackgroundTab, &mut tx);
+        poll_until(&mut state, "the background recent open", |state| shows(state, &c));
+        assert_eq!(
+            state.active_path().as_deref(),
+            Some(canonical(&b).as_path()),
+            "a background recent keeps the front tab"
+        );
+
+        // Ctrl+Shift: a foreground tab.
+        state.open_recent_placed(d.clone(), LinkPlacement::ForegroundTab, &mut tx);
+        poll_until(&mut state, "the foreground recent open", |state| {
+            state.active_path().as_deref() == Some(canonical(&d).as_path())
+        });
+        assert!(shows(&state, &c), "the background tab is still there");
+
+        // Shift: a window of its own, leaving this window where it is.
+        state.shared().set_window_opener(recording_opener);
+        OPENED.with(|opened| opened.borrow_mut().clear());
+        state.open_recent_placed(e.clone(), LinkPlacement::NewWindow, &mut tx);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while OPENED.with(|opened| opened.borrow().is_empty()) {
+            assert!(Instant::now() < deadline, "the recent's new-window open never happened");
+            state.poll(0.0, &mut tx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let opened = OPENED.with(|opened| opened.borrow().clone());
+        assert_eq!(opened.len(), 1);
+        assert_eq!(opened[0].launch.path.as_deref(), Some(canonical(&e).as_path()));
+        assert_eq!(state.active_path().as_deref(), Some(canonical(&d).as_path()), "this window did not move");
+        assert!(!shows(&state, &e), "the new window does not also open a tab here");
+    }
+
+    #[test]
+    fn a_recent_row_press_passes_the_held_modifiers() {
+        let temp = TempDir::new().unwrap();
+        let a = write(&temp, "a.md");
+        let mut state = window(&temp);
+        open_file(&mut state, a.clone());
+        // A start page in front shows the recents; A is the newest.
+        state.new_start_tab();
+        assert!(state.active_tab().is_some_and(|tab| tab.is_start()));
+
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        runtime.frame(0.0);
+        let (x, y) = runtime.find("recent-0").expect("the recent row");
+
+        // Ctrl+click: a background tab; the start page stays in front.
+        runtime.physical_input(rune::PhysicalInput::Modifiers(Mods { ctrl: true, ..Mods::default() }));
+        runtime.pointer_move(x, y);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !shows(&runtime.state, &a) {
+            assert!(Instant::now() < deadline, "the Ctrl+clicked recent never opened");
+            runtime.update(|state, tx| {
+                state.poll(0.0, tx);
+            });
+            runtime.frame(1.0 / 60.0);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            runtime.state.active_tab().is_some_and(|tab| tab.is_start()),
+            "Ctrl+click opens the recent behind the start page"
+        );
+
+        // Shift+click: a window of its own, through the same opener path the
+        // links use; this window keeps the start page.
+        runtime.state.shared().set_window_opener(recording_opener);
+        OPENED.with(|opened| opened.borrow_mut().clear());
+        runtime.physical_input(rune::PhysicalInput::Modifiers(Mods { shift: true, ..Mods::default() }));
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        let opened = OPENED.with(|opened| opened.borrow().clone());
+        assert_eq!(opened.len(), 1, "Shift+click asked for a new window");
+        assert_eq!(opened[0].launch.path.as_deref(), Some(canonical(&a).as_path()));
+        assert!(runtime.state.active_tab().is_some_and(|tab| tab.is_start()), "this window did not move");
+
+        // A plain press replaces the front start page, as every foreground open.
+        runtime.physical_input(rune::PhysicalInput::Modifiers(Mods::default()));
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        while runtime.state.active_path().as_deref() != Some(canonical(&a).as_path()) {
+            assert!(Instant::now() < deadline, "the plain recent press never came forward");
+            runtime.update(|state, tx| {
+                state.poll(0.0, tx);
+            });
+            runtime.frame(1.0 / 60.0);
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     #[test]

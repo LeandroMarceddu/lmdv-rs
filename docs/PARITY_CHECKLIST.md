@@ -41,8 +41,8 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 22 | 3 | 4 | 1 | 0 |
-| Tabs and windows | 35 | 18 | 8 | 7 | 2 | 0 |
-| Editor | 40 | 23 | 2 | 12 | 2 | 1 |
+| Tabs and windows | 35 | 19 | 8 | 6 | 2 | 0 |
+| Editor | 40 | 26 | 2 | 9 | 2 | 1 |
 | Markdown rendering | 34 | 29 | 3 | 2 | 0 | 0 |
 | Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
 | Share, print and export | 16 | 7 | 1 | 7 | 1 | 0 |
@@ -53,11 +53,11 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | System, CLI and file integration | 27 | 13 | 5 | 1 | 1 | 7 |
 | Window chrome | 10 | 0 | 3 | 3 | 0 | 4 |
 | Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
-| Help, start page, notices, rating | 13 | 6 | 0 | 6 | 0 | 1 |
+| Help, start page, notices, rating | 13 | 7 | 0 | 5 | 0 | 1 |
 | Accessibility | 15 | 11 | 0 | 4 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **200** | **52** | **61** | **11** | **18** |
+| **All** | **342** | **205** | **52** | **56** | **11** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -105,7 +105,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-09** Tab by number (P1 · F-TABS) — substitute
 - [x] **T-10** Move tab by keyboard (P1 · F-TABS) — done
 - [x] **T-11** One file, one tab per window (P0 · F-TABS) — done
-- [~] **T-12** Click-open placement (P0 · F-TABS) — partial
+- [x] **T-12** Click-open placement (P0 · F-TABS) — done
 - [x] **T-13** Start-page replacement (P0 · F-BASIC) — done
 - [~] **T-14** Background insertion order (P1 · F-TABS) — partial
 - [ ] **T-15** Background tab pulse (P2 · F-TABS) — missing
@@ -146,14 +146,14 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **E-12** Save-as collision (P1 · F-PASTE) — done
 - [x] **E-13** Discard guard on leaving edit (P0 · F-EDIT) — done
 - [x] **E-14** Discard guard on opening other doc (P0 · F-EDIT) — substitute
-- [~] **E-15** Reopening edited file (P0 · F-CONFLICT) — partial
+- [x] **E-15** Reopening edited file (P0 · F-CONFLICT) — done
 - [x] **E-16** Recovery draft writing (P0 · F-DRAFT) — done
-- [~] **E-17** Draft offering (P0 · F-DRAFT) — partial
+- [x] **E-17** Draft offering (P0 · F-DRAFT) — done
 - [x] **E-18** Draft restore (P0 · F-DRAFT) — done
 - [x] **E-19** Draft quotas (P1 · F-DRAFT) — done
 - [x] **E-20** Find/replace panel (P0 · F-FIND) — done
 - [x] **E-21** Find focus routing (P1 · F-FIND) — done
-- [~] **E-22** Format bar (P0 · F-EDIT) — partial
+- [x] **E-22** Format bar (P0 · F-EDIT) — done
 - [x] **E-23** Inline formatting (P0 · F-EDIT) — done
 - [x] **E-24** Insert link (P1 · F-EDIT) — done
 - [x] **E-25** Headings (P0 · F-EDIT) — done
@@ -388,7 +388,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **H-03** Start-page tips (P2 · Text matches.) — done
 - [~] **H-04** Help dialog (P0 · F1 shows localized help with version.) — partial
 - [x] **H-05** Keys overlay (P1 · Overlay keys localized in German.) — done
-- [~] **H-06** Notice bar (P0 · Warning with Reload; dismiss; layout no overlap.) — partial
+- [x] **H-06** Notice bar (P0 · Warning with Reload; dismiss; layout no overlap.) — done
 - [x] **H-07** Screen-reader notices (P1 · Screen reader announces save/error.) — done
 - [~] **H-08** Micro-feedback (P2 · All confirmations visible.) — partial
 - [~] **H-09** Error card (P1 · Permission-denied file: error card, app alive.) — partial

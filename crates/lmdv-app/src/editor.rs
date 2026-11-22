@@ -233,6 +233,10 @@ pub enum ReloadIntent {
     /// Compare first: an unchanged read only updates the saved baseline, so
     /// an mtime-only `touch` changes nothing on screen.
     Compare,
+    /// E-15's same-file reopen: an unchanged read updates the baseline, a
+    /// different read reloads a clean view with its anchor restored and is only
+    /// announced for a dirty buffer, which is never read over.
+    ReopenCheck,
 }
 
 /// Editor-side window state. `scratch` keeps the `on_edit` accessor total when
@@ -273,6 +277,9 @@ pub struct EditorState {
     pub saved_panes: Option<(TabId, bool, bool, bool)>,
     /// The go-to-line prompt (E-31), window-level and transient.
     pub goto_line: Option<crate::edit_ui::GotoLine>,
+    /// The format bar's open Insert/Tools menu (E-22), window-level and
+    /// transient: a tab switch or leaving edit mode closes it.
+    pub format_menu: Option<crate::edit_ui::FormatMenu>,
     /// The journal kind the next block-field change belongs to (typing,
     /// deleting or a discrete paste), set by the field's key handler.
     pub block_kind: lmdv_edit::BlockEditKind,
@@ -311,6 +318,12 @@ pub struct EditorState {
     /// replaces anything (R-21). A quiet reload whose text is unchanged only
     /// updates the saved baseline.
     pub compare_reloads: BTreeSet<DocumentId>,
+    /// E-15's reopen checks whose read is compared before it can touch a
+    /// buffer. Disjoint from `compare_reloads`.
+    pub reopen_checks: BTreeSet<DocumentId>,
+    /// E-15(c): the tab whose source viewport must reveal the line a `--line`
+    /// or a search hit named, once that tab is in front.
+    pub line_reveal: Option<TabId>,
 }
 
 impl Default for EditorState {
@@ -333,6 +346,7 @@ impl Default for EditorState {
             saved_flash_armed: false,
             saved_panes: None,
             goto_line: None,
+            format_menu: None,
             block_kind: lmdv_edit::BlockEditKind::Typing,
             last_escape_at: None,
             scroll: Rc::new(Cell::new(ScrollSnapshot::default())),
@@ -348,6 +362,8 @@ impl Default for EditorState {
             spell: SpellState::default(),
             preview_error: None,
             compare_reloads: BTreeSet::new(),
+            reopen_checks: BTreeSet::new(),
+            line_reveal: None,
         }
     }
 }
@@ -562,6 +578,7 @@ impl WindowState {
             tab.view.slash_menu = crate::edit_ui::SlashMenu::default();
         }
         self.editor.goto_line = None;
+        self.editor.format_menu = None;
         self.editor.prompt = None;
         self.editor.spell.reset();
         self.reset_scroll_sync();
@@ -1891,6 +1908,11 @@ impl WindowState {
         } else {
             self.editor.compare_reloads.remove(&doc);
         }
+        if intent == ReloadIntent::ReopenCheck {
+            self.editor.reopen_checks.insert(doc);
+        } else {
+            self.editor.reopen_checks.remove(&doc);
+        }
         let anchor = self
             .tabs
             .iter()
@@ -1898,8 +1920,10 @@ impl WindowState {
             .map(|tab| tab.view.anchor.clone())
             .unwrap_or_default();
         // A watcher read is only restored once it proves to hold different
-        // text; a `touch` must not move the page (R-21).
-        if !compare && self.active_document_id() == Some(doc) {
+        // text; a `touch` must not move the page (R-21). A reopen check does
+        // the same, so the anchor is queued by its completion when the text
+        // really changed (E-15).
+        if !compare && intent != ReloadIntent::ReopenCheck && self.active_document_id() == Some(doc) {
             self.begin_restore(&anchor);
         }
         self.start_load(doc, path);
@@ -1908,6 +1932,23 @@ impl WindowState {
         if let Some(document) = self.shared.docs().get(doc) {
             *document.status.borrow_mut() = DocStatus::Ready;
         }
+    }
+
+    /// E-15: a same-file reopen checks the disk.
+    ///
+    /// The answer travels the ordinary reload path with [`ReloadIntent::ReopenCheck`]:
+    /// identical text only refreshes the saved metadata, different text reloads
+    /// a clean view with its reading anchor restored, and a dirty buffer is
+    /// never read over — its tabs are marked changed and the existing
+    /// file-changed question asks, exactly as the watcher does (R-22).
+    pub(crate) fn check_open_document(&mut self, doc: DocumentId) {
+        let Some(document) = self.shared.docs().get(doc) else { return };
+        // A loading, deleted or failed document has no baseline to compare.
+        if !matches!(*document.status.borrow(), DocStatus::Ready) {
+            return;
+        }
+        let Some(path) = document.key.borrow().path().map(Path::to_path_buf) else { return };
+        self.start_reload(doc, path, ReloadIntent::ReopenCheck);
     }
 
     /// Reloads after the user chose Reload for a dirty buffer: the draft is
@@ -1968,6 +2009,13 @@ impl WindowState {
         let Some(draft) = draft else { return false };
         let Some(document) = self.shared.docs().get(doc) else { return false };
         if self.tabs.iter().any(|tab| tab.document_id() == Some(doc) && tab.view.editor.is_some()) {
+            return false;
+        }
+        // E-17: another window holding the edit lease owns the buffer; its
+        // draft (if any) belongs to that editing session, not to a restore
+        // offer here. The shared lease is the cross-window check the original
+        // needed a BroadcastChannel for.
+        if document.lease_holder().is_some() {
             return false;
         }
         let disk = document.text().text().to_owned();

@@ -268,6 +268,102 @@ pub struct FormatState {
     pub quote: bool,
 }
 
+/// The format bar's two dropdown menus (E-22).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatMenu {
+    /// Table, code, math, diagram, the three callouts and the divider.
+    Insert,
+    /// Find/replace, go-to-line, the line commands and spellcheck.
+    Tools,
+}
+
+/// One row of a format-bar menu (E-22).
+///
+/// Block inserts and line commands reuse [`FormatAction`], so a menu press, a
+/// chord and a `/` row all run the same command. The remaining rows open the
+/// editor's transient UI or toggle the checker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormatMenuRow {
+    /// A block insert or a line command.
+    Action(FormatAction),
+    /// Open the find bar.
+    Find,
+    /// Open the find bar with its replace row.
+    Replace,
+    /// Open the go-to-line prompt.
+    GoToLine,
+    /// Turn the Linux spellchecker on or off.
+    Spellcheck,
+}
+
+impl FormatMenuRow {
+    /// The command id the row runs; `None` for the direct toggle.
+    pub fn command(self) -> Option<&'static str> {
+        match self {
+            Self::Action(action) => Some(action.command_id()),
+            Self::Find => Some("edit.find"),
+            Self::Replace => Some("edit.replace"),
+            Self::GoToLine => Some("edit.goto-line"),
+            Self::Spellcheck => None,
+        }
+    }
+
+    /// The localized row label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Action(action) => action.label(),
+            Self::Find => lmdv_i18n::t!("cm.find"),
+            Self::Replace => lmdv_i18n::t!("cmd.find"),
+            Self::GoToLine => lmdv_i18n::t!("cm.gotoLine"),
+            Self::Spellcheck => lmdv_i18n::t!("cmd.spell"),
+        }
+    }
+
+    /// The shortcut the row shows beside its label.
+    pub fn shortcut(self) -> Option<&'static str> {
+        match self {
+            Self::Action(FormatAction::MoveLineUp) => Some("Alt+↑"),
+            Self::Action(FormatAction::MoveLineDown) => Some("Alt+↓"),
+            Self::Action(FormatAction::DuplicateLine) => Some("Shift+Alt+↓"),
+            Self::Action(FormatAction::DeleteLine) => Some("Ctrl+Shift+K"),
+            Self::Action(FormatAction::SelectLine) => Some("Alt+L"),
+            Self::Find => Some("Ctrl+F"),
+            Self::Replace => Some("Ctrl+H"),
+            Self::GoToLine => Some("Ctrl+G"),
+            _ => None,
+        }
+    }
+}
+
+/// The Insert menu's block rows, in the spec's order (E-22). These are the
+/// `/` menu's block inserts without its headings/lists, which have their own
+/// buttons in the bar.
+pub const FORMAT_INSERT_ROWS: [FormatMenuRow; 8] = [
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Table)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Code)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Math)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Mermaid)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Note)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Tip)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Warning)),
+    FormatMenuRow::Action(FormatAction::Block(BlockKind::Divider)),
+];
+
+/// The Tools menu's rows (E-22): find and replace, go-to-line, the line
+/// commands, then the checker. The view draws a divider before row 3 and
+/// before the last row.
+pub const FORMAT_TOOLS_ROWS: [FormatMenuRow; 9] = [
+    FormatMenuRow::Find,
+    FormatMenuRow::Replace,
+    FormatMenuRow::GoToLine,
+    FormatMenuRow::Action(FormatAction::MoveLineUp),
+    FormatMenuRow::Action(FormatAction::MoveLineDown),
+    FormatMenuRow::Action(FormatAction::DuplicateLine),
+    FormatMenuRow::Action(FormatAction::DeleteLine),
+    FormatMenuRow::Action(FormatAction::SelectLine),
+    FormatMenuRow::Spellcheck,
+];
+
 /// The block inserts, in the `/` menu's order (E-28). Headings and lists are
 /// blocks there too, as in the original.
 const SLASH_ACTIONS: [FormatAction; 15] = [
@@ -390,6 +486,36 @@ impl WindowState {
             return &mut goto.input;
         }
         &mut self.editor.scratch
+    }
+
+    /// The format bar's open dropdown menu (E-22).
+    pub fn format_menu(&self) -> Option<FormatMenu> {
+        self.editor.format_menu
+    }
+
+    /// Toggles a format-bar menu, as its trigger button does.
+    pub(crate) fn toggle_format_menu(&mut self, menu: FormatMenu) {
+        self.editor.format_menu = (self.editor.format_menu != Some(menu)).then_some(menu);
+    }
+
+    /// Closes a format-bar menu: an outside press, Escape or a chosen row.
+    pub(crate) fn close_format_menu(&mut self) {
+        self.editor.format_menu = None;
+    }
+
+    /// Runs one menu row and closes the menu. False when the command could not
+    /// run (no editor, no selection, nothing to toggle).
+    pub(crate) fn run_format_menu_row(&mut self, row: FormatMenuRow, tx: &mut Tx) -> bool {
+        self.editor.format_menu = None;
+        if let Some(command) = row.command() {
+            return self.run_command(command, tx);
+        }
+        if row == FormatMenuRow::Spellcheck {
+            let on = self.shared().prefs().editor.spellcheck;
+            self.set_spellcheck(!on);
+            return true;
+        }
+        false
     }
 
     /// Opens (or refocuses) the find bar. `Ctrl+F` shows the find row only;
@@ -663,6 +789,22 @@ impl WindowState {
         let line = text[..byte.min(text.len())].bytes().filter(|&byte| byte == b'\n').count();
         let y = (line as f32 * self.editor_metrics().line_height - 80.0).max(0.0);
         tx.scroll_to_y(SOURCE_SCROLL_KEY, y);
+    }
+
+    /// E-15(c): reveals a pending line target in the source pane when its tab
+    /// is the one in front and editing. The target itself is consumed by the
+    /// reader's own `apply_line_target`.
+    pub(crate) fn poll_line_reveal(&mut self, tx: &mut Tx) -> bool {
+        let Some(id) = self.editor.line_reveal else { return false };
+        if self.active_tab().map(|tab| tab.id) != Some(id) {
+            return false;
+        }
+        self.editor.line_reveal = None;
+        if self.active_tab().is_some_and(|tab| tab.view.mode == Mode::Editor && tab.view.editor.is_some()) {
+            self.scroll_to_editor_selection(tx);
+            return true;
+        }
+        false
     }
 
     /// The source field's metrics at the current reading size (E-37).

@@ -4,6 +4,7 @@
 use rune::{ElementInfo, Key, KeyEvent, Mods, Tx};
 use tempfile::TempDir;
 
+use crate::edit_ui::{FormatAction, FormatMenu, FormatMenuRow};
 use crate::test_support;
 use crate::view::view;
 use crate::window::{Mode, Tab, WindowState};
@@ -427,6 +428,173 @@ fn line_commands_are_one_undo_step_each() {
     state.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()).expect("editor").undo();
     state.editor_changed();
     assert_eq!(text(&state), "a\nb\nc\n");
+}
+
+#[test]
+fn the_insert_menu_and_the_tools_menu_draw_their_rows_and_the_hint_is_plain() {
+    let temp = TempDir::new().unwrap();
+
+    // Insert: the eight block rows, the plain hint.
+    let mut state = window(&temp);
+    state.open_synthetic("Menus", "intro\n");
+    enter_editor(&mut state);
+    state.toggle_format_menu(FormatMenu::Insert);
+    assert_eq!(state.format_menu(), Some(FormatMenu::Insert));
+    let elements = render(state);
+    for key in ["format-insert", "format-insert-menu", "format-tools", "format-hint"] {
+        assert!(has_key(&elements, key), "{key} is drawn");
+    }
+    for index in 0..crate::edit_ui::FORMAT_INSERT_ROWS.len() {
+        assert!(has_key(&elements, &format!("format-insert-item{index}")), "Insert row {index} is drawn");
+    }
+    assert!(
+        !elements.iter().any(|element| element.key.as_deref() == Some("format-edit.insert-table")),
+        "the old eight block buttons moved into the menu"
+    );
+    let hint = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some("format-hint"))
+        .and_then(|element| element.text.clone())
+        .expect("the hint draws its text");
+    assert_eq!(hint, lmdv_i18n::text_in(0, lmdv_i18n::key("fb.slashPlain")));
+    assert_eq!(lmdv_i18n::text_in(0, lmdv_i18n::key("fb.slashPlain")), "Type / for blocks");
+    assert!(!hint.contains('<'), "the hint is plain text, not kbd markup: {hint:?}");
+
+    // Tools: find/replace, go-to-line, the five line commands and spellcheck,
+    // with the two dividers the spec groups them by.
+    let mut state = window(&temp);
+    state.open_synthetic("Menus", "intro\n");
+    enter_editor(&mut state);
+    state.toggle_format_menu(FormatMenu::Tools);
+    let elements = render(state);
+    assert!(has_key(&elements, "format-tools-menu"));
+    // The two separators take an entry slot each, so row keys shift after them.
+    let separators_at = [3, crate::edit_ui::FORMAT_TOOLS_ROWS.len() - 1];
+    let mut entry = 0usize;
+    for index in 0..crate::edit_ui::FORMAT_TOOLS_ROWS.len() {
+        if separators_at.contains(&index) {
+            assert!(has_key(&elements, &format!("sep{entry}")), "separator before row {index}");
+            entry += 1;
+        }
+        let key = format!("format-tools-item{entry}");
+        assert!(has_key(&elements, &key), "Tools row {index} is drawn as {key}");
+        entry += 1;
+    }
+    assert!(has_key(&elements, "sep3"), "the line commands are a separate group");
+    assert!(has_key(&elements, "sep9"), "spellcheck is a separate group");
+}
+
+#[test]
+fn the_insert_menu_rows_insert_the_same_blocks_as_the_slash_menu() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Menu", "intro\n");
+    enter_editor(&mut state);
+    let mut tx = Tx::default();
+    for row in crate::edit_ui::FORMAT_INSERT_ROWS {
+        let Some(command) = row.command() else { panic!("every Insert row is a command") };
+        assert!(command.starts_with("edit.insert-"), "{command}");
+    }
+
+    state.toggle_format_menu(FormatMenu::Insert);
+    assert!(
+        state.run_format_menu_row(FormatMenuRow::Action(FormatAction::Block(lmdv_edit::BlockKind::Table)), &mut tx)
+    );
+    assert!(text(&state).contains("| Column | Column | Column |"), "{:?}", text(&state));
+    assert_eq!(state.format_menu(), None, "a chosen row closes the menu");
+
+    // The divider row is the same command the `/` menu runs.
+    let end = text(&state).len();
+    state.active_editor_edit().set_caret(end);
+    state.toggle_format_menu(FormatMenu::Insert);
+    assert!(
+        state.run_format_menu_row(FormatMenuRow::Action(FormatAction::Block(lmdv_edit::BlockKind::Divider)), &mut tx)
+    );
+    assert!(text(&state).trim_end().ends_with("---"), "{:?}", text(&state));
+    assert_eq!(state.ui.last_command.as_deref(), Some("edit.insert-divider"));
+}
+
+#[test]
+fn the_tools_menu_opens_find_runs_line_commands_and_toggles_spellcheck() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Tools", "a\nb\nc\n");
+    enter_editor(&mut state);
+    let mut tx = Tx::default();
+    state.active_editor_edit().set_caret(2);
+
+    state.toggle_format_menu(FormatMenu::Tools);
+    assert!(state.run_format_menu_row(FormatMenuRow::Find, &mut tx));
+    assert!(state.find_bar_visible(), "Find opens the editor bar");
+    state.close_find(&mut tx);
+
+    state.toggle_format_menu(FormatMenu::Tools);
+    assert!(state.run_format_menu_row(FormatMenuRow::Action(FormatAction::MoveLineDown), &mut tx));
+    assert_eq!(text(&state), "a\nc\nb\n", "the line command ran");
+    assert_eq!(state.format_menu(), None);
+
+    // E-SPELL: the row is a checked toggle over the preference; the Settings
+    // switch reads the same value.
+    let before = state.shared().prefs().editor.spellcheck;
+    state.toggle_format_menu(FormatMenu::Tools);
+    assert!(state.run_format_menu_row(FormatMenuRow::Spellcheck, &mut tx));
+    assert_eq!(state.shared().prefs().editor.spellcheck, !before);
+}
+
+#[test]
+fn the_insert_menu_opens_on_its_button_and_inserts_from_a_clicked_row() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Menu", "intro\n");
+    enter_editor(&mut state);
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+
+    let (x, y) = runtime.find("format-insert").expect("the Insert trigger");
+    runtime.pointer_move(x, y);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.state.format_menu(), Some(FormatMenu::Insert), "the button opens the menu");
+
+    let (x, y) = runtime.find("format-insert-item0").expect("the Table row");
+    runtime.pointer_move(x, y);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.state.format_menu(), None, "a chosen row closes the menu");
+    let after =
+        runtime.state.active_tab().and_then(Tab::document).map(|doc| doc.text().text().to_owned()).unwrap_or_default();
+    assert!(after.contains("| Column | Column | Column |"), "{after:?}");
+}
+
+#[test]
+fn the_tools_menu_opens_on_its_button_and_opens_the_find_bar() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Menu", "intro\n");
+    enter_editor(&mut state);
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+
+    let (x, y) = runtime.find("format-tools").expect("the Tools trigger");
+    runtime.pointer_move(x, y);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.state.format_menu(), Some(FormatMenu::Tools), "the button opens the menu");
+
+    let (x, y) = runtime.find("format-tools-item0").expect("the Find row");
+    runtime.pointer_move(x, y);
+    runtime.pointer_down(x, y);
+    runtime.pointer_up(x, y);
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.state.format_menu(), None, "a chosen row closes the menu");
+    assert!(runtime.state.find_bar_visible(), "Find opened the editor's find bar");
+    runtime.frame(1.0 / 60.0);
+    let focused =
+        runtime.elements().into_iter().find(|element| element.focused).and_then(|element| element.key.clone());
+    assert_eq!(focused.as_deref(), Some("find-query"), "the keyboard lands in the query field");
 }
 
 #[test]

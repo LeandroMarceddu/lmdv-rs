@@ -17,7 +17,7 @@ use rune_kit::{
 };
 
 use crate::commands::lookup_command;
-use crate::edit_ui::{FindField, GotoLine, SlashMenu};
+use crate::edit_ui::{FindField, FormatMenu, FormatMenuRow, GotoLine, SlashMenu};
 use crate::editor::{NARROW_SPLIT_WIDTH, SPLIT_DEFAULT};
 use crate::images::WindowImages;
 use crate::math::WindowMath;
@@ -357,18 +357,17 @@ fn tab_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
 }
 
 fn main_body(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, layer: &mut Vec<El>) -> El {
-    let mut body = col()
+    col()
         .key("window-body")
         .w_full()
         .h_full()
         .min_h(0.0)
         .child(tab_band(state, cx, kit, layer))
         .child(el().key("tab-separator").w_full().h(1.0).fill(kit.c.border_muted))
-        .child(content(state, cx, kit).grow(1.0).min_h(0.0));
-    if let Some(notice) = &state.ui.notice {
-        body = body.child(notice_bar(notice, kit));
-    }
-    body
+        // H-06: the notice bar floats in the pane's top-centre overlay, not as
+        // a strip at the window's foot; `content` stacks it with the reader's
+        // find bar.
+        .child(content(state, cx, kit, layer).grow(1.0).min_h(0.0))
 }
 
 /// The Share menu under its toolbar button (X-01, X-06).
@@ -781,11 +780,41 @@ fn tab_list_button(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) -> El {
     menu.build(kit, layer)
 }
 
-fn content(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit) -> El {
-    match state.active_tab() {
-        Some(tab @ Tab { source: TabSource::Document(_), .. }) => document_view(tab, state, cx, kit),
+fn content(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, layer: &mut Vec<El>) -> El {
+    let mut pane = col().key("content-pane").w_full().h_full().min_h(0.0);
+    pane = pane.child(match state.active_tab() {
+        Some(tab @ Tab { source: TabSource::Document(_), .. }) => document_view(tab, state, cx, kit, layer),
         Some(Tab { source: TabSource::Start, .. }) | None => start_page(state, kit),
+    });
+    if let Some(top) = pane_top_overlay(state, kit) {
+        pane = pane.child(top);
     }
+    pane
+}
+
+/// H-06: the pane's top-centre messages.
+///
+/// The notice bar and the reader's floating find bar share one pinned column,
+/// so they stack and never overlap whatever their heights are, and the notice
+/// is first — the top centre of the pane. Both step below the section line
+/// while it shows, as the find bar already did.
+fn pane_top_overlay(state: &WindowState, kit: &Kit) -> Option<El> {
+    let notice = state.ui.notice.as_ref();
+    let viewer = state.active_tab().is_some_and(|tab| tab.view.mode == Mode::Viewer);
+    let find =
+        state.active_tab().filter(|tab| viewer && tab.view.reader_find.open).map(|tab| reader_find_bar(tab, kit));
+    if notice.is_none() && find.is_none() {
+        return None;
+    }
+    let top = if viewer && state.section_line.visible() { 10.0 + crate::section::SECTION_LINE_HEIGHT } else { 10.0 };
+    let mut stack = col().key("pane-top-stack").pin(Some(0.0), Some(top), Some(0.0), None).items_center().gap(8.0);
+    if let Some(notice) = notice {
+        stack = stack.child(notice_bar(notice, kit));
+    }
+    if let Some(find) = find {
+        stack = stack.child(find);
+    }
+    Some(stack)
 }
 
 fn start_page(state: &WindowState, kit: &Kit) -> El {
@@ -922,16 +951,18 @@ fn recents_panel(state: &WindowState, kit: &Kit) -> El {
             .focusable(true)
             .cursor(rune::Cursor::Pointer)
             .on_press_tx(move |state: &mut WindowState, tx: &mut Tx| {
-                state.open_path(path.clone());
-                // The new tab must draw at its own place on this frame, not at
-                // the offset the shared article viewport still carries.
-                state.apply_pending_scroll(tx);
+                // T-12: the same four placements as every other clickable
+                // document: plain in front, Ctrl or middle behind,
+                // Ctrl+Shift in front, Shift in a new window.
+                let placement = crate::links::LinkPlacement::for_click(tx.mods(), tx.button());
+                state.open_recent_placed(path.clone(), placement, tx);
             });
-        // H-02: a middle click opens the file behind the current tab, as the
-        // browser rows and palette files do.
+        // H-02/T-12: a middle click opens the file behind the current tab, as
+        // the browser rows and palette files do.
         let background = recent.path.clone();
-        line = line.on_middle_press(move |state: &mut WindowState, _: &mut Tx| {
-            state.open_path_background(background.clone());
+        line = line.on_middle_press(move |state: &mut WindowState, tx: &mut Tx| {
+            let placement = crate::links::LinkPlacement::for_click(rune::Mods::default(), PointerButton::Middle);
+            state.open_recent_placed(background.clone(), placement, tx);
         });
         line = line
             .child(icon(&icons::DOCUMENT, 16.0).color(c.icon_muted))
@@ -974,7 +1005,7 @@ fn relative_time(opened_at: u64, now: u64) -> Option<String> {
     })
 }
 
-fn document_view(tab: &Tab, state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit) -> El {
+fn document_view(tab: &Tab, state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, layer: &mut Vec<El>) -> El {
     let Some(doc) = tab.document() else { return start_page(state, kit) };
     let status = doc.status.borrow().clone();
     match status {
@@ -986,7 +1017,7 @@ fn document_view(tab: &Tab, state: &WindowState, cx: &mut Cx<WindowState>, kit: 
         // preview (M-34). A tab in edit mode shows the source and its preview.
         DocStatus::Ready => {
             if tab.view.mode == Mode::Editor && tab.view.editor.is_some() {
-                return editor_view(tab, doc, state, cx, kit);
+                return editor_view(tab, doc, state, cx, kit, layer);
             }
             match &tab.view.reader {
                 Some(model) => reader_pane(doc, model, tab, state, cx, kit),
@@ -1007,7 +1038,14 @@ fn document_view(tab: &Tab, state: &WindowState, cx: &mut Cx<WindowState>, kit: 
 /// Edit mode: source on the left, live preview on the right, with a draggable
 /// divider; below 760 pt the source alone, with the preview one toggle away
 /// (E-02).
-fn editor_view(tab: &Tab, doc: &lmdv_core::Document, state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit) -> El {
+fn editor_view(
+    tab: &Tab,
+    doc: &lmdv_core::Document,
+    state: &WindowState,
+    cx: &mut Cx<WindowState>,
+    kit: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
     let width = cx.layout_size("window-body").map_or(1100.0, |size| size[0]);
     let wide = width >= NARROW_SPLIT_WIDTH;
     if !wide {
@@ -1019,7 +1057,7 @@ fn editor_view(tab: &Tab, doc: &lmdv_core::Document, state: &WindowState, cx: &m
                 .w_full()
                 .h_full()
                 .min_h(0.0)
-                .child(source_editor(cx, tab, state, kit, true));
+                .child(source_editor(cx, tab, state, kit, true, layer));
         }
         let preview: El = match &tab.view.reader {
             Some(model) => reader_article(doc, model, tab, state, cx, kit),
@@ -1053,7 +1091,7 @@ fn editor_view(tab: &Tab, doc: &lmdv_core::Document, state: &WindowState, cx: &m
             .child(col().grow(1.0).min_h(0.0).child(preview));
     }
     let show_preview = state.editor.preview_visible;
-    let source = source_editor(cx, tab, state, kit, false);
+    let source = source_editor(cx, tab, state, kit, false, layer);
     if !show_preview {
         return col().key("editor-single").w_full().h_full().min_h(0.0).child(source);
     }
@@ -1088,7 +1126,14 @@ fn editor_view(tab: &Tab, doc: &lmdv_core::Document, state: &WindowState, cx: &m
 }
 
 /// The source field inside its scroll viewport (6.2).
-fn source_editor(cx: &Cx<WindowState>, tab: &Tab, state: &WindowState, kit: &Kit, narrow: bool) -> El {
+fn source_editor(
+    cx: &Cx<WindowState>,
+    tab: &Tab,
+    state: &WindowState,
+    kit: &Kit,
+    narrow: bool,
+    layer: &mut Vec<El>,
+) -> El {
     let c = &kit.c;
     let Some(editor) = tab.view.editor.as_ref() else {
         return status_card(
@@ -1204,7 +1249,7 @@ fn source_editor(cx: &Cx<WindowState>, tab: &Tab, state: &WindowState, kit: &Kit
     // P6-PREF: the Editor section's format-bar switch hides the bar (and its
     // rule) without leaving a gap. The keymap and slash menu keep working.
     if state.shared().prefs().editor.format_bar {
-        pane = pane.child(el().w_full().h(1.0).fill(c.border_muted)).child(format_bar(tab, kit));
+        pane = pane.child(el().w_full().h(1.0).fill(c.border_muted)).child(format_bar(tab, state, kit, layer));
     }
     if tab.view.find_bar.open {
         pane = pane.child(find_bar(tab, state, kit));
@@ -1307,9 +1352,14 @@ fn block_field_row(
 /// The format bar above the source (E-22): inline marks, headings and the
 /// block/list groups. Buttons dispatch the same commands as the keymap and the
 /// `/` menu; their pressed state comes from the selection.
-fn format_bar(tab: &Tab, kit: &Kit) -> El {
+///
+/// E-22's two dropdowns sit after the list buttons: **Insert** owns the block
+/// inserts (the bar no longer repeats them as eight buttons) and **Tools** owns
+/// find/replace, go-to-line, the line commands and spellcheck. The slash menu
+/// and the keymap keep their own paths to the same commands.
+fn format_bar(tab: &Tab, state: &WindowState, kit: &Kit, layer: &mut Vec<El>) -> El {
     let c = &kit.c;
-    let state = crate::edit_ui::format_state(tab);
+    let format = crate::edit_ui::format_state(tab);
     let inline = row()
         .key("format-inline")
         .w_full()
@@ -1317,16 +1367,36 @@ fn format_bar(tab: &Tab, kit: &Kit) -> El {
         .py(3.0)
         .gap(2.0)
         .center_y()
-        .child(format_button("B", lmdv_i18n::t!("cmd.bold"), "Ctrl+B", "edit.bold", state.bold, kit))
-        .child(format_button("I", lmdv_i18n::t!("cmd.italic"), "Ctrl+I", "edit.italic", state.italic, kit))
-        .child(format_button("S", lmdv_i18n::t!("cmd.strike"), "Ctrl+Shift+X", "edit.strike", state.strike, kit))
-        .child(format_button("Code", lmdv_i18n::t!("cmd.code"), "Ctrl+Shift+M", "edit.code", state.code, kit))
+        .child(format_button("B", lmdv_i18n::t!("cmd.bold"), "Ctrl+B", "edit.bold", format.bold, kit))
+        .child(format_button("I", lmdv_i18n::t!("cmd.italic"), "Ctrl+I", "edit.italic", format.italic, kit))
+        .child(format_button("S", lmdv_i18n::t!("cmd.strike"), "Ctrl+Shift+X", "edit.strike", format.strike, kit))
+        .child(format_button("Code", lmdv_i18n::t!("cmd.code"), "Ctrl+Shift+M", "edit.code", format.code, kit))
         .child(format_button("Link", lmdv_i18n::t!("cmd.link"), "Ctrl+K", "edit.link", false, kit))
         .child(group_divider(kit))
-        .child(format_button("Text", lmdv_i18n::t!("cmd.paragraph"), "", "edit.paragraph", state.heading == 0, kit))
-        .child(format_button("H1", lmdv_i18n::t!("cmd.h1"), "Ctrl+1", "edit.heading-1", state.heading == 1, kit))
-        .child(format_button("H2", lmdv_i18n::t!("cmd.h2"), "Ctrl+2", "edit.heading-2", state.heading == 2, kit))
-        .child(format_button("H3", lmdv_i18n::t!("cmd.h3"), "Ctrl+3", "edit.heading-3", state.heading == 3, kit));
+        .child(format_button("Text", lmdv_i18n::t!("cmd.paragraph"), "", "edit.paragraph", format.heading == 0, kit))
+        .child(format_button("H1", lmdv_i18n::t!("cmd.h1"), "Ctrl+1", "edit.heading-1", format.heading == 1, kit))
+        .child(format_button("H2", lmdv_i18n::t!("cmd.h2"), "Ctrl+2", "edit.heading-2", format.heading == 2, kit))
+        .child(format_button("H3", lmdv_i18n::t!("cmd.h3"), "Ctrl+3", "edit.heading-3", format.heading == 3, kit));
+    let insert = format_menu_button(
+        FormatMenu::Insert,
+        FORMAT_INSERT_MENU_KEY,
+        lmdv_i18n::t!("fb.insert"),
+        lmdv_i18n::t!("fb.insertHint"),
+        &crate::edit_ui::FORMAT_INSERT_ROWS,
+        state,
+        kit,
+        layer,
+    );
+    let tools = format_menu_button(
+        FormatMenu::Tools,
+        FORMAT_TOOLS_MENU_KEY,
+        lmdv_i18n::t!("fb.tools"),
+        lmdv_i18n::t!("fb.toolsHint"),
+        &crate::edit_ui::FORMAT_TOOLS_ROWS,
+        state,
+        kit,
+        layer,
+    );
     let blocks = row()
         .key("format-blocks")
         .w_full()
@@ -1334,22 +1404,18 @@ fn format_bar(tab: &Tab, kit: &Kit) -> El {
         .py(3.0)
         .gap(2.0)
         .center_y()
-        .child(format_button("•", lmdv_i18n::t!("cmd.bullet"), "", "edit.list-bullet", state.bullet, kit))
-        .child(format_button("1.", lmdv_i18n::t!("cmd.ordered"), "", "edit.list-ordered", state.ordered, kit))
-        .child(format_button("[ ]", lmdv_i18n::t!("cmd.task"), "", "edit.list-task", state.task, kit))
-        .child(format_button(">", lmdv_i18n::t!("cmd.quote"), "", "edit.quote", state.quote, kit))
+        .child(format_button("•", lmdv_i18n::t!("cmd.bullet"), "", "edit.list-bullet", format.bullet, kit))
+        .child(format_button("1.", lmdv_i18n::t!("cmd.ordered"), "", "edit.list-ordered", format.ordered, kit))
+        .child(format_button("[ ]", lmdv_i18n::t!("cmd.task"), "", "edit.list-task", format.task, kit))
+        .child(format_button(">", lmdv_i18n::t!("cmd.quote"), "", "edit.quote", format.quote, kit))
         .child(group_divider(kit))
-        .child(format_button("Tbl", lmdv_i18n::t!("cmd.table"), "", "edit.insert-table", false, kit))
-        .child(format_button("{}", lmdv_i18n::t!("cmd.codeblock"), "", "edit.insert-code-block", false, kit))
-        .child(format_button("fx", lmdv_i18n::t!("cmd.math"), "", "edit.insert-math", false, kit))
-        .child(format_button("Mmd", lmdv_i18n::t!("cmd.diagram"), "", "edit.insert-mermaid", false, kit))
-        .child(format_button("Note", lmdv_i18n::t!("cmd.note"), "", "edit.insert-note", false, kit))
-        .child(format_button("Tip", lmdv_i18n::t!("cmd.tip"), "", "edit.insert-tip", false, kit))
-        .child(format_button("Warn", lmdv_i18n::t!("cmd.warning"), "", "edit.insert-warning", false, kit))
-        .child(format_button("—", lmdv_i18n::t!("cmd.divider"), "", "edit.insert-divider", false, kit))
+        .child(insert)
+        .child(tools)
         .child(row().grow(1.0))
         .child(
-            text(format!("/ {}", lmdv_i18n::t!("keys.slash")))
+            // E-22's hint is plain text: `fb.slashHint` carries `<kbd>` markup
+            // for the help pages, which `text()` would draw literally.
+            text(lmdv_i18n::t!("fb.slashPlain"))
                 .key("format-hint")
                 .font(kit.ty.small)
                 .color(c.text_faint)
@@ -1357,6 +1423,83 @@ fn format_bar(tab: &Tab, kit: &Kit) -> El {
                 .shrink(),
         );
     col().key("format-bar").w_full().child(inline).child(blocks).child(el().w_full().h(1.0).fill(c.border_muted))
+}
+
+/// The keys of the format bar's two dropdown surfaces (E-22).
+pub const FORMAT_INSERT_MENU_KEY: &str = "format-insert";
+/// The Tools dropdown.
+pub const FORMAT_TOOLS_MENU_KEY: &str = "format-tools";
+
+/// One format-bar dropdown: its trigger stays in the bar, the rows mount in the
+/// window's layer like every other menu. A chosen row closes the menu and runs
+/// the same command the keymap and the `/` menu use.
+#[allow(clippy::too_many_arguments)]
+fn format_menu_button(
+    menu: FormatMenu,
+    key: &'static str,
+    label: &str,
+    hint: &str,
+    rows: &[FormatMenuRow],
+    state: &WindowState,
+    kit: &Kit,
+    layer: &mut Vec<El>,
+) -> El {
+    let open = state.format_menu() == Some(menu);
+    let name = label.to_owned();
+    let button = Button::new(label.to_owned())
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Small)
+        .expanded(open)
+        .help(hint.to_owned())
+        // A downward chevron marks a dropdown; the label keeps the name.
+        .label_with(move |font, ink| {
+            row()
+                .gap(4.0)
+                .items_center()
+                .child(text(name.clone()).font(font).color(ink))
+                .child(text("⌄").font(font).color(ink))
+        })
+        .on_press(move |state: &mut WindowState| state.toggle_format_menu(menu));
+    let trigger = button.build(kit).key(key);
+    let mut surface = Menu::new(key)
+        .trigger(trigger)
+        .open(open)
+        .placement(Placement::BottomStart)
+        .min_width(250.0)
+        .on_close(|state: &mut WindowState| state.close_format_menu());
+    let separators: &[usize] =
+        if menu == FormatMenu::Tools { &[3, crate::edit_ui::FORMAT_TOOLS_ROWS.len() - 1] } else { &[] };
+    for (index, row) in rows.iter().enumerate() {
+        if separators.contains(&index) {
+            surface = surface.separator();
+        }
+        let mut item = MenuItem::new(row.label()).disabled(format_menu_row_disabled(*row, state));
+        if let Some(shortcut) = row.shortcut() {
+            item = item.shortcut(shortcut);
+        }
+        if let Some(checked) = format_menu_row_checked(*row, state) {
+            item = item.checked(checked);
+        }
+        let row = *row;
+        surface = surface.item(item.on_select_tx(move |state: &mut WindowState, tx: &mut Tx| {
+            state.run_format_menu_row(row, tx);
+        }));
+    }
+    surface.build(kit, layer)
+}
+
+/// E-SPELL's Tools row is disabled without a dictionary, as the Settings row is
+/// hidden without one.
+fn format_menu_row_disabled(row: FormatMenuRow, state: &WindowState) -> bool {
+    row == FormatMenuRow::Spellcheck && state.spell_availability().is_none()
+}
+
+/// The pressed state a checkable menu row shows, if it is one.
+fn format_menu_row_checked(row: FormatMenuRow, state: &WindowState) -> Option<bool> {
+    match row {
+        FormatMenuRow::Spellcheck => Some(state.shared().prefs().editor.spellcheck),
+        _ => None,
+    }
 }
 
 /// One format-bar button: a compact visible glyph and the full accessible
@@ -1823,11 +1966,12 @@ fn editor_dialog(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
         .build(kit, layer);
 }
 
-/// The reading article with the floating find bar over it (R-16–R-19).
+/// The reading article with the section line and progress hairline over it;
+/// the floating find bar lives in the pane's top-centre stack (H-06/R-16–R-19).
 ///
-/// The bar is out of flow at the top of the pane, so the article keeps the full
-/// viewport; while it shows, the reader's scroll margin reserves its height so
-/// `Tx::scroll_into_view` lands a match below it (R-19).
+/// The stacks are out of flow at the top of the pane, so the article keeps the
+/// full viewport; while the find bar shows, the reader's scroll margin reserves
+/// its band so `Tx::scroll_into_view` lands a match below it (R-19).
 fn reader_pane(
     doc: &lmdv_core::Document,
     model: &std::sync::Arc<lmdv_md::MdDoc>,
@@ -1843,7 +1987,6 @@ fn reader_pane(
     let viewer = tab.view.mode == Mode::Viewer;
     let reader_width = cx.layout_size(reader::ARTICLE_SCROLL_KEY).map_or(reader::READER_MAX_WIDTH, |size| size[0]);
     let line = if viewer { state.section_line_overlay(kit, reader_width) } else { None };
-    let line_visible = line.is_some();
     let progress = if viewer { state.progress_overlay(kit) } else { None };
     let shield = if viewer { state.section_swallow_shield(state.ui.last_now) } else { None };
     let mut pane = col().key("reader-pane").w_full().h_full().min_h(0.0).child(article);
@@ -1855,15 +1998,6 @@ fn reader_pane(
     }
     if let Some(shield) = shield {
         pane = pane.child(shield);
-    }
-    if tab.view.reader_find.open {
-        let bar = reader_find_bar(tab, kit);
-        // The floating find bar steps below the section line while it shows
-        // (the original's `ui.css` does the same).
-        let top = if line_visible { 10.0 + crate::section::SECTION_LINE_HEIGHT } else { 10.0 };
-        pane = pane.child(
-            row().key("reader-find-layer").pin(Some(0.0), Some(top), Some(0.0), None).justify_center().child(bar),
-        );
     }
     pane
 }
@@ -2251,7 +2385,7 @@ fn drop_overlay(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
     );
 }
 
-/// The status bar at the foot of the window (H-06/H-07/A-10).
+/// The notice card at the top centre of the pane (H-06/H-07/A-10).
 ///
 /// One message at a time, with its kind's icon and colour, an optional action
 /// and the dismiss ×. The message is the live region: non-errors are a polite
@@ -2261,6 +2395,10 @@ fn drop_overlay(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
 /// way Rune's own `Tx::announce` spells it, without blanking the bar for a
 /// frame. The action and dismiss labels sit outside the region, so a reader
 /// hears the message alone.
+///
+/// It floats over the article (a card, not a full-width strip), so the reading
+/// flow never shifts when a message appears; [`pane_top_overlay`] stacks it
+/// with the reader's find bar so the two never overlap.
 fn notice_bar(notice: &Notice, kit: &Kit) -> El {
     let c = &kit.c;
     let (state, glyph) = match notice.kind {
@@ -2272,12 +2410,16 @@ fn notice_bar(notice: &Notice, kit: &Kit) -> El {
     let spoken = if notice.seq.is_multiple_of(2) { format!("{}\u{200B}", notice.text) } else { notice.text.clone() };
     let mut bar = row()
         .key("notice")
-        .w_full()
-        .px(16.0)
-        .py(8.0)
-        .gap(12.0)
+        .px(12.0)
+        .py(7.0)
+        .gap(10.0)
         .center_y()
+        .max_w(620.0)
+        .w_frac(0.9)
+        .radius(kit.radius.md)
         .fill(state.bg)
+        .border(1.0, state.border)
+        .shadow(4.0, 16.0, rune::Color { r: 0.0, g: 0.0, b: 0.0, a: 0.22 })
         .child(icon(glyph, 14.0).color(state.icon).key("notice-icon").a11y_hidden())
         .child(
             text(spoken)
@@ -2632,6 +2774,20 @@ pub fn scene_reader_find(state: &mut WindowState) {
     state.show_reader_find("native");
 }
 
+/// H-06: a warning with its action over the reader, stacked above the reading
+/// find bar at the top centre of the pane. The headless snapshot and tree show
+/// the card, its icon, its action, its dismiss × and the two live regions.
+pub fn scene_notice_stack(state: &mut WindowState) {
+    scene_reader(state);
+    state.show_reader_find("native");
+    state.show_notice(
+        lmdv_i18n::t!("msg.notMarkdown", "name" => "diagram.svg").to_owned(),
+        NoticeKind::Warning,
+        Some(crate::window::NoticeAction::ShowInFolder(std::path::PathBuf::from("/tmp"))),
+        600.0,
+    );
+}
+
 /// The reader with a `--line` flash painted on one line, for the headless
 /// snapshot of the [`HighlightKind::Line`](lmdv_render::HighlightKind) paint.
 pub fn scene_reader_line(state: &mut WindowState) {
@@ -2856,6 +3012,25 @@ pub fn scene_editor(state: &mut WindowState) {
     state.open_find(true, &mut tx);
     state.set_find_query("source");
     state.set_find_replace("buffer");
+    state.ui.notice = None;
+    state.ui.help = None;
+}
+
+/// E-22: the format bar with its Insert menu open, next to the Tools trigger
+/// and the plain “Type / for blocks” hint, for the headless snapshot and tree
+/// gate.
+pub fn scene_editor_menus(state: &mut WindowState) {
+    state.reset_to_start_page();
+    state.open_synthetic("Editing notes", EDITOR_MARKDOWN);
+    state.left.set_open(false);
+    state.right.set_open(false);
+    if let Some(tab) = state.active_tab_mut() {
+        tab.view.outline_hidden = true;
+    }
+    state.sync_outline();
+    let mut tx = Tx::default();
+    state.enter_editor(None, &mut tx);
+    state.toggle_format_menu(crate::edit_ui::FormatMenu::Insert);
     state.ui.notice = None;
     state.ui.help = None;
 }
@@ -3634,6 +3809,58 @@ mod tests {
         let [nx, ny, nw, nh] = notice.rect;
         let overlap = fx < nx + nw && nx < fx + fw && fy < ny + nh && ny < fy + fh;
         assert!(!overlap, "H-06: the find bar {find:?} and the notice {notice:?} never overlap");
+    }
+
+    /// H-06: the notice is the top centre of the content pane — kind icon and
+    /// colour, optional action, dismiss ×, polite live region — and it stacks
+    /// above the reader's floating find bar without either covering the other.
+    #[test]
+    fn the_notice_floats_at_the_pane_top_centre_and_stacks_above_the_reader_find_bar() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("Notice", "# One\n\nSome text to find here.\n");
+        state.show_reader_find("here");
+        state.show_notice(
+            lmdv_i18n::t!("msg.notMarkdown", "name" => "diagram.svg").to_owned(),
+            NoticeKind::Warning,
+            Some(crate::window::NoticeAction::ShowInFolder(std::path::PathBuf::from("/tmp"))),
+            60.0,
+        );
+        let elements = render(state);
+        let pane = by_key(&elements, "content-pane").rect;
+        let notice = by_key(&elements, "notice").rect;
+        let find = by_key(&elements, "reader-find-bar").rect;
+        assert_eq!(by_key(&elements, "notice-text").role, "status", "a warning is a polite live region");
+        assert!(has_key(&elements, "notice-icon"), "the kind draws its icon");
+        assert!(has_key(&elements, "notice-action"), "the warning keeps its action");
+        assert!(has_key(&elements, "dismiss-notice"), "and its dismiss ×");
+        assert!(
+            notice[0] >= pane[0] - 1.0 && notice[0] + notice[2] <= pane[0] + pane[2] + 1.0,
+            "the notice stays inside the pane: notice {notice:?}, pane {pane:?}"
+        );
+        let notice_centre = notice[0] + notice[2] * 0.5;
+        let pane_centre = pane[0] + pane[2] * 0.5;
+        assert!(
+            (notice_centre - pane_centre).abs() < 80.0,
+            "the notice is centred over the pane: {notice_centre} vs {pane_centre}"
+        );
+        assert!(notice[1] - pane[1] < 80.0, "the notice is at the pane's top: {} below it", notice[1] - pane[1]);
+        let [fx, fy, fw, fh] = find;
+        let [nx, ny, nw, nh] = notice;
+        assert!(
+            !(fx < nx + nw && nx < fx + fw && fy < ny + nh && ny < fy + fh),
+            "the notice {notice:?} and the find bar {find:?} never overlap"
+        );
+        assert!(find[1] >= notice[1] + notice[3], "the find bar stacks below the notice: {find:?} vs {notice:?}");
+
+        // Without a notice the find bar keeps the pane's top on its own.
+        let mut state = window(&temp);
+        state.open_synthetic("Find", "# One\n\nSome text to find here.\n");
+        state.show_reader_find("here");
+        let elements = render(state);
+        let pane = by_key(&elements, "content-pane").rect;
+        let find = by_key(&elements, "reader-find-bar").rect;
+        assert!((find[1] - (pane[1] + 10.0)).abs() < 2.0, "the lone find bar sits at the pane's top: {find:?}");
     }
 
     #[test]

@@ -285,6 +285,34 @@ fn a_draft_equal_to_the_file_is_dropped_silently() {
 }
 
 #[test]
+fn a_draft_is_not_offered_while_another_window_holds_the_edit_lease() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("shared-draft.md");
+    std::fs::write(&path, "on disk\n").unwrap();
+    let (_shared, mut first, mut second) = two_windows(&temp);
+    open_loaded(&mut first, &path);
+    open_loaded(&mut second, &path);
+    enter_editor(&mut second);
+    let doc = second.active_tab().and_then(Tab::document).cloned().expect("the shared document");
+    assert_eq!(doc.lease_holder().map(|lease| lease.window), Some(second.id()), "the second window edits it");
+
+    let key = path.to_string_lossy().into_owned();
+    let draft = || Draft::new("draft text\n", "on disk\n", 1);
+    assert!(
+        !first.handle_draft_loaded(doc.id, key.clone(), Some(draft()), None),
+        "E-17: another window's edit lease suppresses the offer"
+    );
+    assert!(first.prompt().is_none(), "nothing was offered over the other window's buffer");
+
+    // Once that window leaves edit mode the draft is offered as usual.
+    let mut tx = Tx::default();
+    second.leave_editor(&mut tx);
+    assert!(doc.lease_holder().is_none(), "the lease was released");
+    assert!(first.handle_draft_loaded(doc.id, key, Some(draft()), None), "the draft is offered now");
+    assert!(matches!(first.prompt(), Some(Prompt::Draft { .. })));
+}
+
+#[test]
 fn a_clean_document_reloads_on_a_watch_change_and_keeps_its_anchor() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("watched.md");
@@ -365,6 +393,153 @@ fn an_mtime_only_touch_updates_the_baseline_without_reloading() {
     poll_until(&mut state, "the real reload", |state| {
         state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
     });
+}
+
+#[test]
+fn a_reopen_of_a_dirty_file_keeps_the_buffer_and_asks_about_a_newer_disk_copy() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("reopen.md");
+    std::fs::write(&path, "on disk\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    type_text(&mut state, "edited ");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    let revision = doc.revision();
+    assert_eq!(doc.text().text(), "edited on disk\n");
+
+    // A same-spelling reopen with the same disk: nothing asks, nothing moves.
+    state.open_path(path.clone());
+    poll_once(&mut state);
+    assert!(state.prompt().is_none(), "an unchanged disk asks nothing");
+    assert_eq!(doc.text().text(), "edited on disk\n", "the dirty buffer stayed");
+
+    // The disk changed: the buffer is still never read over; the existing
+    // file-changed question and the header mark say so instead.
+    std::fs::write(&path, "changed on disk\n").unwrap();
+    state.open_path(path.clone());
+    poll_until(&mut state, "the reopen's disk check", |state| {
+        matches!(state.prompt(), Some(Prompt::DiskChanged { .. }))
+    });
+    assert_eq!(doc.text().text(), "edited on disk\n", "E-15: a dirty buffer is never read over");
+    assert_eq!(doc.revision(), revision, "the reopen did not replace the buffer");
+    assert!(state.active_tab().is_some_and(|tab| tab.view.disk_changed), "the header says the disk changed");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "changed on disk\n", "nothing was written");
+}
+
+#[test]
+fn a_dirty_reopen_whose_buffer_already_matches_the_disk_keeps_the_buffer_dirty() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("matched.md");
+    std::fs::write(&path, "on disk\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    type_text(&mut state, "edited ");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    assert!(doc.is_dirty());
+
+    // Another program writes exactly what the dirty buffer holds. The saved
+    // base is still older, so the buffer stays the user's to save; only the
+    // baseline metadata follows the disk. The watch is dropped so this test
+    // sees the reopen's own answer, not the watcher's concurrent one.
+    state.shared().unwatch_path(&path);
+    std::fs::write(&path, "edited on disk\n").unwrap();
+    state.open_path(path.clone());
+    poll_until(&mut state, "the reopen's disk check", |state| {
+        state.editor.reopen_checks.is_empty() && state.worker().is_empty()
+    });
+    assert_eq!(doc.text().text(), "edited on disk\n");
+    assert!(doc.is_dirty(), "the older saved base keeps the buffer dirty");
+    assert!(state.prompt().is_none(), "an equal buffer needs no conflict question");
+    assert_eq!(
+        doc.saved.borrow().meta.len,
+        std::fs::metadata(&path).unwrap().len(),
+        "the baseline metadata followed the disk"
+    );
+}
+
+#[test]
+fn a_reopen_of_a_clean_file_reloads_it_at_its_reading_anchor() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("clean.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    if let Some(tab) = state.active_tab_mut() {
+        tab.view.anchor = ScrollAnchor { id: String::new(), offset: 120.0 };
+    }
+
+    std::fs::write(&path, "two\n").unwrap();
+    state.open_path(path.clone());
+    poll_until(&mut state, "the reopen's reload", |state| {
+        state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
+    });
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    assert_eq!(state.active_tab().map(|tab| tab.view.anchor.offset), Some(120.0), "the reading anchor survived");
+    assert!(!state.active_tab().is_some_and(|tab| tab.view.disk_changed), "a clean reload clears the mark");
+}
+
+#[test]
+fn a_reopen_without_a_disk_change_keeps_the_buffer_and_its_parse() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("same.md");
+    std::fs::write(&path, "one\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    poll_until(&mut state, "the first parse", |state| {
+        state.active_tab().is_some_and(|tab| tab.view.reader_revision.is_some())
+    });
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    let revision = doc.revision();
+    let parsed = state.active_tab().and_then(|tab| tab.view.reader_revision);
+
+    state.open_path(path);
+    poll_until(&mut state, "the reopen's check", |state| {
+        state.worker().is_empty() && state.editor.reopen_checks.is_empty()
+    });
+    assert_eq!(doc.revision(), revision, "the same text was not reparsed or replaced");
+    assert_eq!(state.active_tab().and_then(|tab| tab.view.reader_revision), parsed);
+    assert!(state.prompt().is_none());
+    assert!(state.ui.notice.is_none());
+}
+
+#[test]
+fn a_line_target_on_an_open_editing_tab_scrolls_the_source_and_the_preview() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("lines.md");
+    std::fs::write(&path, scrolling_markdown(80)).unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    state.editor.sync_suppressed_until = None;
+    state.editor.last_offset = Some(0.0);
+    state.editor.last_caret = Some(0);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(article_offset(&runtime), 0.0, "the preview starts at the top");
+    assert_eq!(runtime.state.editor.scroll.get().offset, 0.0);
+
+    // The same file reopened with `--line`: the tab is already in front, so the
+    // target has to reach both panes by itself.
+    runtime.update(|state, _| {
+        state.open_launch(&lmdv_io::Launch { path: Some(path.clone()), line: Some(60), ..lmdv_io::Launch::default() });
+    });
+    for _ in 0..10 {
+        runtime.frame(1.0 / 60.0);
+    }
+    assert!(runtime.state.editor.scroll.get().offset > 100.0, "the source scrolled to the line");
+    assert!(article_offset(&runtime) > 100.0, "the preview scrolled to the block");
+    let caret_line = {
+        let editor = runtime.state.active_tab().and_then(|tab| tab.view.editor.as_ref()).expect("the session");
+        let caret = editor.selection().start;
+        let text = editor.text();
+        text[..caret.min(text.len())].bytes().filter(|&byte| byte == b'\n').count() + 1
+    };
+    assert_eq!(caret_line, 60, "the source caret moved to the requested line");
 }
 
 #[test]

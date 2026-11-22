@@ -291,6 +291,7 @@
   "fb.tools": "Werkzeuge",
   "fb.toolsHint": "Werkzeuge: Suchen und Ersetzen, Zeilenbefehle, Rechtschreibung",
   "fb.slashHint": "<kbd>/</kbd> tippen für Blöcke",
+  "fb.slashPlain": "/ tippen für Blöcke",
   "ins.table": "3 Spalten, 2 Zeilen",
   "ins.diagram": "Mermaid-Flussdiagramm",
   "ins.math": "KaTeX-Formelblock",

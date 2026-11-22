@@ -1,7 +1,7 @@
 # Status
 
-**Updated:** 2026-11-18
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (200 done, 52 substitutes, 61 partial, 11 missing, 18 n/a), the P0 missing and the four P0 partial batches are implemented, the default Markdown handler covers Windows and Linux, the scroll/article-reuse fix is in, and v0.8.0 is released. Remaining: 18 P0 partials, the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
+**Updated:** 2026-11-22
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (205 done, 52 substitutes, 56 partial, 11 missing, 18 n/a), the P0 missing and the app-side P0 cleanup are implemented, the default Markdown handler covers Windows and Linux, the scroll/article-reuse fix is in, and v0.8.0 is released. Remaining: 13 P0 partials (mostly Rune/rune-kit or held export items), the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -474,12 +474,22 @@
 - No FPS setting: this Rune rev exposes no present mode or refresh cap, and every surface is already `AutoVsync` (desktop refresh). A row would be inert; the Rune API request is OI-193.
 - Fixture: `tests/fixtures/stress/developer-guide.md` (951 KiB, 10.5k lines, 51 tables, 186 fences); release notes in `docs/releases/v0.8.0.md`.
 
+## P0 cleanup — E-22, H-06, E-15, E-17, T-12 — complete
+
+- E-22: the format bar keeps the inline/heading/list buttons and adds **Insert** (table, code, formula, diagram, three callouts, divider) and **Tools** (find, find & replace, go to line, move/duplicate/delete/select line, spellcheck), with the plain “Type / for blocks” hint. The eight block buttons moved into Insert; `/` and the keymap are unchanged.
+- H-06: one notice card at the top centre of the content pane with the kind icon/colour, action, dismiss ×, `status`/`alert` and polite/assertive live regions. It and the reader find bar share one pinned top-centre column, so they stack without overlap; scene `notice-stack` (also at 480 px). The R-19 find band does not grow by the notice height (OI-163 residual).
+- E-15: a same-spelling reopen checks the disk through `ReloadIntent::ReopenCheck`: dirty keeps the buffer and asks the existing `DiskChanged` question when the disk differs; clean reloads differing text at its reading anchor; identical text is a no-op. A `--line` on an open editing tab moves the source caret and scrolls both panes.
+- E-17: a draft is not offered while another window holds the shared edit lease.
+- T-12: recents take all four click placements; document links already used `LinkPlacement::for_click` + modifiers, so the stale audit claim is corrected. Tree/search were already done.
+- Tests: 14 new; `lmdv-app` lib 983 passed; scenes `editor-menus`, `notice-stack`; locales 634 keys.
+- Audit: 205 done, 52 substitute, 56 partial, 11 missing, 18 n/a; **13 P0 gaps** left.
+
 ## Next up
 
 **Next when work resumes:**
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms; see the scroll section and OI-193).
-2. Triage the 18 P0 gap rows in `docs/PARITY_AUDIT.md` (kit-blocked and small UI items), then D-03 image drop (OI-187) and drag-to-scroll (OI-186).
+2. Close or accept the 13 remaining P0 rows: most need Rune/rune-kit APIs (T-01/T-03/T-19/D-04/I-10/C-01/O-14/L-11) or held export work (X-02/X-05); E-01/E-07/T-26 and H-04 remain app-side. D-03 image drop (OI-187) and drag-to-scroll (OI-186) follow.
 3. The scheduled Rune port to `7a707454` (OI-189, `docs/RUNE_DELTA_2026-11-20.md`).
 4. P7 packaging: LICENSE, three-part reverse-DNS id, installer icon, signed checksums (OI-153); Windows runtime only if it becomes a target (OI-155).
 

@@ -2,7 +2,7 @@
 //!
 //! The six catalogs are the original app's dictionaries plus the document
 //! labels the native reader and exporters draw, in `locales/app/<id>.json`
-//! (633 keys each, `en` is the source locale). The build
+//! (634 keys each, `en` is the source locale). The build
 //! script turns them into a [`rune_i18n::Catalog`] embedded in the binary;
 //! nothing is parsed or allocated at launch.
 //!
@@ -318,7 +318,7 @@ mod tests {
         assert_eq!(ids, EXPECTED_LOCALES);
         assert!(locales().iter().all(|locale| !locale.rtl()));
         assert_eq!(locale_info().id(), "en", "English is the source and starts current");
-        assert_eq!(KEYS.len(), 633);
+        assert_eq!(KEYS.len(), 634);
         assert_eq!(
             PLURALS,
             ["editor.blocks", "editor.lines", "rel.days", "rel.hours", "rel.minutes"],

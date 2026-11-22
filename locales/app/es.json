@@ -291,6 +291,7 @@
   "fb.tools": "Herramientas",
   "fb.toolsHint": "Herramientas: buscar y reemplazar, comandos de línea, ortografía",
   "fb.slashHint": "Escribe <kbd>/</kbd> para los bloques",
+  "fb.slashPlain": "Escribe / para los bloques",
   "ins.table": "3 columnas, 2 filas",
   "ins.diagram": "Diagrama de flujo Mermaid",
   "ins.math": "Bloque de fórmula KaTeX",

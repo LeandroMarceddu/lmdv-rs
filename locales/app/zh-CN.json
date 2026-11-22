@@ -291,6 +291,7 @@
   "fb.tools": "工具",
   "fb.toolsHint": "工具：查找与替换、行命令、拼写检查",
   "fb.slashHint": "输入 <kbd>/</kbd> 插入块",
+  "fb.slashPlain": "输入 / 插入块",
   "ins.table": "3 列 2 行",
   "ins.diagram": "Mermaid 流程图",
   "ins.math": "KaTeX 公式块",

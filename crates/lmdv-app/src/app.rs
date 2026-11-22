@@ -47,6 +47,8 @@ pub const SCENES: &[(&str, Scene)] = &[
     ("browser-menu", view::scene_browser_menu),
     ("share", view::scene_share),
     ("editor", view::scene_editor),
+    ("editor-menus", view::scene_editor_menus),
+    ("notice-stack", view::scene_notice_stack),
     ("editor-block", view::scene_editor_block),
     ("editor-size", view::scene_editor_size),
     ("tab-menu", view::scene_tab_menu),

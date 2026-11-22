@@ -291,6 +291,7 @@
   "fb.tools": "Tools",
   "fb.toolsHint": "Tools: find & replace, line commands, spellcheck",
   "fb.slashHint": "Type <kbd>/</kbd> for blocks",
+  "fb.slashPlain": "Type / for blocks",
   "ins.table": "3 columns, 2 rows",
   "ins.diagram": "Mermaid flowchart",
   "ins.math": "KaTeX formula block",
