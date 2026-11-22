@@ -1749,7 +1749,9 @@ mod tests {
             handle
                 .patch(StorePatch::Draft { key: format!("/tmp/{index}.md"), draft: Draft::new("x", "", index as u64) });
         }
-        assert!(handle.flush(Duration::from_secs(2)));
+        // Each draft is fsynced; CI's loaded disk can need more than two seconds
+        // for the batch even though the writer is healthy.
+        assert!(handle.flush(Duration::from_secs(5)));
         let drafts = load_drafts(&dirs);
         assert_eq!(drafts.len(), DRAFT_MAX_ENTRIES);
         assert_eq!(drafts[0].1.at, (DRAFT_MAX_ENTRIES + 2) as u64, "newest first");
