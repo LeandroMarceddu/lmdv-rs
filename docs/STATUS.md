@@ -497,6 +497,8 @@
 
 **Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. Record any repeat with the run id.
 
+**Known flake (2026-11-22):** CI run 45052468637 (`3d988a0`) failed twice on the Linux gate, each time in an unrelated test: attempt 1, `lmdv-io store::tests::drafts_are_capped_by_count_and_characters` timed out on its 2 s flush (the test passes in 0.07 s locally and in the full gate); attempt 2, `lmdv-app reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` hit the known Rune debug assertion `text_spec.rs:245: a text changed after its shape key was taken` (the same flake as run 44821493750). The app-side batch touches neither `lmdv-io` nor the image/find path. The test alone passed 30 local runs; five local full app-suite runs on two cores passed. The third Linux rerun passed and CI is green on `3d988a0`. If either repeats, raise the store flush timeout and investigate the Rune shape-cache race rather than retrying.
+
 **Known flake (2026-11-21):** the full gate failed once in `lmdv-io instance::tests::a_stale_socket_is_reclaimed_but_a_live_one_is_not` with “a free lock must be primary” under the parallel suite; the test alone and the next full `lmdv-io` run passed. It is a lock-file timing race in the fixture (the server's lock is released in the `Drop` body's field drop), not article/UI behavior. Record any repeat with the gate output.
 
 ## P6-01b — complete
