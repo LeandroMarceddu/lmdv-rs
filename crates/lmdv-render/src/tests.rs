@@ -637,6 +637,76 @@ fn a_tables_header_row_is_keyed_and_sticky() {
     assert_eq!(table.role, "table");
 }
 
+// ---- column widths (M-06, OI-138) ----------------------------------------
+
+fn body_style() -> rune::TextStyle {
+    crate::DocTheme::neutral(false).body
+}
+
+#[test]
+fn a_long_word_widens_its_column_past_the_cap_and_the_table_scrolls() {
+    let word = "word".repeat(40);
+    let tree = Scene::new(&format!("| A | B |\n| - | - |\n| {word} | short |\n")).render();
+    let word_width = rune::text::measure(&word, &[], body_style(), None).0;
+    assert!(word_width > 360.0, "the fixture word is wider than the wrapped-column cap: {word_width}");
+
+    let scroll = tree.by_key("scroll").expect("a table whose word cannot wrap scrolls inside the column");
+    let table = tree.by_key("table").expect("the article's table");
+    assert!(
+        table.rect[2] >= word_width + 16.0,
+        "the column holds its longest word plus padding: {} for a {word_width} pt word",
+        table.rect[2]
+    );
+    assert!(
+        table.rect[2] > scroll.rect[2] + 0.5,
+        "the table overflows the reading column and scrolls: {} in {}",
+        table.rect[2],
+        scroll.rect[2]
+    );
+
+    let text = tree.elements.iter().find(|e| e.text.as_deref() == Some(word.as_str())).expect("the cell's text");
+    assert!(text.rect[2] >= word_width, "the drawn line is as wide as the word: {} for {word_width}", text.rect[2]);
+    assert!(
+        text.rect[0] + text.rect[2] <= table.rect[0] + table.rect[2] + 0.5,
+        "the word stays inside the table: {} past {}",
+        text.rect[0] + text.rect[2],
+        table.rect[0] + table.rect[2]
+    );
+}
+
+#[test]
+fn a_long_code_word_widens_its_table_column_in_the_monospace_face() {
+    let token = "open_path_placed/attach_document_placed".repeat(3);
+    let tree = Scene::new(&format!("| A | B |\n| - | - |\n| `{token}` | short |\n")).render();
+    let body = body_style();
+    let code = rune::TextStyle { size: body.size * 0.9, ..body.mono() };
+    let token_width = rune::text::measure(&token, &[], code, None).0;
+    assert!(token_width > 360.0, "the fixture token is wider than the wrapped-column cap: {token_width}");
+
+    let scroll = tree.by_key("scroll").expect("a table whose code token cannot wrap scrolls inside the column");
+    let table = tree.by_key("table").expect("the article's table");
+    assert!(
+        table.rect[2] >= token_width + 16.0,
+        "the column holds the token in the monospace face plus padding: {} for {token_width}",
+        table.rect[2]
+    );
+    assert!(
+        table.rect[2] > scroll.rect[2] + 0.5,
+        "the table overflows the reading column and scrolls: {} in {}",
+        table.rect[2],
+        scroll.rect[2]
+    );
+
+    let text = tree.elements.iter().find(|e| e.text.as_deref() == Some(token.as_str())).expect("the cell's text");
+    assert!(text.rect[2] >= token_width, "the drawn line is as wide as the token: {} for {token_width}", text.rect[2]);
+    assert!(
+        text.rect[0] + text.rect[2] <= table.rect[0] + table.rect[2] + 0.5,
+        "the token stays inside the table: {} past {}",
+        text.rect[0] + text.rect[2],
+        table.rect[0] + table.rect[2]
+    );
+}
+
 #[test]
 fn every_paragraph_text_reaches_the_tree() {
     for source in [FEATURES, MATH] {

@@ -1,14 +1,15 @@
 //! GFM tables (M-06).
 //!
-//! Columns are sized from their content: at least 56 pt, at most 360 pt, with
-//! wrapping cells. A table wider than the reading column scrolls sideways as a
-//! whole, and its header row sticks to the top of the article viewport when the
-//! app asked for sticky headers, so a long table keeps its labels visible.
-//! `rune-kit`'s data-table component is deliberately not used: a document table
-//! is content, not a grid with sorting and selection state.
+//! Columns are sized from their content: at least 56 pt, with wrapped cells up
+//! to 360 pt wide, but never narrower than their longest unbreakable word. A
+//! table wider than the reading column scrolls sideways as a whole, and its
+//! header row sticks to the top of the article viewport when the app asked for
+//! sticky headers, so a long table keeps its labels visible. `rune-kit`'s
+//! data-table component is deliberately not used: a document table is content,
+//! not a grid with sorting and selection state.
 
-use lmdv_md::{Align as MdAlign, Inline, InlineObjectKind, Table};
-use rune::{Align, El, col, row};
+use lmdv_md::{Align as MdAlign, Inline, InlineObjectKind, InlineStyle, Table};
+use rune::{Align, El, TextStyle, col, row};
 
 use crate::block::Renderer;
 use crate::inline::InlineOptions;
@@ -16,56 +17,61 @@ use crate::{TableCell, TableLink, TableRef};
 
 /// The narrowest a column may shrink to while fitting the reading column.
 const MIN_COLUMN: f32 = 56.0;
-/// The widest a column grows to before its cells wrap.
+/// The widest wrapped content grows to before its cells wrap.
+///
+/// This caps a column's natural width only: the longest word a column cannot
+/// break may be wider, and then the table grows and scrolls (OI-138).
 const MAX_COLUMN: f32 = 360.0;
 /// Horizontal cell padding on each side.
 const PAD_X: f32 = 8.0;
+/// The body size's share a code span takes, as `inline.rs` draws it.
+const CODE_SIZE: f32 = 0.9;
 
 impl Renderer<'_> {
     /// One table, keyed inside its block wrapper.
     pub(crate) fn table(&self, table: &Table) -> El {
         let columns = table.head.len().max(table.rows.iter().map(Vec::len).max().unwrap_or(0)).max(1);
         let mut widths = vec![MIN_COLUMN; columns];
+        let mut minimums = vec![MIN_COLUMN; columns];
         for (column, width) in widths.iter_mut().enumerate() {
             let mut widest = MIN_COLUMN;
+            let mut narrowest = MIN_COLUMN;
             if let Some(cell) = table.head.get(column) {
                 widest = widest.max(self.cell_width(cell, true));
+                narrowest = narrowest.max(self.cell_min_width(cell, true));
             }
             for row in &table.rows {
                 if let Some(cell) = row.get(column) {
                     widest = widest.max(self.cell_width(cell, false));
+                    narrowest = narrowest.max(self.cell_min_width(cell, false));
                 }
             }
             *width = widest.clamp(MIN_COLUMN, MAX_COLUMN);
+            // A floor is unbounded above: a word the table cannot break sets a
+            // width no cap may shrink below, or its ink would run over the next
+            // column (OI-138).
+            minimums[column] = narrowest.max(MIN_COLUMN);
         }
         let available = (self.opts.width - 2.0).max(MIN_COLUMN);
         let total: f32 = widths.iter().sum();
         if total > available {
             // Shrink toward the column, but never below a column's longest
-            // word: text must not overlap itself. A table whose minimum widths
-            // still do not fit keeps its natural widths and scrolls sideways
+            // word (the floor loop below): text must not overlap itself. A
+            // table whose minimum widths still do not fit scrolls sideways
             // inside the column (OI-138).
-            let minimums: Vec<f32> = (0..columns)
-                .map(|column| {
-                    let mut narrowest = MIN_COLUMN;
-                    if let Some(cell) = table.head.get(column) {
-                        narrowest = narrowest.max(self.cell_min_width(cell, true));
-                    }
-                    for row in &table.rows {
-                        if let Some(cell) = row.get(column) {
-                            narrowest = narrowest.max(self.cell_min_width(cell, false));
-                        }
-                    }
-                    narrowest.clamp(MIN_COLUMN, MAX_COLUMN)
-                })
-                .collect();
             let minimum_total: f32 = minimums.iter().sum();
             if minimum_total <= available {
                 let scale = available / total;
-                for (width, floor) in widths.iter_mut().zip(&minimums) {
-                    *width = (*width * scale).max(*floor);
+                for width in &mut widths {
+                    *width *= scale;
                 }
             }
+        }
+        // `MAX_COLUMN` caps wrapped content, never a word: every column keeps
+        // at least its floor even when the table would otherwise fit. Such a
+        // table grows past the column, and the scroller below shows it.
+        for (width, floor) in widths.iter_mut().zip(&minimums) {
+            *width = (*width).max(*floor);
         }
         let drawn_width: f32 = widths.iter().sum();
         let wide = drawn_width > available + 0.5;
@@ -128,9 +134,8 @@ impl Renderer<'_> {
             let cell = cells.get(column);
             let mut cell_el = col().key(cell_key).w(*width).px(PAD_X).py(5.0).role("cell");
             if let Some(inline) = cell {
-                let style = if header { rune::TextStyle { weight: 600.0, ..self.theme.body } } else { self.theme.body };
                 let color = if header { self.theme.table_head_text } else { self.theme.text };
-                let mut e = self.inline(inline, InlineOptions::new(style, color).breaks(0, 0));
+                let mut e = self.inline(inline, InlineOptions::new(self.cell_style(header), color).breaks(0, 0));
                 e = e.align(match align {
                     MdAlign::None | MdAlign::Left => Align::Start,
                     MdAlign::Center => Align::Center,
@@ -150,7 +155,7 @@ impl Renderer<'_> {
 
     /// The content width of a cell, in points, padding included.
     fn cell_width(&self, inline: &Inline, header: bool) -> f32 {
-        let style = if header { rune::TextStyle { weight: 600.0, ..self.theme.body } } else { self.theme.body };
+        let style = self.cell_style(header);
         let text = if inline.text.is_empty() { " " } else { inline.text.as_str() };
         rune::text::measure(text, &[], style, None).0 + PAD_X * 2.0 + 2.0
     }
@@ -158,14 +163,52 @@ impl Renderer<'_> {
     /// The narrowest a cell may draw without breaking a word, in points.
     ///
     /// A table that has to shrink stops at its longest word rather than letting
-    /// the text run over its neighbours; the whole table scrolls instead.
+    /// the text run over its neighbours; the whole table scrolls instead. The
+    /// floor is not capped at [`MAX_COLUMN`]: a word wider than that still has
+    /// to fit its cell (OI-138).
     fn cell_min_width(&self, inline: &Inline, header: bool) -> f32 {
-        let style = if header { rune::TextStyle { weight: 600.0, ..self.theme.body } } else { self.theme.body };
-        inline
-            .text
-            .split_whitespace()
-            .map(|word| rune::text::measure(word, &[], style, None).0 + PAD_X * 2.0 + 2.0)
-            .fold(MIN_COLUMN, f32::max)
+        let style = self.cell_style(header);
+        let text = if inline.text.is_empty() { " " } else { inline.text.as_str() };
+        // The widest unbreakable run in the cell's own face.
+        let mut narrowest = rune::text::content_widths(text, &[], style).0 + PAD_X * 2.0 + 2.0;
+        // A word a styled run covers can draw wider in that run's face.
+        let mut cursor = 0;
+        for word in text.split_whitespace() {
+            let Some(offset) = text.get(cursor..).and_then(|rest| rest.find(word)) else { continue };
+            let start = cursor + offset;
+            let end = start + word.len();
+            cursor = end;
+            let mut width = None;
+            for span in &inline.spans {
+                if span.range.start >= end || start >= span.range.end {
+                    continue;
+                }
+                let Some(styled) = self.styled_face(span.style, style) else { continue };
+                let widest = width.get_or_insert_with(|| rune::text::measure(word, &[], style, None).0);
+                *widest = (*widest).max(rune::text::measure(word, &[], styled, None).0);
+            }
+            if let Some(width) = width {
+                narrowest = narrowest.max(width + PAD_X * 2.0 + 2.0);
+            }
+        }
+        narrowest
+    }
+
+    /// The face a styled run draws in, when it can be wider than the cell's own
+    /// face: code and `<kbd>` are monospace at [`CODE_SIZE`] × the body size,
+    /// strong is weight 600, emphasis is italic (`inline.rs`).
+    fn styled_face(&self, style: InlineStyle, body: TextStyle) -> Option<TextStyle> {
+        Some(match style {
+            InlineStyle::Code | InlineStyle::Kbd => TextStyle { size: body.size * CODE_SIZE, ..body.mono() },
+            InlineStyle::Strong => TextStyle { weight: 600.0, ..body },
+            InlineStyle::Em => body.italic(),
+            _ => return None,
+        })
+    }
+
+    /// The style a cell's body draws in: the header carries the stronger weight.
+    fn cell_style(&self, header: bool) -> TextStyle {
+        if header { TextStyle { weight: 600.0, ..self.theme.body } } else { self.theme.body }
     }
 }
 

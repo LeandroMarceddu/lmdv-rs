@@ -1,6 +1,6 @@
 # Status
 
-**Updated:** 2026-11-22
+**Updated:** 2026-11-23
 **Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (205 done, 52 substitutes, 56 partial, 11 missing, 18 n/a), the P0 missing and the app-side P0 cleanup are implemented, the default Markdown handler covers Windows and Linux, the scroll/article-reuse fix is in, and v0.8.0 is released. Remaining: 13 P0 partials (mostly Rune/rune-kit or held export items), the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
@@ -484,6 +484,14 @@
 - Tests: 14 new; `lmdv-app` lib 983 passed; scenes `editor-menus`, `notice-stack`; locales 634 keys.
 - Audit: 205 done, 52 substitute, 56 partial, 11 missing, 18 n/a; **13 P0 gaps** left.
 
+## Table cell overflow — fixed
+
+- Long unbreakable tokens (especially code spans) were capped at the 360 pt wrapped-column width even as the “longest word” floor, so ink ran through the cell and table borders. The floor is now unbounded above and measured in the word's own face (code/`<kbd>` monospace at 0.9× body, strong 600, emphasis italic). When the floors do not fit the reading column, the table grows to them and the existing horizontal scroller is used.
+- `docs/audit/tabs-windows-browser-palette.md` at 1160×680: the first table grows 573 → 1006 pt, its evidence column 360 → 793 pt, and the 776 pt text box sits inside it; ordinary tables are unchanged.
+- A `word`×40 fixture grows 419 → 1650 pt and scrolls; a long code token is measured in the monospace face.
+- The full-window table preview still uses its own 360-clamped planner (OI-194).
+- Tests: `lmdv-render` `a_long_word_widens_its_column_past_the_cap_and_the_table_scrolls`, `a_long_code_word_widens_its_table_column_in_the_monospace_face`; updated app `a_table_wider_than_the_reading_column_fits_the_column`.
+
 ## Next up
 
 **Next when work resumes:**
@@ -499,7 +507,7 @@
 
 **Known flake (2026-11-22):** CI run 45052468637 (`3d988a0`) failed twice on the Linux gate, each time in an unrelated test: attempt 1 and the docs follow-up `aaef8a0` timed out `lmdv-io store::tests::drafts_are_capped_by_count_and_characters` on its first `flush(2s)`; attempt 2 hit the known Rune debug assertion `text_spec.rs:245: a text changed after its shape key was taken` in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` (the same flake as run 44821493750). The drain batch fsyncs every draft, and CI's loaded disk can exceed two seconds; its first flush timeout is now **5 s**, matching the second half. The Rune assertion remains a low-probability shape-cache flake: the test alone passed 30 local runs and five full app-suite runs on two cores. Record any repeat with the run id; do not mask it with another timeout.
 
-**Known flake (2026-11-21):** the full gate failed once in `lmdv-io instance::tests::a_stale_socket_is_reclaimed_but_a_live_one_is_not` with “a free lock must be primary” under the parallel suite; the test alone and the next full `lmdv-io` run passed. It is a lock-file timing race in the fixture (the server's lock is released in the `Drop` body's field drop), not article/UI behavior. Record any repeat with the gate output.
+**Known flake (instance lock, 2026-11-21 / 2026-11-23):** `lmdv-io instance::tests::a_stale_socket_is_reclaimed_but_a_live_one_is_not` intermittently panics with “a free lock must be primary” under the parallel `lmdv-io` suite. It failed once on 2026-11-21 and once on 2026-11-23 during the table-fix gate, then passed on the next run. The test alone passes 30+ times, the four instance tests pass 20× in parallel, and the full `lmdv-io` suite passes serially 4×; the remaining failure is a test-parallelism/`flock` release race in the fixture, not app behavior. Record any repeat; if it recurs in CI, isolate the instance tests behind a test mutex or make the fixture reopen the lock after an explicit close.
 
 ## P6-01b — complete
 

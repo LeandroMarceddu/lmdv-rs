@@ -753,8 +753,16 @@ fn a_table_wider_than_the_reading_column_fits_the_column() {
         table.rect[2],
         scroll.rect[2]
     );
-    // Its longest word must not run over the next column.
-    assert!(table.rect[2] >= 4.0 * 360.0 - 1.0, "unbreakable columns keep their width: {}", table.rect[2]);
+    // Its longest word must not run over the next column: every column keeps
+    // at least the width of the word it cannot break, and that floor is not
+    // capped at the 360 pt a wrapped column grows to (OI-138).
+    let word_width = rune::text::measure(&long, &[], lmdv_render::DocTheme::neutral(false).body, None).0;
+    assert!(word_width > 360.0, "the fixture word is wider than the wrapped-column cap: {word_width}");
+    assert!(
+        table.rect[2] >= 4.0 * word_width,
+        "every unbreakable column keeps at least its word: {} for {word_width} each",
+        table.rect[2]
+    );
 }
 
 #[test]
