@@ -40,24 +40,24 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
-| Reading and viewer | 30 | 22 | 3 | 4 | 1 | 0 |
-| Tabs and windows | 35 | 19 | 8 | 6 | 2 | 0 |
-| Editor | 40 | 26 | 2 | 9 | 2 | 1 |
-| Markdown rendering | 34 | 29 | 3 | 2 | 0 | 0 |
+| Reading and viewer | 30 | 23 | 3 | 3 | 1 | 0 |
+| Tabs and windows | 35 | 22 | 8 | 3 | 2 | 0 |
+| Editor | 40 | 28 | 2 | 7 | 2 | 1 |
+| Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
-| Share, print and export | 16 | 7 | 1 | 7 | 1 | 0 |
-| File browser and folder search | 22 | 19 | 2 | 1 | 0 | 0 |
-| Outline, section line and history | 15 | 10 | 2 | 3 | 0 | 0 |
+| Share, print and export | 16 | 9 | 1 | 5 | 1 | 0 |
+| File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
+| Outline, section line and history | 15 | 11 | 2 | 2 | 0 | 0 |
 | Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
-| Links and media | 15 | 10 | 0 | 2 | 2 | 1 |
-| System, CLI and file integration | 27 | 13 | 5 | 1 | 1 | 7 |
-| Window chrome | 10 | 0 | 3 | 3 | 0 | 4 |
+| Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
+| System, CLI and file integration | 27 | 14 | 5 | 0 | 1 | 7 |
+| Window chrome | 10 | 2 | 3 | 1 | 0 | 4 |
 | Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
-| Help, start page, notices, rating | 13 | 7 | 0 | 5 | 0 | 1 |
+| Help, start page, notices, rating | 13 | 8 | 0 | 4 | 0 | 1 |
 | Accessibility | 15 | 11 | 0 | 4 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **205** | **52** | **56** | **11** | **18** |
+| **All** | **342** | **223** | **52** | **40** | **9** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -89,7 +89,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **R-26** Selection copy (P1 · F-SELECT) — partial
 - [x] **R-27** Double-click while reading (P0 · F-BASIC) — done
 - [ ] **R-28** Drag to scroll (P1 · F-LONG) — missing
-- [~] **R-29** Empty/error state persistence (P1 · F-ERRORS) — partial
+- [x] **R-29** Empty/error state persistence (P1 · F-ERRORS) — done
 - [x] **R-30** Reading settings isolation (P0 · F-PREFS) — substitute
 
 ## T — Tabs and windows (35)
@@ -107,7 +107,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-11** One file, one tab per window (P0 · F-TABS) — done
 - [x] **T-12** Click-open placement (P0 · F-TABS) — done
 - [x] **T-13** Start-page replacement (P0 · F-BASIC) — done
-- [~] **T-14** Background insertion order (P1 · F-TABS) — partial
+- [x] **T-14** Background insertion order (P1 · F-TABS) — done
 - [ ] **T-15** Background tab pulse (P2 · F-TABS) — missing
 - [x] **T-16** Tab hover card (P1 · F-TABS) — done
 - [x] **T-17** Overflow tab list (P1 · F-TABS) — substitute
@@ -122,9 +122,9 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **T-26** Tab state retention (P0 · F-TABS) — partial
 - [x] **T-27** Rendered-view cache (P1 · F-TABS) — substitute
 - [x] **T-28** State carried across reload (P1 · F-I18N) — substitute
-- [~] **T-29** Close-key precedence (P1 · F-PREVIEW) — partial
+- [x] **T-29** Close-key precedence (P1 · F-PREVIEW) — done
 - [x] **T-30** Window close key (P0 · F-TABS) — done
-- [~] **T-31** New window (P1 · F-WINDOW) — partial
+- [x] **T-31** New window (P1 · F-WINDOW) — done
 - [x] **T-32** Multi-select open (P1 · F-BASIC) — substitute
 - [x] **T-33** Tabs across windows (P0 · F-WINDOW) — done
 - [ ] **T-34** Tab overflow and narrow toolbar (P1 · F-NARROW) — missing
@@ -132,13 +132,13 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 ## E — Editor (40)
 
-- [~] **E-01** Toggle edit mode (P0 · F-EDIT) — partial
+- [x] **E-01** Toggle edit mode (P0 · F-EDIT) — done
 - [x] **E-02** Split layout (P0 · F-NARROW) — done
 - [~] **E-03** Editor entry position (P1 · F-EDIT) — partial
 - [x] **E-04** Edit from here (P1 · F-EDIT) — done
 - [x] **E-05** Live preview (P0 · F-BROKEN) — done
 - [~] **E-06** Mermaid reuse while typing (P1 · F-MERMAID) — partial
-- [~] **E-07** Preview follow / scroll sync (P0 · F-EDIT) — partial
+- [x] **E-07** Preview follow / scroll sync (P0 · F-EDIT) — done
 - [x] **E-08** Save semantics (P0 · F-EDIT) — done
 - [x] **E-09** Line endings (P0 · F-EOL) — done
 - [x] **E-10** Save when file changed on disk (P0 · F-CONFLICT) — done
@@ -199,8 +199,8 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **M-22** Unknown tags hidden (P1 · F-HTML) — done
 - [x] **M-23** Sanitization (P0 · F-SECURITY) — done
 - [x] **M-24** Relative images (P0 · F-IMAGE) — done
-- [~] **M-25** Missing images (P1 · F-IMAGE) — partial
-- [~] **M-26** srcset parsing (P2 · F-IMAGE) — partial
+- [x] **M-25** Missing images (P1 · F-IMAGE) — done
+- [x] **M-26** srcset parsing (P2 · F-IMAGE) — done
 - [x] **M-27** Media playback continuity (P1 · F-MEDIA) — substitute
 - [x] **M-28** Subtitles (P2 · F-MEDIA) — substitute
 - [x] **M-29** GitHub theme images (P1 · F-IMAGE) — done
@@ -237,7 +237,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **X-02** Copy whole document as rich text (P0 · F-EXPORT) — partial
 - [ ] **X-03** Copy selection as rich text (P1 · F-SELECT) — missing
 - [x] **X-04** Print (P0 · F-EXPORT) — substitute
-- [~] **X-05** Save as PDF (P0 · F-EXPORT) — partial
+- [x] **X-05** Save as PDF (P0 · F-EXPORT) — done
 - [x] **X-06** Page break per H1 (P1 · F-EXPORT) — done
 - [~] **X-07** HTML export (P1 · F-EXPORT) — partial
 - [~] **X-08** DOCX export (P1 · F-EXPORT) — partial
@@ -246,7 +246,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **X-11** Print theme swap (P1 · F-EXPORT) — partial
 - [x] **X-12** Wide-table print fitting (P1 · F-EXPORT) — done
 - [x] **X-13** Feedback (P2 · F-EXPORT) — done
-- [~] **X-14** Print header text (P1 · F-EXPORT) — partial
+- [x] **X-14** Print header text (P1 · F-EXPORT) — done
 - [~] **X-15** Export target rules (P1 · F-EXPORT) — partial
 - [x] **X-16** Table copy button (P1 · F-TABLE) — done
 
@@ -262,7 +262,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **F-08** Watched disk (P0 · F-TREE) — done
 - [x] **F-09** Focus preservation (P1 · F-TREE) — done
 - [x] **F-10** Roving tab stop (P1 · F-A11Y) — substitute
-- [~] **F-11** Tree keyboard (P0 · F-A11Y) — partial
+- [x] **F-11** Tree keyboard (P0 · F-A11Y) — done
 - [x] **F-12** File context menu (P1 · F-TREE) — done
 - [x] **F-13** Folder search trigger (P0 · F-SEARCH) — done
 - [x] **F-14** Folder search algorithm (P0 · F-SEARCH) — done
@@ -287,7 +287,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **O-08** Section path (P1 · F-HEADINGS) — done
 - [x] **O-09** Section line suppression (P1 · F-SECTION) — substitute
 - [x] **O-10** Section line interaction (P2 · F-SECTION) — done
-- [~] **O-11** Section line reservation (P2 · F-SECTION) — partial
+- [x] **O-11** Section line reservation (P2 · F-SECTION) — done
 - [x] **O-12** Back/Forward triggers (P0 · F-HISTORY) — done
 - [x] **O-13** History semantics (P0 · F-HISTORY) — done
 - [~] **O-14** History inputs (P0 · F-HISTORY) — partial
@@ -316,16 +316,16 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **L-03** Wiki resolution (P0 · F-LINKS) — done
 - [x] **L-04** Same-document link (P0 · F-LINKS) — done
 - [x] **L-05** Folder link (P1 · F-NESTED) — done
-- [ ] **L-06** Image link (P1 · F-IMAGE) — missing
+- [x] **L-06** Image link (P1 · F-IMAGE) — done
 - [x] **L-07** Other file link (P0 · F-LINKS) — done
 - [x] **L-08** Unresolved link (P0 · F-ERRORS) — done
 - [x] **L-09** Pasted text links (P0 · F-PASTE) — done
 - [x] **L-10** Network links/media (P0 · F-SECURITY) — done
 - [~] **L-11** Link click placement (P0 · F-LINKS) — partial
-- [ ] **L-12** Image maps and SVG links (P2 · F-HTML) — missing
+- [~] **L-12** Image maps and SVG links (P2 · F-HTML) — partial
 - [x] **L-13** Old anchors (P1 · F-HEADINGS) — done
 - [x] **L-14** URL safety (P0 · F-SECURITY) — n/a
-- [~] **L-15** URL decoding (P1 · F-LINKS) — partial
+- [x] **L-15** URL decoding (P1 · F-LINKS) — done
 
 ## S — System, CLI and file integration (27)
 
@@ -341,7 +341,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **S-10** Portable mode (P1 · Copy exe+marker to USB: settings in `data`, installed copy unaffected.) — done
 - [x] **S-11** Store build detection (P2 · GitHub build has no rate card.) — n/a
 - [x] **S-12** Window size defaults (P0 · Window appears only after first render, min size 480.) — done
-- [~] **S-13** Window placement (P1 · Cascade and off-screen reset.) — partial
+- [x] **S-13** Window placement (P1 · Cascade and off-screen reset.) — done
 - [x] **S-14** Window state persistence (P1 · Move/resize main, restart: restored; other windows not.) — substitute
 - [x] **S-15** WebView2 missing (P2 · No runtime: explanation + download link.) — n/a
 - [x] **S-16** Native context menu pruning (P2 · Right-click document: app menu; right-click editor: native edit/spelling menu.) — n/a
@@ -365,9 +365,9 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **W-04** Max/Restore state (P1 · Maximize: icon becomes restore.) — substitute
 - [x] **W-05** Window system menu (P2 · Right-click title bar: native menu.) — n/a
 - [x] **W-06** Inactive window look (P2 · Unfocused window caption grey.) — n/a
-- [~] **W-07** Always on top (P1 · Pin keeps window above others; restart unpinned.) — partial
+- [x] **W-07** Always on top (P1 · Pin keeps window above others; restart unpinned.) — done
 - [x] **W-08** Native chrome hidden behind preview (P2 · Open preview over caption: no invisible close trap.) — n/a
-- [~] **W-09** Window title (P1 · Dirty title begins bullet.) — partial
+- [x] **W-09** Window title (P1 · Dirty title begins bullet.) — done
 - [~] **W-10** Toolbar layout (P1 · Layout matches fixture screenshot.) — partial
 
 ## D — Drag and drop (8)
@@ -386,7 +386,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **H-01** Start page (P0 · Empty window shows all elements; long recents scroll.) — done
 - [~] **H-02** Recent files (P1 · Recents show time; delete file, reopen home: gone.) — partial
 - [x] **H-03** Start-page tips (P2 · Text matches.) — done
-- [~] **H-04** Help dialog (P0 · F1 shows localized help with version.) — partial
+- [x] **H-04** Help dialog (P0 · F1 shows localized help with version.) — done
 - [x] **H-05** Keys overlay (P1 · Overlay keys localized in German.) — done
 - [x] **H-06** Notice bar (P0 · Warning with Reload; dismiss; layout no overlap.) — done
 - [x] **H-07** Screen-reader notices (P1 · Screen reader announces save/error.) — done

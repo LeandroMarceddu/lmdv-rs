@@ -644,6 +644,61 @@ fn the_hint_sits_at_the_media_top_right_corner() {
     );
 }
 
+#[test]
+fn the_hint_shows_for_hover_and_focus_and_leaves_with_the_pane() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    open_file_document(&mut state, "hint-focus.md", IMAGE_MARKDOWN);
+    let media = image_ref(&state);
+    let key = media_key(&media);
+    let hint_key = format!("media-hint-{}", media.block);
+    let mut viewer = runtime(state);
+    viewer.frame(0.0);
+    assert!(
+        by_key(&viewer.elements(), &hint_key).opacity <= 0.01,
+        "the hint starts hidden until the media is hovered or focused"
+    );
+
+    let picture = by_key(&viewer.elements(), &key).rect;
+    let (x, y) = (picture[0] + picture[2] / 2.0, picture[1] + picture[3] / 2.0);
+    viewer.pointer_move(x, y);
+    viewer.frame(0.0);
+    viewer.frame(0.2);
+    assert!(by_key(&viewer.elements(), &hint_key).opacity > 0.5, "hovering the picture reveals its preview hint");
+
+    viewer.pointer_move(0.0, 0.0);
+    viewer.frame(0.0);
+    viewer.frame(0.2);
+    assert!(by_key(&viewer.elements(), &hint_key).opacity < 0.1, "leaving the media hides it");
+
+    // V-02: the media element is the keyboard button; Rune's hover group
+    // follows keyboard focus, so the hint lights without being a tab stop.
+    viewer.update(|_, tx| tx.focus(key.clone(), true));
+    viewer.frame(0.0);
+    viewer.frame(0.2);
+    let focused_elements = viewer.elements();
+    let hint = by_key(&focused_elements, &hint_key);
+    assert!(hint.opacity > 0.5, "keyboard focus on the picture shows the same hint");
+    assert!(!hint.focusable, "the hint never joins the tab order");
+
+    // "Or leave the pane": the article's clip empties the hint's visible area
+    // when the picture scrolls out with it.
+    let text = format!("{}![Far](./img/test.png)\n", "A paragraph.\n\n".repeat(60));
+    let path = fixtures().join("far.md");
+    let mut state = window(&temp);
+    open_temp_document(&mut state, &path, &text);
+    let media = image_ref(&state);
+    let mut offscreen = runtime(state);
+    offscreen.frame(0.0);
+    let offscreen_elements = offscreen.elements();
+    let hint = by_key(&offscreen_elements, &format!("media-hint-{}", media.block));
+    assert!(
+        hint.visible[2] <= 0.0 || hint.visible[3] <= 0.0,
+        "the hint is clipped with the picture that left the pane: {:?}",
+        hint.visible
+    );
+}
+
 // ---- V-08/V-09: copy and save --------------------------------------------
 
 fn clipboard_runtime(state: WindowState) -> (Runtime<WindowState>, rune::clipboard::MemoryClipboard) {
@@ -817,6 +872,78 @@ fn a_picture_that_is_not_png_is_converted_for_copy_and_save() {
     state.open_inline_media(&media.block, media.index, &mut tx);
     assert!(state.lightbox().is_some(), "the reader can show a GIF");
     wait_for_png(&state);
+
+    // V-09: the GIF was decoded and re-encoded as a real PNG, ready for both
+    // the clipboard and a save, at its own natural size.
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| state.copy_lightbox_png(2, tx));
+    let copied = board.content().expect("clipboard content");
+    let image = copied.image().expect("an image on the clipboard");
+    assert_eq!(image.size(), (1, 1));
+    assert!(image.png().starts_with(b"\x89PNG\r\n\x1a\n"), "the GIF was converted to PNG");
+
+    let path = temp.path().join("converted.png");
+    runtime.update(|state: &mut WindowState, _: &mut Tx| state.start_lightbox_save(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !runtime.state.poll_lightbox() {
+        assert!(Instant::now() < deadline, "the converted save never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let written = std::fs::read(&path).expect("the saved file");
+    assert!(written.starts_with(b"\x89PNG\r\n\x1a\n"), "Save as PNG writes the converted PNG");
+}
+
+#[test]
+fn a_picture_source_with_a_query_and_escapes_is_copied_from_its_file() {
+    // V-08/V-09: the copy/save worker resolves the same URL path the reader
+    // did, so a fetch hint and percent escapes never become the file name.
+    let temp = TempDir::new().unwrap();
+    let doc = temp.path().join("query.md");
+    std::fs::write(&doc, "# Query\n\n![Pixels](./my%20pic.png?raw=1)\n").unwrap();
+    std::fs::copy(fixtures().join("img/test.png"), temp.path().join("my pic.png")).unwrap();
+    let text = std::fs::read_to_string(&doc).unwrap();
+    let mut state = window(&temp);
+    open_temp_document(&mut state, &doc, &text);
+    let media = image_ref(&state);
+    assert_eq!(media.source, "./my%20pic.png?raw=1");
+    open_active(&mut state, media);
+    wait_for_png(&state);
+
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| state.copy_lightbox_png(4, tx));
+    let copied = board.content().expect("clipboard content");
+    let image = copied.image().expect("an image on the clipboard");
+    let source = std::fs::read(fixtures().join("img/test.png")).unwrap();
+    assert_eq!(image.png(), source.as_slice(), "the file behind the decoded URL path");
+}
+
+#[test]
+fn an_svg_picture_cannot_be_copied_until_a_svg_rasterizer_is_exposed() {
+    // V-09 names SVG rasterization on copy/save. Rune draws the file, but the
+    // copy worker can only re-encode a raster (`lmdv_export::raster_to_png`);
+    // `lmdv-export`'s SVG rasterizer is private and fixed at 2×. Pin the gap
+    // so a future public helper is a deliberate change.
+    let temp = TempDir::new().unwrap();
+    let doc = temp.path().join("svg.md");
+    std::fs::write(&doc, "# SVG\n\n![Drawing](./drawing.svg)\n").unwrap();
+    std::fs::write(
+        temp.path().join("drawing.svg"),
+        br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="#0969da"/></svg>"##,
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(&doc).unwrap();
+    let mut state = window(&temp);
+    open_temp_document(&mut state, &doc, &text);
+    let media = image_ref(&state);
+    open_active(&mut state, media);
+    assert!(state.lightbox().is_some(), "the SVG itself opens in the preview");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while state.lightbox().is_some_and(|lightbox| lightbox.png_unavailable().is_none()) {
+        assert!(Instant::now() < deadline, "the copy worker never answered");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let lightbox = state.lightbox().expect("the preview");
+    assert!(lightbox.png_unavailable().is_some(), "no PNG bytes for a vector source yet");
 }
 
 #[test]

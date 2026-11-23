@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use lmdv_io::store::UiPrefs;
-use lmdv_io::tree::{SearchHit, TreeError, TreeListing};
+use lmdv_io::tree::{SearchHit, TreeEntry, TreeError, TreeListing};
 use rune::{ElementInfo, Tx};
 use tempfile::TempDir;
 
@@ -289,6 +289,174 @@ fn search_results_group_by_file_and_open_at_the_line() {
     assert!(!state.browser.is_searching());
     assert!(state.browser.results().is_empty());
     assert!(state.browser_search.text.is_empty());
+}
+
+/* ---- F-11: tree keyboard traversal ---- */
+
+fn press_tree_key(state: &mut WindowState, key: rune::Key, mods: rune::Mods) -> bool {
+    state.browser_key(&rune::KeyEvent { key, mods }, &mut rune::Tx::default())
+}
+
+fn focus_path(state: &WindowState) -> Option<String> {
+    state.browser.focused().map(str::to_owned)
+}
+
+#[test]
+fn the_tree_arrows_walk_visible_rows_and_left_right_open_and_close_folders() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    let nested = root.join("nested");
+    let deeper = write(&root, "nested/deeper.md", "deep");
+    let a = write(&root, "a.md", "a");
+    let b = write(&root, "b.md", "b");
+    show(&mut state, listing(&root));
+    state.browser.focus = None;
+    let plain = rune::Mods::default();
+
+    assert!(press_tree_key(&mut state, rune::Key::Down, plain), "Down from nowhere takes the first row");
+    assert_eq!(focus_path(&state).as_deref(), Some(nested.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::Down, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(deeper.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::End, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(b.to_string_lossy().as_ref()), "End is the last visible row");
+    assert!(press_tree_key(&mut state, rune::Key::Up, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(a.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::Home, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(nested.to_string_lossy().as_ref()));
+
+    // Right on an open folder moves to its first child; Left goes back to the
+    // parent and closes an open folder.
+    assert!(press_tree_key(&mut state, rune::Key::Right, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(deeper.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::Left, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(nested.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::Left, plain), "Left closes the open folder");
+    assert_eq!(row_paths(&state), ["nested", "a.md", "b.md"], "the child is no longer visible");
+    assert_eq!(focus_path(&state).as_deref(), Some(nested.to_string_lossy().as_ref()), "focus stays on the folder");
+
+    // Right opens it again, then steps to the first child.
+    assert!(press_tree_key(&mut state, rune::Key::Right, plain));
+    assert_eq!(row_paths(&state), ["nested", "deeper.md", "a.md", "b.md"]);
+    assert!(press_tree_key(&mut state, rune::Key::Right, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(deeper.to_string_lossy().as_ref()));
+
+    // A file has no children: Right is inert.
+    assert!(press_tree_key(&mut state, rune::Key::Right, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(deeper.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn an_empty_folder_opens_and_closes_without_moving_the_focus() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    let empty = root.join("empty");
+    let a = write(&root, "a.md", "a");
+    // The tree prunes a folder with no Markdown below it, so this model names
+    // the row directly: the keyboard must still handle a folder with no child.
+    let listing = TreeListing {
+        root: root.clone(),
+        name: "notes".to_owned(),
+        rows: vec![
+            TreeEntry { path: empty.clone(), name: "empty".to_owned(), depth: 0, dir: true },
+            TreeEntry { path: a.clone(), name: "a.md".to_owned(), depth: 0, dir: false },
+        ],
+    };
+    show(&mut state, listing);
+    state.browser.focus = Some(empty.to_string_lossy().into_owned());
+    let plain = rune::Mods::default();
+
+    assert!(press_tree_key(&mut state, rune::Key::Left, plain), "Left closes the open empty folder");
+    assert_eq!(row_paths(&state), ["empty", "a.md"], "nothing disappeared");
+    assert_eq!(focus_path(&state).as_deref(), Some(empty.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::Right, plain), "Right opens it again");
+    assert!(press_tree_key(&mut state, rune::Key::Right, plain), "and then has no first child");
+    assert_eq!(focus_path(&state).as_deref(), Some(empty.to_string_lossy().as_ref()));
+    assert!(press_tree_key(&mut state, rune::Key::Down, plain));
+    assert_eq!(focus_path(&state).as_deref(), Some(a.to_string_lossy().as_ref()));
+}
+
+#[test]
+fn tree_enter_space_and_their_modifiers_open_rows() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    let nested = root.join("nested");
+    write(&root, "nested/deeper.md", "deep");
+    let a = write(&root, "a.md", "a");
+    let b = write(&root, "b.md", "b");
+    show(&mut state, listing(&root));
+    let plain = rune::Mods::default();
+    state.browser.focus = Some(a.to_string_lossy().into_owned());
+
+    assert!(press_tree_key(&mut state, rune::Key::Enter, plain));
+    assert_eq!(state.active_path(), Some(a.clone()), "Enter opens the file in front");
+
+    // Space is Enter for a row; on a folder it opens or closes it.
+    state.browser.focus = Some(nested.to_string_lossy().into_owned());
+    assert!(press_tree_key(&mut state, rune::Key::Text(" ".to_owned()), plain));
+    assert_eq!(row_paths(&state), ["nested", "a.md", "b.md"], "Space closed the folder");
+
+    let tabs = state.tabs().len();
+    state.browser.focus = Some(b.to_string_lossy().into_owned());
+    let ctrl = rune::Mods { ctrl: true, ..plain };
+    assert!(press_tree_key(&mut state, rune::Key::Enter, ctrl), "Ctrl+Enter is the tree's, not the pane's");
+    assert_eq!(state.tabs().len(), tabs + 1, "Ctrl+Enter opens a background tab");
+    assert_eq!(state.active_path(), Some(a.clone()), "and leaves the front document alone");
+
+    // Alt and the platform modifier are left to the app (F-11).
+    let alt = rune::Mods { alt: true, ..plain };
+    assert!(!press_tree_key(&mut state, rune::Key::Down, alt), "Alt+Down is not the tree's");
+    let logo = rune::Mods { logo: true, ..plain };
+    assert!(!press_tree_key(&mut state, rune::Key::Down, logo), "the platform modifier is not the tree's");
+
+    let shared = state.shared_rc();
+    shared.set_window_opener(recording_opener);
+    OPENED.with(|opened| opened.borrow_mut().clear());
+    let shift = rune::Mods { shift: true, ..plain };
+    state.browser.focus = Some(b.to_string_lossy().into_owned());
+    assert!(press_tree_key(&mut state, rune::Key::Enter, shift));
+    let opened = recorded_windows();
+    assert_eq!(opened.len(), 1, "Shift+Enter opens a window");
+    assert_eq!(opened[0].launch.path.as_deref(), Some(b.as_path()));
+}
+
+#[test]
+fn a_search_hit_enter_keeps_ctrl_and_shift_modifiers() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    let a = write(&root, "a.md", "pim\n");
+    let b = write(&root, "b.md", "pim\n");
+    state.browser.root = Some(root.clone());
+    state.browser.root_name = "notes".to_owned();
+    state.browser.search_query = "pim".to_owned();
+    state.browser.search_generation += 1;
+    let generation = state.browser.search_generation;
+    let hits = vec![
+        SearchHit { path: a.clone(), name: "a.md".to_owned(), line: 0, preview: String::new() },
+        SearchHit { path: b.clone(), name: "b.md".to_owned(), line: 0, preview: String::new() },
+    ];
+    assert!(state.finish_search(generation, root, "pim".to_owned(), Ok(hits)));
+    let mut tx = rune::Tx::default();
+
+    state.browser.search_selected = Some(0);
+    let ctrl_enter = rune::KeyEvent { key: rune::Key::Enter, mods: rune::Mods { ctrl: true, ..rune::Mods::default() } };
+    assert!(state.browser_search_key(&ctrl_enter, &mut tx));
+    assert_eq!(state.tabs().len(), 2, "Ctrl+Enter opens the hit behind the start page");
+    assert!(state.active_tab().is_some_and(crate::window::Tab::is_start), "the start page stays in front");
+
+    let shared = state.shared_rc();
+    shared.set_window_opener(recording_opener);
+    OPENED.with(|opened| opened.borrow_mut().clear());
+    state.browser.search_selected = Some(1);
+    let shift_enter =
+        rune::KeyEvent { key: rune::Key::Enter, mods: rune::Mods { shift: true, ..rune::Mods::default() } };
+    assert!(state.browser_search_key(&shift_enter, &mut tx));
+    let opened = recorded_windows();
+    assert_eq!(opened.len(), 1, "Shift+Enter sends the hit to a new window");
+    assert_eq!(opened[0].launch.path.as_deref(), Some(b.as_path()));
 }
 
 #[test]

@@ -170,6 +170,8 @@
   "keys.dblclick": "将光标移到该处",
   "help.close": "关闭 (Esc)",
   "help.title": "帮助",
+  "help.repository": "代码仓库",
+  "help.license": "许可证",
   "zoom.open": "打开预览",
   "zoom.dialog": "预览",
   "zoom.viewport": "可缩放预览。加号和减号缩放，0 适应窗口，W 适应宽度，1 显示实际大小，方向键平移，Esc 关闭。",

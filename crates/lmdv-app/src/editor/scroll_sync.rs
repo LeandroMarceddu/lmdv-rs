@@ -15,29 +15,26 @@
 //!   and, in block mode, the visible row's measured top and height.
 //!   `Cx::layout` reads layout as if every scroll viewport were at its top, so
 //!   scrolling does not re-run the view.
+//! * The same view publishes [`VisualLines`]: the exact top of every source
+//!   line's first visual line, measured with the field's own font, spans and
+//!   wrap width (`rune::text::measure`, the runtime's shaper). Wrapped prose
+//!   therefore maps by the line it is drawn on, not by a count of visual
+//!   lines, and a block row maps inside its own block the same way.
 //! * The preview view publishes [`PreviewGeometry`]: the content y and height
-//!   of the blocks around the editor's top and caret, their heading, and a
-//!   table's sticky-header cover.
+//!   of the blocks around the editor's top and caret, their heading, the front
+//!   matter card, every top-level table that can stick at the viewport's top,
+//!   and the section-line reserve actually drawn.
 //!
-//! Approximations (OI-075):
-//!
-//! * The single source field maps its scroll offset through the field's live
-//!   line height (E-37: 1.6 × the editor font), so a wrapped line counts as two
-//!   visual lines and a heavily wrapped document maps a little ahead of its
-//!   source lines. The original reads CodeMirror's exact `topVisibleLine()`.
-//! * In block mode the visible row's measured height is scaled onto the
-//!   block's source-line span, likewise assuming a uniform line height.
-//! * Only the tables measured around the editor's top and caret contribute a
-//!   sticky-header cover; overlapping tables are approximated by their
-//!   maximum. lmdv has no section-line overlay (the outline replaces it), so
-//!   the original's `sectionLine.reserve` is 0.
+//! The remaining approximation is the preview side of a wrapped source line:
+//! the block anchor interpolates a fractional source line across the block's
+//! source-line span; the preview itself has no per-source-line geometry.
 
 use std::ops::Range;
 use std::time::{Duration, Instant};
 
 use lmdv_md::{Block as MdBlock, MdDoc};
 use lmdv_render::{DOC_KEY, FRONT_MATTER_KEY, heading_key};
-use rune::{Cx, Tx};
+use rune::{Cx, Family, Span, TextStyle, Tx};
 
 use crate::edit_ui::{SOURCE_FIELD_KEY, SOURCE_SCROLL_KEY};
 use crate::reader::ARTICLE_SCROLL_KEY;
@@ -84,6 +81,184 @@ pub struct PreviewPart {
     pub height: f32,
 }
 
+/// A preview anchor that is not an `MdDoc` block (the front matter card).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PreviewAnchor {
+    /// The element's key.
+    pub key: String,
+    /// The anchor's top in article content points.
+    pub top: f32,
+    /// The anchor's height, points.
+    pub height: f32,
+    /// The next anchor's top: the first block's top, or the card's bottom.
+    pub next_top: f32,
+}
+
+impl PreviewAnchor {
+    /// The content points from `top` to the next anchor, for interpolation.
+    pub fn span(&self) -> f32 {
+        (self.next_top - self.top).max(1.0)
+    }
+}
+
+/// The exact visual-line geometry of a source field.
+///
+/// `tops[i]` is where source line `i`'s first visual line begins, in points
+/// from the field's text top, and `tops` has one extra entry for the text's
+/// bottom. A wrapped line therefore owns the whole band between two entries:
+/// mapping a point inside it gives that source line plus the fraction of the
+/// band it sits at.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct VisualLines {
+    /// The source line `tops[0]` covers: 0 for the single field, the visible
+    /// block's first line in block mode.
+    pub first_line: usize,
+    /// Source line tops, then the text's bottom.
+    pub tops: Vec<f32>,
+    /// Whether the values came from real text shaping.
+    pub measured: bool,
+}
+
+impl VisualLines {
+    /// Measures `text` with the field's own `spans`, `style` and wrap `width`.
+    ///
+    /// Every source line is measured on its own, so a wrapped line takes the
+    /// height the field draws it at (the same shaper and fonts: a view's
+    /// measure uses the window's text system). `first_line` is the source line
+    /// `text` starts at.
+    pub fn measure(text: &str, spans: &[Span], style: TextStyle, width: f32, first_line: usize) -> VisualLines {
+        let line_height = style.line_height.max(1.0);
+        if !(width.is_finite() && width > 0.0) {
+            return VisualLines::default();
+        }
+        let mut tops = Vec::with_capacity(text.bytes().filter(|byte| *byte == b'\n').count() + 2);
+        let mut y = 0.0f32;
+        tops.push(y);
+        let mut start = 0usize;
+        for line in text.split('\n') {
+            let end = start + line.len();
+            let height = if line.is_empty() {
+                line_height
+            } else {
+                let clipped = clip_spans(spans, start, end);
+                let measured = rune::text::measure(line, &clipped, style, Some(width)).1;
+                if measured.is_finite() && measured > 0.0 { measured.max(line_height) } else { line_height }
+            };
+            y += height;
+            tops.push(y);
+            start = end + 1;
+        }
+        VisualLines { first_line, tops, measured: true }
+    }
+
+    /// `true` when there is no usable measurement.
+    pub fn is_empty(&self) -> bool {
+        !self.measured || self.tops.len() < 2
+    }
+
+    /// The fractional source line at `y` points below the text's top, clamped
+    /// into the measured text.
+    pub fn line_at(&self, y: f32) -> Option<f32> {
+        if self.is_empty() {
+            return None;
+        }
+        let y = y.max(0.0);
+        let last = self.tops.len() - 2;
+        let index = self.tops.partition_point(|top| *top <= y).saturating_sub(1).min(last);
+        let top = self.tops[index];
+        let bottom = self.tops[index + 1];
+        let fraction = if bottom > top + 1e-4 { ((y - top) / (bottom - top)).clamp(0.0, 1.0) } else { 0.0 };
+        Some(self.first_line as f32 + index as f32 + fraction)
+    }
+
+    /// How many visual lines source line `line` takes, when measured.
+    #[cfg(test)]
+    pub fn visual_count(&self, line: usize) -> Option<f32> {
+        let index = line.checked_sub(self.first_line)?;
+        let top = *self.tops.get(index)?;
+        let bottom = *self.tops.get(index + 1)?;
+        Some((bottom - top).max(0.0))
+    }
+}
+
+/// A source line's spans clipped to one line, in line-local byte offsets.
+fn clip_spans(spans: &[Span], start: usize, end: usize) -> Vec<Span> {
+    let mut out = Vec::new();
+    for span in spans {
+        let from = (span.start as usize).max(start);
+        let to = (span.end as usize).min(end);
+        if to <= from {
+            continue;
+        }
+        let mut clipped = span.clone();
+        clipped.start = (from - start) as u32;
+        clipped.end = (to - start) as u32;
+        // The source has no inline images; a stray one would not measure.
+        clipped.image = None;
+        out.push(clipped);
+    }
+    out
+}
+
+/// The measured visual lines a view keeps between frames, keyed by what can
+/// invalidate them (session revision, wrap width, font, and the block they
+/// cover in block mode).
+#[derive(Clone, Debug, Default)]
+pub struct VisualCache {
+    key: Option<VisualKey>,
+    lines: VisualLines,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisualKey {
+    revision: u64,
+    width: u32,
+    size: u32,
+    weight: u32,
+    family: Family,
+    line_height: u32,
+    first_line: usize,
+}
+
+impl VisualCache {
+    /// The last measured lines.
+    pub fn get(&self) -> &VisualLines {
+        &self.lines
+    }
+
+    /// Re-measures when the session revision, font, width or block changed.
+    pub fn refresh(
+        &mut self,
+        revision: u64,
+        text: &str,
+        spans: &[Span],
+        style: TextStyle,
+        width: f32,
+        first_line: usize,
+    ) {
+        let key = VisualKey {
+            revision,
+            width: width.to_bits(),
+            size: style.size.to_bits(),
+            weight: style.weight.to_bits(),
+            family: style.family,
+            line_height: style.line_height.to_bits(),
+            first_line,
+        };
+        if self.key == Some(key) {
+            return;
+        }
+        self.lines = VisualLines::measure(text, spans, style, width, first_line);
+        self.key = Some(key);
+    }
+
+    /// Drops the measurement (leaving edit mode, a new session).
+    pub fn clear(&mut self) {
+        self.key = None;
+        self.lines = VisualLines::default();
+    }
+}
+
 /// A preview table's box and sticky header, in article content points.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PreviewTable {
@@ -111,8 +286,6 @@ pub struct PreviewBlock {
     pub next_top: f32,
     /// The heading inside this block, when it has one.
     pub heading: Option<PreviewPart>,
-    /// The table's box and sticky header, when the block is a table.
-    pub table: Option<PreviewTable>,
 }
 
 impl PreviewBlock {
@@ -127,6 +300,14 @@ impl PreviewBlock {
 pub struct PreviewGeometry {
     /// The measured blocks, in document order.
     pub blocks: Vec<PreviewBlock>,
+    /// Every top-level table that can hold the viewport's top, measured with
+    /// its sticky header.
+    pub tables: Vec<PreviewTable>,
+    /// The front matter card, when the document has one.
+    pub front_matter: Option<PreviewAnchor>,
+    /// The section line's measured height when it floats over this viewport
+    /// (O-07 keeps it out of edit mode, so the editor's preview measures 0).
+    pub reserve: f32,
     /// The article's bottom in content points.
     pub content_bottom: f32,
     /// The article viewport's height, points.
@@ -147,11 +328,11 @@ impl PreviewGeometry {
     /// Over a table's rows the whole header is still at the top; across the
     /// header itself the cover grows from nothing to all of it; `after` fades
     /// it out over one header height past the table's bottom, as the editor's
-    /// scroll sync does, so leaving a table does not jump.
+    /// scroll sync does, so leaving a table does not jump. Every table that
+    /// can stick was measured, so a table crossing the top is exact.
     pub fn cover_at(&self, y: f32, after: bool) -> f32 {
         let mut cover = 0.0f32;
-        for block in &self.blocks {
-            let Some(table) = block.table else { continue };
+        for table in &self.tables {
             let covered = if y < table.bottom {
                 (y - table.top).min(table.head)
             } else if after {
@@ -203,6 +384,9 @@ pub struct Placement {
 /// from the field's first line. In block mode the visible row's measured top
 /// and height place the offset inside that block, and the fraction is scaled
 /// onto the block's source-line span. Both clamp to the document's lines.
+///
+/// This is the fallback for a frame that has no [`VisualLines`] measurement
+/// yet; [`mapped_top_line`] is the exact mapping.
 pub fn top_line(top: &EditorTop, offset: f32, span: (usize, usize), lines: usize, line_height: f32) -> f32 {
     let last = lines.saturating_sub(1) as f32;
     if top.block.is_some() {
@@ -219,6 +403,46 @@ pub fn top_line(top: &EditorTop, offset: f32, span: (usize, usize), lines: usize
     }
 }
 
+/// [`top_line`] from the field's measured visual lines (E-07).
+///
+/// `visual` must cover the visible field (the single field or the visible
+/// block). Its source line must agree with `span`'s start, or the map belongs
+/// to another block/frame and the measured fallback is used.
+pub fn mapped_top_line(
+    top: &EditorTop,
+    visual: Option<&VisualLines>,
+    offset: f32,
+    span: (usize, usize),
+    lines: usize,
+    line_height: f32,
+) -> f32 {
+    let last = lines.saturating_sub(1) as f32;
+    let expected = if top.block.is_some() { span.0 } else { 0 };
+    if let Some(visual) = visual.filter(|visual| visual.measured && visual.first_line == expected)
+        && let Some(line) = visual.line_at(offset - top_text_top(top))
+    {
+        // A block field's text ends with the newline before the next block, so
+        // its last display line is the *next* source line; the block owns its
+        // lines up to `span.1` exclusive, and never a line the field draws
+        // beyond the document.
+        let upper = if top.block.is_some() { (span.1 as f32).min(last) } else { last };
+        return line.clamp(span.0 as f32, upper);
+    }
+    top_line(top, offset, span, lines, line_height)
+}
+
+/// The points below the editor viewport's top where the measured field's text
+/// begins.
+fn top_text_top(top: &EditorTop) -> f32 {
+    if top.block.is_some() {
+        top.block_top
+    } else if top.measured {
+        top.start
+    } else {
+        EDITOR_PAD_TOP
+    }
+}
+
 /// The preview placement for a fractional source line.
 ///
 /// `at_top` reproduces the original's rule that an editor at its very top
@@ -229,26 +453,12 @@ pub fn preview_placement(doc: &MdDoc, line: f32, at_top: bool, geometry: &Previe
     let line = line.clamp(0.0, lines.saturating_sub(1) as f32);
     let floor = (line.floor() as usize).min(lines.saturating_sub(1));
     let byte = *doc.line_starts.get(floor)? as usize;
-    let (index, key) = match block_at_or_above(doc, floor) {
-        Some(index) => (index, doc.block_key(index)?.to_owned()),
-        None => {
-            // A line in the front matter sits before the first block; the card
-            // is its anchor. Without one the line has no preview element.
-            let first = doc.block_spans.first().map_or(usize::MAX, |span| span.source.start);
-            if doc.front_matter.is_some() && byte < first {
-                // The card is not an `MdDoc` block; place its top at the
-                // margin. Its own layout is not interpolated (OI-075).
-                return Some(Placement {
-                    key: FRONT_MATTER_KEY.to_owned(),
-                    y: -SYNC_MARGIN,
-                    target: 0.0,
-                    index: None,
-                    fallback: false,
-                });
-            }
-            return None;
-        }
-    };
+    let first_block = doc.block_spans.first();
+    if doc.front_matter.is_some() && first_block.is_none_or(|span| byte < span.source.start) {
+        return front_matter_placement(doc, line, at_top, geometry);
+    }
+    let index = block_at_or_above(doc, floor)?;
+    let key = doc.block_key(index)?.to_owned();
     let Some(block) = geometry.block(index) else {
         // The preview has not measured this block yet (a jump across blocks):
         // land its top at the margin and refine on the next measurement.
@@ -257,12 +467,34 @@ pub fn preview_placement(doc: &MdDoc, line: f32, at_top: bool, geometry: &Previe
     let t = anchor_span(doc, index).map_or(0.0, |(start, end)| span_fraction(line, start, end));
     let y_line = block.top + t * block.span();
     let cover = geometry.cover_at(y_line, true);
-    let raw = y_line - SYNC_MARGIN - cover;
+    let raw = y_line - SYNC_MARGIN - geometry.reserve - cover;
     let target = if at_top { 0.0 } else { clamp_target(raw, geometry) };
     // `scroll_key_to` takes the anchor's top *below* the viewport top; the
     // viewport's top sits at content `target`, so the anchor's top is
     // `block.top - target` below it (negative: scrolled into the block).
     Some(Placement { key, y: block.top - target, target, index: Some(index), fallback: false })
+}
+
+/// The front matter card's interpolation: line 0 to the first block's line
+/// across the card's own top and height.
+fn front_matter_placement(doc: &MdDoc, line: f32, at_top: bool, geometry: &PreviewGeometry) -> Option<Placement> {
+    let next_line = doc.block_spans.first().map_or(1, |span| span.line).max(1);
+    let Some(card) = geometry.front_matter.as_ref() else {
+        // The card is drawn in the article but not measured yet: place its top
+        // at the margin and refine on the next frame.
+        return Some(Placement {
+            key: FRONT_MATTER_KEY.to_owned(),
+            y: -SYNC_MARGIN,
+            target: 0.0,
+            index: None,
+            fallback: true,
+        });
+    };
+    let t = span_fraction(line, 0, next_line);
+    let y_line = card.top + t * card.span();
+    let raw = y_line - SYNC_MARGIN - geometry.reserve;
+    let target = if at_top { 0.0 } else { clamp_target(raw, geometry) };
+    Some(Placement { key: card.key.clone(), y: card.top - target, target, index: None, fallback: false })
 }
 
 /// The preview placement that keeps the caret's block in view (E-07's second
@@ -307,7 +539,7 @@ pub fn reveal_placement(
         if caret_bottom > target + viewport - pad {
             target = caret_bottom - viewport + pad;
         }
-        let above = SYNC_MARGIN + geometry.cover_at(caret_top, false);
+        let above = SYNC_MARGIN + geometry.reserve + geometry.cover_at(caret_top, false);
         if caret_top < target + above {
             target = caret_top - above;
         }
@@ -359,7 +591,8 @@ impl WindowState {
         let (lines, span) = self.editor_span()?;
         let top = self.editor.editor_top.get();
         let offset = self.editor.scroll.get().offset;
-        Some(top_line(&top, offset, span, lines, self.editor_metrics().line_height))
+        let visual = self.editor.visual.borrow();
+        Some(mapped_top_line(&top, Some(visual.get()), offset, span, lines, self.editor_metrics().line_height))
     }
 
     /// The 0-based line the editor's caret is on.
@@ -388,12 +621,23 @@ impl WindowState {
         Some((lines, (start, end)))
     }
 
-    /// Records where the source field's first line sits (called by the view).
-    pub(crate) fn publish_editor_top(&self, cx: &Cx<WindowState>) {
+    /// Records where the source field's first line sits and the field's exact
+    /// visual lines (called by the view; E-07).
+    ///
+    /// `spans` are the field's own syntax spans and `font` its style, so the
+    /// measurement wraps exactly as the field draws (the view's measure uses
+    /// the window's text system). The measurement is cached by session
+    /// revision, width, font and block.
+    pub(crate) fn publish_editor_top(&self, cx: &Cx<WindowState>, spans: &[Span], font: TextStyle) {
         let Some(tab) = self.active_tab() else { return };
         let Some(editor) = tab.view.editor.as_ref() else { return };
+        let Some(doc) = tab.document() else { return };
         let viewport = cx.layout(SOURCE_SCROLL_KEY);
-        let top = if editor.block_mode_active() {
+        let revision = editor.revision();
+        // Without a preview beside the source there is nothing to sync, and
+        // typing must not pay for measuring lines nobody will map.
+        let sync_active = !self.editor.preview_narrow && self.editor.preview_visible && tab.view.reader.is_some();
+        if editor.block_mode_active() {
             let index = self
                 .editor
                 .visible_blocks
@@ -401,7 +645,8 @@ impl WindowState {
                 .map(|range| range.start)
                 .or_else(|| editor.active_block())
                 .unwrap_or(0);
-            match (viewport, cx.layout(&crate::block_ui::block_field_key(index))) {
+            let field = cx.layout(&crate::block_ui::block_field_key(index));
+            let top = match (viewport, field) {
                 (Some(view), Some(field)) => EditorTop {
                     measured: true,
                     start: field[1] - view[1],
@@ -410,20 +655,39 @@ impl WindowState {
                     block_height: field[3].max(1.0),
                 },
                 _ => EditorTop { block: Some(index), ..EditorTop::default() },
+            };
+            self.editor.editor_top.set(top);
+            let block = editor.block_editor().and_then(|blocks| blocks.block(index));
+            match (field, block) {
+                (Some(field), Some(block)) if sync_active => {
+                    let first_line = doc.text().line_of(block.range.start);
+                    let mut visual = self.editor.visual.borrow_mut();
+                    visual.refresh(revision, &block.edit.text, spans, font, field[2], first_line);
+                }
+                _ => self.editor.visual.borrow_mut().clear(),
             }
         } else {
-            match (viewport, cx.layout(SOURCE_FIELD_KEY)) {
+            let field = cx.layout(SOURCE_FIELD_KEY);
+            let top = match (viewport, field) {
                 (Some(view), Some(field)) => {
                     EditorTop { measured: true, start: field[1] - view[1], ..EditorTop::default() }
                 }
                 _ => EditorTop { start: EDITOR_PAD_TOP, ..EditorTop::default() },
+            };
+            self.editor.editor_top.set(top);
+            match field {
+                Some(field) if sync_active => {
+                    let mut visual = self.editor.visual.borrow_mut();
+                    visual.refresh(revision, &editor.edit.text, spans, font, field[2], 0);
+                }
+                _ => self.editor.visual.borrow_mut().clear(),
             }
-        };
-        self.editor.editor_top.set(top);
+        }
     }
 
-    /// Records the preview blocks around the editor's top and caret (called by
-    /// the reader view while editing).
+    /// Records the preview blocks around the editor's top and caret, every
+    /// table that can stick, the front matter card and the section-line
+    /// reserve (called by the reader view while editing; E-07).
     pub(crate) fn publish_preview_geometry(&self, doc: &MdDoc, cx: &Cx<WindowState>) {
         if self.active_tab().is_none_or(|tab| tab.view.mode != Mode::Editor) {
             return;
@@ -441,10 +705,16 @@ impl WindowState {
         wanted.sort_unstable();
         wanted.dedup();
         let content_bottom = cx.layout(DOC_KEY).map_or(0.0, |rect| rect[1] + rect[3]);
+        let viewport_rect = cx.layout(ARTICLE_SCROLL_KEY);
+        let viewport = viewport_rect.map_or(0.0, |rect| rect[3]);
+        let scroll = self.scroll_snapshot();
+        // Layout reads are unscrolled window points: the article viewport's own
+        // top plus the reported content offset is where its visible top sits.
+        let visible_top = viewport_rect.map_or(0.0, |rect| rect[1]) + scroll.offset;
         let mut blocks = Vec::with_capacity(wanted.len());
         for index in wanted {
             let Some(key) = doc.block_key(index).map(str::to_owned) else { continue };
-            let Some(rect) = cx.layout(&key) else { continue };
+            let Some(rect) = cx.layout(key.as_str()) else { continue };
             let next_top = doc
                 .block_key(index.saturating_add(1))
                 .and_then(|next| cx.layout(next))
@@ -453,22 +723,18 @@ impl WindowState {
                 let key = heading_key(heading);
                 cx.layout(&key).map(|rect| PreviewPart { key, top: rect[1], height: rect[3] })
             });
-            blocks.push(PreviewBlock {
-                index,
-                key,
-                top: rect[1],
-                height: rect[3],
-                next_top,
-                heading,
-                table: table_geometry(doc, cx, index),
-            });
+            blocks.push(PreviewBlock { index, key, top: rect[1], height: rect[3], next_top, heading });
         }
-        *self.editor.preview.borrow_mut() = PreviewGeometry {
-            blocks,
-            content_bottom,
-            viewport: cx.layout_size(ARTICLE_SCROLL_KEY).map_or(0.0, |size| size[1]),
-            max: self.scroll_snapshot().max,
-        };
+        // Every table whose rows can hold the viewport's top, not only the
+        // ones near the source caret: a table crossing the top keeps its header
+        // stuck there, and its rows may reach far past the editor's line.
+        let tables = measure_tables(doc, cx, visible_top, viewport);
+        let front_matter = doc.front_matter.is_some().then(|| front_matter_geometry(doc, cx)).flatten();
+        // O-07 keeps the section line out of edit mode; the reserve is the
+        // overlay's measured height whenever a frame does draw it.
+        let reserve = cx.layout(crate::section::SECTION_LINE_KEY).map_or(0.0, |rect| rect[3]).max(0.0);
+        *self.editor.preview.borrow_mut() =
+            PreviewGeometry { blocks, tables, front_matter, reserve, content_bottom, viewport, max: scroll.max };
     }
 
     /// Drops the measured preview geometry (leaving edit mode, or a source-only
@@ -575,7 +841,9 @@ impl WindowState {
         let top = self.editor.editor_top.get();
         let reported = self.editor.scroll.get();
         let (lines, span) = self.editor_span()?;
-        let line = top_line(&top, reported.offset, span, lines, self.editor_metrics().line_height);
+        let visual = self.editor.visual.borrow();
+        let line =
+            mapped_top_line(&top, Some(visual.get()), reported.offset, span, lines, self.editor_metrics().line_height);
         let geometry = self.editor.preview.borrow();
         // No preview on screen (narrow source-only, or a preview that has not
         // been laid out yet): there is nothing to place.
@@ -607,16 +875,52 @@ fn next_top_of_last(index: usize, doc: &MdDoc, rect: [f32; 4], content_bottom: f
     if index.saturating_add(1) < doc.blocks.len() { bottom } else { content_bottom.max(bottom) }
 }
 
-/// A table's measured box and sticky header for `index`, when it is a table.
-fn table_geometry(doc: &MdDoc, cx: &Cx<WindowState>, index: usize) -> Option<PreviewTable> {
-    if !matches!(doc.blocks.get(index), Some(MdBlock::Table(_))) {
-        return None;
+/// The front matter card's box and the first block's top.
+fn front_matter_geometry(doc: &MdDoc, cx: &Cx<WindowState>) -> Option<PreviewAnchor> {
+    let rect = cx.layout(FRONT_MATTER_KEY)?;
+    let next_top = doc.block_key(0).and_then(|key| cx.layout(key)).map_or(rect[1] + rect[3], |next| next[1]);
+    Some(PreviewAnchor { key: FRONT_MATTER_KEY.to_owned(), top: rect[1], height: rect[3], next_top })
+}
+
+/// Every top-level table whose rows can hold `top_offset` under the viewport,
+/// with its sticky header.
+///
+/// A table sticks from its first row until its bottom passes the viewport's
+/// top; one more header height above the top is measured so the `after` fade
+/// has data on the frame it leaves.
+fn measure_tables(doc: &MdDoc, cx: &Cx<WindowState>, top_offset: f32, viewport: f32) -> Vec<PreviewTable> {
+    let mut tables = Vec::new();
+    let viewport_bottom = top_offset + viewport;
+    for (index, block) in doc.blocks.iter().enumerate() {
+        if !matches!(block, MdBlock::Table(_)) {
+            continue;
+        }
+        let Some(key) = doc.block_key(index) else { continue };
+        // The block wrapper is the table's own box (its action bar floats over
+        // it); the sticky header lives under the app's `TableWire` wrapper, or
+        // directly under the block when no wire is set.
+        let Some(rect) = cx.layout(key) else { continue };
+        let (top, bottom) = (rect[1], rect[1] + rect[3]);
+        let head = table_head_paths(key).iter().find_map(|path| cx.layout(path)).map_or(0.0, |r| r[3]);
+        // Tables can hold the top from their first row to their bottom; one
+        // more header height above the top keeps the `after` fade exact.
+        if bottom < top_offset - head || top > viewport_bottom {
+            continue;
+        }
+        tables.push(PreviewTable { top, bottom, head });
     }
-    let key = doc.block_key(index)?;
-    let direct = format!("{key}/table");
-    let wide = format!("{key}/scroll/table");
-    let rect = cx.layout(&direct).or_else(|| cx.layout(&wide))?;
-    let head =
-        cx.layout(&format!("{direct}/head")).or_else(|| cx.layout(&format!("{wide}/head"))).map_or(0.0, |head| head[3]);
-    Some(PreviewTable { top: rect[1], bottom: rect[1] + rect[3], head })
+    tables
+}
+
+/// Where a top-level table's sticky header can be drawn: under the app's
+/// `TableWire` wrapper (keyed `table-block-{key}`), in its own box, or beneath
+/// the sideways scroller a wide table uses; the bare paths cover a wire-less
+/// renderer tree.
+pub(crate) fn table_head_paths(key: &str) -> [String; 4] {
+    [
+        format!("{key}/table-block-{key}/table/head"),
+        format!("{key}/table-block-{key}/scroll/table/head"),
+        format!("{key}/table/head"),
+        format!("{key}/scroll/table/head"),
+    ]
 }

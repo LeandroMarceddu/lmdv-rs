@@ -193,6 +193,10 @@ impl WindowState {
 
     /// `Ctrl+F` in the reading view: opens the bar, prefills from the article
     /// selection, selects the input and reveals the first hit (R-16/R-17).
+    ///
+    /// The selection is used exactly as selected (one line, trimmed, no
+    /// newlines); a non-collapsed selection that trims to nothing prefills an
+    /// empty query instead of leaving the previous query's hits in place.
     pub(crate) fn open_reader_find(&mut self, tx: &mut Tx) {
         let Some(tab) = self.active_tab() else { return };
         if tab.view.mode != Mode::Viewer {
@@ -201,8 +205,8 @@ impl WindowState {
         let Some(model) = tab.view.reader.clone() else { return };
         let prefill = tx
             .text_selection()
-            .map(|selection| reader_find_prefill(selection.text()))
-            .filter(|query| !query.is_empty());
+            .filter(|selection| selection.texts().iter().any(|text| selection_in_article(text.path())))
+            .map(|selection| reader_find_prefill(selection.text()));
         let Some(tab) = self.active_tab_mut() else { return };
         let find = &mut tab.view.reader_find;
         find.open = true;
@@ -542,8 +546,23 @@ pub(crate) fn refresh_tab(tab: &mut Tab) {
     tab.view.reader_find.revision = Some(model.revision);
 }
 
-/// The first line of `text`, trimmed and capped at
-/// [`READER_FIND_PREFILL_MAX`] characters (R-17).
+/// Whether a selection text's path is inside the reader's article (R-17).
+///
+/// Rune reports a selection inside a text field as a text selection too; the
+/// prefill comes from the article only, so a selection in the find bar, the
+/// outline filter or a browser field is ignored. The article viewport's key is
+/// in every path below it.
+pub(crate) fn selection_in_article(path: &str) -> bool {
+    path.split('/').any(|segment| segment == crate::reader::ARTICLE_SCROLL_KEY)
+}
+
+/// The selection as the reading find prefill (R-17).
+///
+/// The selection is used exactly as selected: no word expansion, no case
+/// folding, no whitespace rewriting inside the line. It is trimmed at both
+/// ends, reduced to its first line — a selection across several drawn texts
+/// has no newlines left — and capped at [`READER_FIND_PREFILL_MAX`] characters.
+/// A selection that trims to nothing yields an empty query.
 pub fn reader_find_prefill(text: &str) -> String {
     text.trim().lines().next().unwrap_or_default().trim().chars().take(READER_FIND_PREFILL_MAX).collect()
 }

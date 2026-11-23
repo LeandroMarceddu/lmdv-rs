@@ -728,6 +728,119 @@ fn unsafe_urls_are_dropped() {
 }
 
 #[test]
+fn url_paths_decode_one_layer_and_never_fail() {
+    // L-15: `decodeURIComponent` with a raw fallback.
+    assert_eq!(crate::decode_url_path("my%20notes.md"), "my notes.md");
+    assert_eq!(crate::decode_url_path("100% done.md"), "100% done.md", "a stray % stays as written");
+    assert_eq!(crate::decode_url_path("100%25 done.md"), "100% done.md");
+    assert_eq!(crate::decode_url_path("a%2520b.png"), "a%20b.png", "exactly one layer");
+    assert_eq!(crate::decode_url_path("%FF.png"), "\u{FFFD}.png", "invalid UTF-8 is lossy, never a panic");
+}
+
+#[test]
+fn srcset_drops_network_device_and_unc_candidates() {
+    // M-26: an off-limits candidate never outlives the attribute filter. A
+    // local spelling, including an ordinary `///abs` path, stays as written
+    // with its descriptor.
+    let doc = doc(
+        r#"<img src="local.png" srcset="//cdn.test/a.png 2x, \\server\share\b.png 3x, C:/pics/c.png 4x, local.png 1x, ///abs/d.png 5x" alt="x">"#,
+    );
+    let image = match &doc.blocks[0] {
+        Block::Image(image) => image,
+        other => panic!("image: {other:?}"),
+    };
+    let urls: Vec<(&str, Option<&str>)> =
+        image.srcset.iter().map(|candidate| (candidate.url.as_str(), candidate.descriptor.as_deref())).collect();
+    assert_eq!(urls, [("local.png", Some("1x")), ("///abs/d.png", Some("5x"))]);
+    assert_eq!(image.src, "local.png", "the src spelling is not a candidate and is untouched");
+}
+
+#[test]
+fn picture_sources_also_drop_network_srcset_candidates() {
+    let doc = doc(r#"<picture>
+<source media="(min-width: 800px)" srcset="//cdn.test/wide.png 1x, wide.png 2x">
+<img src="small.png" alt="Logo">
+</picture>
+"#);
+    let image = match &doc.blocks[0] {
+        Block::Image(image) => image,
+        other => panic!("image: {other:?}"),
+    };
+    assert_eq!(image.picture[0].srcset.len(), 1);
+    assert_eq!(image.picture[0].srcset[0].url, "wide.png");
+}
+
+// ------------------------------------------------------------------ L-12
+
+fn collect_tag<'a>(node: &'a HtmlNode, tag: &str, out: &mut Vec<&'a HtmlNode>) {
+    if node.tag.name() == tag {
+        out.push(node);
+    }
+    for child in &node.children {
+        if let HtmlChild::Node(child) = child {
+            collect_tag(child, tag, out);
+        }
+    }
+}
+
+#[test]
+fn image_map_areas_and_svg_links_keep_only_safe_destinations() {
+    let doc = doc(
+        r##"<div><map name="map1"><area href="#one" alt="One" shape="rect" coords="0,0,10,10"><area href="javascript:alert(1)" alt="Bad"></map><svg onload="alert(2)"><script>alert(3)</script><a href="#a">A</a><a xlink:href="#b">B</a><a xlink:href="javascript:alert(4)">C</a></svg></div>
+"##,
+    );
+    let fragment = match &doc.blocks[0] {
+        Block::HtmlBlock(node) => node,
+        other => panic!("html block: {other:?}"),
+    };
+    let map = child_node(fragment, "map").expect("the map is part of the safe subset");
+    assert_eq!(map.attr("name"), Some("map1"));
+    let mut areas = Vec::new();
+    collect_tag(map, "area", &mut areas);
+    assert_eq!(areas.len(), 2);
+    assert_eq!(areas[0].attr("href"), Some("#one"));
+    assert_eq!(areas[0].attr("alt"), Some("One"));
+    assert_eq!(areas[0].attr("shape"), Some("rect"));
+    assert_eq!(areas[0].attr("coords"), Some("0,0,10,10"));
+    assert_eq!(areas[1].attr("href"), None, "a script destination is dropped");
+
+    let svg = child_node(fragment, "svg").expect("the svg container is part of the safe subset");
+    assert!(svg.attr("onload").is_none(), "an event handler never survives");
+    let mut anchors = Vec::new();
+    collect_tag(svg, "a", &mut anchors);
+    assert_eq!(anchors.len(), 3);
+    assert_eq!(anchors[0].attr("href"), Some("#a"));
+    // L-12: `xlink:href` is stored under `href`, so the inline parser and a
+    // future link menu read one name; html5ever already did this for SVG's
+    // XLink namespace, and `filter_attrs` does it for the literal spelling.
+    assert_eq!(anchors[1].attr("href"), Some("#b"));
+    assert!(anchors[1].attr("xlink:href").is_none());
+    let third = anchors[2].attr("href");
+    assert_eq!(third, None, "a script destination is dropped");
+    // GitHub's tagfilter escaped `<script>` before the fragment was parsed, so
+    // it is inert text here, never an element.
+    let mut scripts = Vec::new();
+    collect_tag(fragment, "script", &mut scripts);
+    assert!(scripts.is_empty(), "a script never becomes an element: {fragment:?}");
+}
+
+#[test]
+fn an_inline_xlink_href_names_a_link_and_keeps_the_url_policy() {
+    let parsed = doc("Before <a xlink:href=\"#part\">jump</a> after\n");
+    let inline = match &parsed.blocks[0] {
+        Block::Para(inline) => inline,
+        other => panic!("para: {other:?}"),
+    };
+    assert!(inline.links.iter().any(|link| link.dest == "#part"), "{:?}", inline.links);
+    let bad = doc("Before <a xlink:href=\"javascript:alert(1)\">bad</a> after\n");
+    let inline = match &bad.blocks[0] {
+        Block::Para(inline) => inline,
+        other => panic!("para: {other:?}"),
+    };
+    assert!(inline.links.iter().all(|link| !link.dest.contains("javascript")), "{:?}", inline.links);
+}
+
+#[test]
 fn srcset_parser_handles_commas_and_trailing_commas() {
     let candidates = crate::html::parse_srcset("a,b.png 1x, c.png 2x,d.png,");
     assert_eq!(candidates.len(), 3);

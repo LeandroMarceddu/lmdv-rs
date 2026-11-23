@@ -867,4 +867,49 @@ mod tests {
         assert_eq!(second.tabs().len(), 1);
         assert!(second.active_tab().is_some_and(crate::window::Tab::is_start));
     }
+
+    #[test]
+    fn ctrl_w_cancels_a_tab_drag_before_it_closes_the_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("One", "# One\n");
+        state.open_synthetic("Two", "# Two\n");
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.on_key = Some(on_key);
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+
+        let dragged = runtime.state.tabs()[0].id;
+        let (x, y) = runtime.find(&format!("t-{}", crate::window::tab_key(dragged))).expect("the tab");
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(x + 140.0, y);
+        runtime.frame(0.0);
+        assert!(
+            matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Dragging(_)),
+            "the drag is in hand"
+        );
+
+        // T-29: Ctrl+W ends the drag first; the tab is still there.
+        let tabs = runtime.state.tabs().len();
+        let ctrl_w = rune::KeyEvent {
+            key: rune::Key::Command('w'),
+            mods: rune::Mods { ctrl: true, cmd: true, ..rune::Mods::default() },
+        };
+        runtime.key(ctrl_w.clone());
+        runtime.frame(0.0);
+        assert!(
+            matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Idle),
+            "Ctrl+W cancelled the drag: {:?}",
+            runtime.state.drag.phase()
+        );
+        assert_eq!(runtime.state.tabs().len(), tabs, "the drag took the press, not the tab");
+
+        // The next press closes it.
+        runtime.key(ctrl_w);
+        runtime.frame(0.0);
+        assert_eq!(runtime.state.tabs().len(), tabs - 1, "a second Ctrl+W closes the tab");
+    }
 }

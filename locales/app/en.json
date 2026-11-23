@@ -170,6 +170,8 @@
   "keys.dblclick": "Put the cursor there",
   "help.close": "Close (Esc)",
   "help.title": "Help",
+  "help.repository": "Repository",
+  "help.license": "License",
   "zoom.open": "Open preview",
   "zoom.dialog": "Preview",
   "zoom.viewport": "Zoomable preview. Plus and minus zoom, 0 fits, W fits the width, 1 shows the actual size, arrow keys pan, Escape closes.",

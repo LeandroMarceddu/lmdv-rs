@@ -475,7 +475,7 @@ fn the_window_chooser_lists_other_open_non_closing_windows() {
     let targets = source.window_targets();
     assert_eq!(targets.len(), 1);
     assert_eq!(targets[0].id, target.id());
-    assert_eq!(targets[0].title, "Second notes — lmdv");
+    assert_eq!(targets[0].title, "\u{201c}Second notes\u{201d} \u{2014} lmdv");
 
     source.show_tab_menu(tab, PointerPress { x: 12.0, y: 24.0 });
     assert_eq!(source.tab_menu().map(|menu| menu.chooser), Some(false));

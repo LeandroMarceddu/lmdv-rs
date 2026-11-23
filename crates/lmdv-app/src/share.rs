@@ -522,9 +522,10 @@ impl WindowState {
                         NoticeKind::Success,
                     ),
                     ExportFormat::Pdf => {
-                        let action =
-                            outcome.path.parent().map(|parent| NoticeAction::ShowInFolder(parent.to_path_buf()));
-                        self.show_share_notice(lmdv_i18n::t!("msg.pdfSaved"), action, NoticeKind::Success);
+                        // X-05's Show in folder: the notice carries the file so
+                        // the action can select it in the folder (OI-104).
+                        let action = NoticeAction::ShowInFolder(outcome.path.clone());
+                        self.show_share_notice(lmdv_i18n::t!("msg.pdfSaved"), Some(action), NoticeKind::Success);
                     }
                     ExportFormat::Html | ExportFormat::Docx => self.show_share_notice(
                         format!("{} {}", lmdv_i18n::t!("msg.saved"), outcome.path.display()),
@@ -615,10 +616,12 @@ impl WindowState {
 
 /// The PDF settings for a print/export, including the localized medium date.
 pub(crate) fn pdf_export(state: &WindowState) -> PdfExport {
-    PdfExport {
-        date: medium_date(unix_millis() / 1_000, lmdv_i18n::locale()),
-        break_on_h1: state.shared().prefs().print_break_h1,
-    }
+    pdf_export_at(state, unix_millis() / 1_000)
+}
+
+/// [`pdf_export`] at a fixed instant, so the date path is testable.
+pub(crate) fn pdf_export_at(state: &WindowState, unix_secs: u64) -> PdfExport {
+    PdfExport { date: medium_date(unix_secs, lmdv_i18n::locale()), break_on_h1: state.shared().prefs().print_break_h1 }
 }
 
 /// The title an export uses: the first level-1 heading, else the source stem or
@@ -697,10 +700,47 @@ pub fn file_safe_name(title: &str) -> String {
     name
 }
 
-/// A unique temporary PDF for `Print…`. The file is left in place for the
-/// viewer; the OS temp sweep owns it.
+/// A unique temporary PDF for `Print…`. It is handed to the system viewer and
+/// removed a grace period later ([`PRINT_TEMP_GRACE`]); a user-exported file
+/// never takes this shape (OI-104).
 pub fn print_temp_path() -> PathBuf {
     std::env::temp_dir().join(format!("lmdv-print-{}-{}.pdf", std::process::id(), unix_millis()))
+}
+
+/// How long a `Print…` temporary stays on disk for the viewer to open it.
+///
+/// The viewer is started when the export finishes but may take a moment to
+/// read the file; on Linux removing a file another process holds open is safe,
+/// and thirty seconds keeps a slow cold start working.
+pub const PRINT_TEMP_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether `path` is one of this app's `Print…` temporaries.
+///
+/// Only the print path (`open_viewer`, the viewer's own copy) is passed to
+/// [`remove_print_temp`]; this name check is the second guard that keeps a file
+/// the user exported from ever being removed (X-05, OI-104).
+pub fn is_print_temp(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("lmdv-print-") && name.ends_with(".pdf"))
+}
+
+/// Removes one `Print…` temporary. Returns whether `path` was one; a user
+/// export is left untouched.
+pub fn remove_print_temp(path: &Path) -> std::io::Result<bool> {
+    if !is_print_temp(path) {
+        return Ok(false);
+    }
+    lmdv_io::remove_file(path).map(|()| true)
+}
+
+/// Queues the removal of a `Print…` temporary after the viewer has had
+/// [`PRINT_TEMP_GRACE`] to take it. Called from the export worker, never from a
+/// frame (X-05, OI-104).
+pub(crate) fn schedule_print_temp_removal(path: PathBuf) {
+    let _ = rune::task::spawn_after("lmdv-print-cleanup", PRINT_TEMP_GRACE, move || {
+        let _ = remove_print_temp(&path);
+    });
 }
 
 /// The scripted/test seam for a native save dialog: `LMDV_EXPORT_DIR`.
@@ -795,41 +835,61 @@ fn pick_face(database: &fontdb::Database, candidates: &[&str]) -> Option<LoadedF
 
 // ---- localized medium date (X-14) ---------------------------------------
 
-/// A localized `dateStyle: "medium"` date for the PDF header.
+/// A localized `dateStyle: "medium"` date for the PDF header and the start
+/// page's older recents.
 ///
-/// The app has no time-zone formatter yet (OI-033); the calendar date is UTC.
-/// The six catalogs' month names are inlined here, matching their `Intl`
-/// medium forms: `Nov 14, 2026`, `14 nov 2026`, `14.11.2026`, `14 nov. 2026`,
-/// `14 nov 2026`, `2026年11月14日`.
+/// The day is the **user's local day**, not UTC's: at 23:30 in CET the print
+/// must say the 14th, not the 13th (X-14, OI-104). The six catalogs' month
+/// names are inlined and match their `Intl` medium forms: `Nov 14, 2026`,
+/// `14 nov 2026`, `14.11.2026`, `14 nov. 2026`, `14 nov 2026`, `2026年11月14日`.
 pub fn medium_date(unix_secs: u64, locale: usize) -> String {
-    let (year, month, day) = civil_from_days((unix_secs / 86_400) as i64);
+    match lmdv_io::local_civil_date(unix_secs) {
+        Some((year, month, day)) => medium_date_civil(year, month, day, locale),
+        // A platform without time-zone data keeps the UTC date.
+        None => medium_date_at(unix_secs, 0, locale),
+    }
+}
+
+/// [`medium_date`] shifted by an explicit UTC offset in seconds.
+///
+/// A zero offset is the UTC form (the platform fallback); the pure day-boundary
+/// seam lets the tests pin `+01:00` at `23:30Z` to the next day.
+pub fn medium_date_at(unix_secs: u64, utc_offset_secs: i64, locale: usize) -> String {
+    let shifted = (unix_secs.min(i64::MAX as u64) as i64).saturating_add(utc_offset_secs);
+    let (year, month, day) = civil_from_days(shifted.div_euclid(86_400));
+    medium_date_civil(year, month, day, locale)
+}
+
+/// The localized medium form of one calendar date.
+fn medium_date_civil(year: i64, month: u32, day: u32, locale: usize) -> String {
+    let month_index = (month.clamp(1, 12) - 1) as usize;
     let id = lmdv_i18n::locales().get(locale).map(|locale| locale.id()).unwrap_or("en");
     match id {
         "it" => format!(
             "{day} {} {year}",
-            ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"][month - 1]
+            ["gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic"][month_index]
         ),
         "de" => format!("{day:02}.{month:02}.{year}"),
         "fr" => format!(
             "{day} {} {year}",
             ["janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.", "déc."]
-                [month - 1]
+                [month_index]
         ),
         "es" => format!(
             "{day} {} {year}",
-            ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"][month - 1]
+            ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sept", "oct", "nov", "dic"][month_index]
         ),
         "zh-CN" => format!("{year}年{month}月{day}日"),
         _ => format!(
             "{} {day}, {year}",
-            ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1]
+            ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month_index]
         ),
     }
 }
 
 /// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's
 /// `civil_from_days`).
-fn civil_from_days(days: i64) -> (i64, usize, u32) {
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
@@ -838,6 +898,6 @@ fn civil_from_days(days: i64) -> (i64, usize, u32) {
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as usize;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
 }

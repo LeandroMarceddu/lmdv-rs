@@ -140,7 +140,7 @@ All four patches remain ours.
   Failed), drag slop is still 4.0.
 - **C-01/IME:** focus-ring and focus-`Entry` preservation help ring stability;
   there is still no IME composing state.
-- **OI-193:** no present-mode or frame-rate-cap API. Unchanged.
+- **Frame rate:** no present-mode or frame-rate-cap API; no settings row is planned (the scroll speedup was accepted as the fix).
 - **OI-155:** Windows key/instance fixes only; no path identity, modes or
   association work.
 - **Images/scroll:** task-thread image decoders (recheck headless `wait`

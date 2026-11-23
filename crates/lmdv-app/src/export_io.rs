@@ -49,7 +49,19 @@ pub(crate) fn run_export(spec: &ExportSpec) -> Result<ExportOutcome, String> {
     };
     let path = write_export(&spec.path, &bytes)?;
     if spec.open_viewer {
-        open_external_path(&path).map_err(|error| format!("{}: {error}", path.display()))?;
+        // Print…: the viewer takes the temporary PDF now. If it cannot be
+        // started, the file was never consumed and is removed at once;
+        // otherwise the worker queues its removal after the viewer has had a
+        // grace period (X-05, OI-104).
+        if let Err(error) = open_external_path(&path) {
+            if crate::share::is_print_temp(&path) {
+                let _ = crate::share::remove_print_temp(&path);
+            }
+            return Err(format!("{}: {error}", path.display()));
+        }
+        if crate::share::is_print_temp(&path) {
+            crate::share::schedule_print_temp_removal(path.clone());
+        }
     }
     let warnings = doc.warnings.iter().map(|warning| warning.message.clone()).collect();
     Ok(ExportOutcome { path, bytes: bytes.len() as u64, format: spec.format, warnings, font_note })
@@ -116,6 +128,13 @@ fn write_export(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
 /// from a handler or a view.
 pub(crate) fn open_external_path(path: &Path) -> Result<(), String> {
     lmdv_io::open_external(path).map_err(|error| error.to_string())
+}
+
+/// Reveals `path` in the desktop's file manager (selecting it where the file
+/// manager supports it). Called from a worker only; a missing file reveals its
+/// folder (X-05, OI-104).
+pub(crate) fn reveal_path(path: &Path) -> Result<(), String> {
+    lmdv_io::reveal_in_file_manager(path).map_err(|error| error.to_string())
 }
 
 /// Resolves a local picture through the document's path policy and returns its

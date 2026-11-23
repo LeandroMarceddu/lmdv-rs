@@ -49,6 +49,14 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.9.0" date="2026-11-23" type="development">
+      <description>
+        <p>Editor fade and exact preview sync, local PDF dates with file
+          reveal and print cleanup, image links and encoded paths, outline and
+          jump reserves, window/tab polish, Help links, and table cell overflow
+          fixes.</p>
+      </description>
+    </release>
     <release version="0.8.0" date="2026-11-21" type="development">
       <description>
         <p>Make lmdv the default Markdown handler from Settings on Windows and

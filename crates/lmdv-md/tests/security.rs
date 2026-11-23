@@ -1081,6 +1081,8 @@ fn raw_html_never_keeps_scripts_handlers_or_unsafe_urls() {
         "<img src=\"data:text/html;base64,PHNjcmlwdD4=\" alt=\"x\">",
         "<video poster=\"javascript:alert(1)\"></video>",
         "<svg onload=\"alert(1)\"><script>alert(2)</script></svg>",
+        "<svg><a xlink:href=\"javascript:alert(1)\">link</a></svg>",
+        "<map><area href=\"javascript:alert(1)\" alt=\"x\"><area href=\"vbscript:msgbox(1)\" alt=\"y\"></map>",
     ];
     for source in sources {
         let doc = lmdv_md::parse(source);
@@ -1089,7 +1091,7 @@ fn raw_html_never_keeps_scripts_handlers_or_unsafe_urls() {
         for node in nodes {
             for (name, value) in &node.attrs {
                 assert!(!name.starts_with("on"), "{source}: {name} survived");
-                if matches!(name.as_str(), "href" | "src" | "poster") {
+                if matches!(name.as_str(), "href" | "src" | "poster" | "xlink:href") {
                     let lower = value.to_ascii_lowercase();
                     assert!(!lower.starts_with("javascript:"), "{source}: {name} kept javascript:");
                     assert!(!lower.starts_with("vbscript:"), "{source}: {name} kept vbscript:");

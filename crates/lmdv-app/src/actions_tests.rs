@@ -334,6 +334,30 @@ fn pin_toggles_the_checked_state_and_sends_the_native_request() {
 }
 
 #[test]
+fn the_pin_check_belongs_to_one_window_and_is_not_carried_to_the_next() {
+    let temp = TempDir::new().unwrap();
+    let shared = shared(&temp);
+    shared.set_pin_available(true);
+    shared.set_pin_sink(Box::new(|_, _| {}));
+    let mut first = WindowState::new(Rc::clone(&shared));
+    let second = WindowState::new(Rc::clone(&shared));
+    let command = crate::commands::lookup_command("view.pin").expect("command");
+    let checked = command.checked.expect("checked");
+    let mut tx = Tx::default();
+
+    assert!(first.run_command("view.pin", &mut tx));
+    assert!(first.pinned);
+    assert!(checked(&first));
+    assert!(!second.pinned, "W-07: the pin is per window");
+    assert!(!checked(&second));
+
+    // A window opened later starts unpinned: the state is never persisted.
+    let third = WindowState::new(Rc::clone(&shared));
+    assert!(!third.pinned);
+    assert!(!checked(&third));
+}
+
+#[test]
 fn pin_refuses_on_wayland_with_a_clear_notice() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);

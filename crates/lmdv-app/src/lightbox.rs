@@ -162,6 +162,13 @@ pub struct Lightbox {
     png: Arc<Mutex<PngState>>,
     /// The running Save as PNG… write, if any.
     save: RefCell<Option<ImageSave>>,
+    /// When the preview opened from a plain link to a local image (L-06), the
+    /// path the non-Markdown notice names if the picture turns out not to
+    /// decode.
+    link_fallback: Option<PathBuf>,
+    /// Whether the source may sit outside the document folder: an image a link
+    /// named (L-06) may, an embedded picture may not (OI-009).
+    allow_outside: bool,
 }
 
 /// A picture's PNG file, as the worker read it (V-08/V-09).
@@ -229,6 +236,8 @@ impl Lightbox {
             menu_open: Cell::new(false),
             png: Arc::new(Mutex::new(PngState::Loading)),
             save: RefCell::new(None),
+            link_fallback: None,
+            allow_outside: false,
         }
     }
 
@@ -270,8 +279,9 @@ impl Lightbox {
     /// again: `lmdv-app` has no decoder to re-encode another format.
     fn load_png(&self, root: PathBuf, source: String, waker: Waker) {
         let slot = self.png.clone();
+        let allow_outside = self.allow_outside;
         let spawned = rune::task::spawn("lmdv-image-png", move || {
-            let state = read_png(&root, &source);
+            let state = read_png(&root, &source, allow_outside);
             if let Ok(mut slot) = slot.lock() {
                 *slot = state;
             }
@@ -548,13 +558,23 @@ fn png_file_name(media: &MediaRef) -> String {
 /// Only a PNG can be passed on unchanged: this crate has no decoder to turn
 /// another raster format into PNG. A network, `data:` or refused path answers
 /// [`PngState::Unavailable`] rather than touching the filesystem.
-fn read_png(root: &Path, source: &str) -> PngState {
+fn read_png(root: &Path, source: &str, linked_path: bool) -> PngState {
     let unavailable = || PngState::Unavailable(lmdv_i18n::t!("msg.imageUnavailable").to_owned());
-    let src = source.split('#').next().unwrap_or(source).trim();
-    if src.is_empty() || !is_local_asset(src) {
+    // M-24/L-15: an embedded source is a URL path: a query and fragment are
+    // hints, never part of the file, and percent escapes name the real bytes.
+    // A linked image arrives as its resolved filesystem path, so `%`, `#` and
+    // `?` in the real name stay literal.
+    let source = if linked_path {
+        std::borrow::Cow::Borrowed(source.trim())
+    } else {
+        let (path, _fragment) = lmdv_md::url_path_and_fragment(source);
+        lmdv_md::decode_url_path(path.trim())
+    };
+    let src = source.as_ref();
+    if src.is_empty() || (!linked_path && !is_local_asset(src)) {
         return unavailable();
     }
-    let policy = lmdv_io::PathPolicy::new(root);
+    let policy = lmdv_io::PathPolicy::new(root).with_allow_outside(linked_path);
     let Ok((_, bytes)) = policy.read_asset(Path::new(src)) else {
         return unavailable();
     };
@@ -824,6 +844,52 @@ impl WindowState {
         tx.focus(LIGHTBOX_VIEWPORT, false);
     }
 
+    /// Opens a local image file a Markdown link named (L-06).
+    ///
+    /// The link resolver already found a real file; this decode-tests it
+    /// through the window's image cache (SVG rasterizes there like any other
+    /// picture). `false` means the file is missing, outside the document
+    /// folder, not an image, or already failed to decode, so the caller can
+    /// keep L-07's honest non-Markdown notice. A decode that fails later closes
+    /// the preview and shows that notice from [`Self::poll_lightbox`].
+    pub(crate) fn open_image_link(&mut self, path: PathBuf, opener: String, tx: &mut Tx) -> bool {
+        if self.lightbox.is_some() {
+            return false;
+        }
+        let Some(tab) = self.active_tab() else { return false };
+        let (tab_id, Some(doc)) = (tab.id, tab.document_id()) else { return false };
+        let Some(document) = tab.document().cloned() else { return false };
+        let Some(folder) = self.document_root(&document) else { return false };
+        let revision = tab.view.reader.as_ref().map_or(0, |model| model.revision);
+        let source = path.to_string_lossy().into_owned();
+        let alt = path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
+        let cache =
+            self.image_cell().get_or_init(|| ImageCacheState::new(self.window_waker(), self.shared.is_headless()));
+        let Some(image) = cache.resolve_linked(&folder, &source, INLINE_DECODE_POINTS, 2.0) else {
+            return false;
+        };
+        let media = MediaRef {
+            block: "link".to_owned(),
+            index: 0,
+            kind: MediaKind::Image,
+            source,
+            alt,
+            width: 0.0,
+            height: 0.0,
+            line: 0,
+            end_line: 0,
+        };
+        // Focus returns to the link run that was clicked, whose key is the
+        // destination as written.
+        let mut lightbox = Lightbox::new(tab_id, doc, revision, media, Some(image), opener);
+        lightbox.link_fallback = Some(path);
+        lightbox.allow_outside = true;
+        lightbox.load_png(folder, lightbox.media.source.clone(), self.window_waker());
+        self.lightbox = Some(lightbox);
+        tx.focus(LIGHTBOX_VIEWPORT, false);
+        true
+    }
+
     /// Closes the preview. Focus returns to the media button that opened it.
     pub(crate) fn close_lightbox(&mut self) {
         self.lightbox = None;
@@ -1024,6 +1090,11 @@ impl WindowState {
             }
             changed = true;
         }
+        let failed_link = self
+            .lightbox
+            .as_ref()
+            .filter(|lightbox| lightbox.image.as_ref().is_some_and(|image| image.error().is_some()))
+            .and_then(|lightbox| lightbox.link_fallback.clone());
         let stale = self.lightbox.as_ref().is_some_and(|lightbox| {
             self.active_tab().is_none_or(|tab| {
                 tab.id != lightbox.tab
@@ -1034,6 +1105,11 @@ impl WindowState {
         if stale {
             self.lightbox = None;
             changed = true;
+            if let Some(path) = failed_link {
+                // L-06: an image link whose decode failed keeps L-07's honest
+                // notice instead of leaving a blank preview.
+                self.show_non_markdown_notice(&path);
+            }
         }
         changed
     }

@@ -32,7 +32,7 @@ use crate::windows::{CloseDoc, close_title};
 
 pub(crate) mod scroll_sync;
 
-use scroll_sync::{ENTRY_SUPPRESS, EditorTop, PreviewGeometry, PreviewSync};
+use scroll_sync::{ENTRY_SUPPRESS, EditorTop, PreviewGeometry, PreviewSync, VisualCache};
 
 /// How long after the last keystroke the preview parses (E-05).
 pub const PREVIEW_DEBOUNCE: f64 = 0.2;
@@ -291,6 +291,9 @@ pub struct EditorState {
     pub scroll: Rc<Cell<ScrollSnapshot>>,
     /// Where the source's first visible line sits, measured by the view.
     pub editor_top: Rc<Cell<EditorTop>>,
+    /// The visible source field's exact visual lines (E-07), measured by the
+    /// view with the field's own font, spans and wrap width.
+    pub visual: RefCell<VisualCache>,
     /// The preview blocks around the editor's top and caret, measured by the
     /// reader view.
     pub preview: RefCell<PreviewGeometry>,
@@ -351,6 +354,7 @@ impl Default for EditorState {
             last_escape_at: None,
             scroll: Rc::new(Cell::new(ScrollSnapshot::default())),
             editor_top: Rc::new(Cell::new(EditorTop::default())),
+            visual: RefCell::new(VisualCache::default()),
             preview: RefCell::new(PreviewGeometry::default()),
             visible_blocks: None,
             last_offset: None,
@@ -537,6 +541,7 @@ impl WindowState {
     pub(crate) fn reset_scroll_sync(&mut self) {
         self.editor.scroll.set(ScrollSnapshot::default());
         self.editor.editor_top.set(EditorTop::default());
+        self.editor.visual.borrow_mut().clear();
         *self.editor.preview.borrow_mut() = PreviewGeometry::default();
         self.editor.visible_blocks = None;
         self.editor.last_offset = None;

@@ -7,7 +7,7 @@ use tempfile::TempDir;
 
 use crate::reader_find::{
     FindBand, FindReveal, READER_FIND_BAND, ReaderFind, find_in_document, find_reveal, match_ranges,
-    reader_find_prefill, refresh_tab,
+    reader_find_prefill, refresh_tab, selection_in_article,
 };
 use crate::section::{SECTION_LINE_HEIGHT, SectionLineFrame, SectionSegment};
 use crate::test_support;
@@ -100,6 +100,7 @@ fn prefill_takes_the_first_line_trimmed_and_capped() {
     assert_eq!(reader_find_prefill("  Akeneo  \nsecond line"), "Akeneo");
     assert_eq!(reader_find_prefill("\n\n  two words \n"), "two words");
     assert_eq!(reader_find_prefill("   "), "");
+    assert_eq!(reader_find_prefill("  ken  "), "ken", "a partial word is not expanded");
     let long = "x".repeat(140);
     assert_eq!(reader_find_prefill(&long).chars().count(), 100);
 }
@@ -379,6 +380,16 @@ fn the_current_hit_key_is_revealed_in_the_article() {
 }
 
 #[test]
+fn the_prefill_only_takes_a_selection_inside_the_article() {
+    assert!(selection_in_article(
+        "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/reader-pane/article-scroll/article-row/article/doc/b0/h0"
+    ));
+    assert!(!selection_in_article("kit-root/shell/reader-find-bar/reader-find-query/input"), "the find bar");
+    assert!(!selection_in_article("kit-root/shell/split/right/outline-filter/input"), "the outline filter");
+    assert!(!selection_in_article("kit-root/shell/browser-search/input"), "the folder search");
+}
+
+#[test]
 fn ctrl_f_prefills_from_a_non_collapsed_article_selection() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
@@ -392,6 +403,106 @@ fn ctrl_f_prefills_from_a_non_collapsed_article_selection() {
     let find = &active_tab(&runtime.state).view.reader_find;
     assert_eq!(find.query.text, "The quiet page", "the selection becomes the query (R-17)");
     assert_eq!(find.query.range(), (0, 14), "the input is selected, so typing replaces it");
+}
+
+#[test]
+fn ctrl_f_prefills_a_partial_word_exactly_without_expanding_it() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Partial", "# Akeneo\n\nAkeneo body.\n");
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.select_text("h0", 1..4));
+    runtime.frame(0.0);
+    runtime.update(|state, tx| state.open_reader_find(tx));
+    runtime.frame(0.0);
+    let find = &active_tab(&runtime.state).view.reader_find;
+    assert_eq!(find.query.text, "ken", "no word expansion: the selected bytes are the query");
+    assert_eq!(find.query.range(), (0, 3), "the whole prefill is selected");
+    assert_eq!(find.matches.len(), 2, "both drawn occurrences of the partial word are found");
+    let query = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("reader-find-query"))
+        .expect("the query field");
+    assert!(query.focused, "R-16/R-17: the field keeps the keyboard");
+}
+
+#[test]
+fn a_selection_across_a_code_span_prefills_its_drawn_text() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Code", "Before **bold** and `code` after.\n");
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.select_text("text", 0..27));
+    runtime.frame(0.0);
+    runtime.update(|state, tx| state.open_reader_find(tx));
+    runtime.frame(0.0);
+    let find = &active_tab(&runtime.state).view.reader_find;
+    assert_eq!(find.query.text, "Before bold and code after.", "the drawn text, never the markers");
+    assert!(!find.query.text.contains('\n'), "one line");
+    assert_eq!(find.matches.len(), 1, "the prefill finds the paragraph it came from");
+}
+
+#[test]
+fn a_selection_across_an_inline_image_drops_the_object_marker() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("notes");
+    std::fs::create_dir_all(&root).unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/img/test.png");
+    std::fs::copy(fixture, root.join("dot.png")).unwrap();
+    std::fs::write(root.join("note.md"), "Before ![dot](./dot.png) after.\n").unwrap();
+    let mut state = window(&temp);
+    state.shared().set_headless();
+    state.open_path(root.join("note.md"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_none() && std::time::Instant::now() < deadline
+    {
+        state.poll(0.0, &mut Tx::default());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_some(), "the page parsed");
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.select_text("text", 0..100));
+    runtime.frame(0.0);
+    runtime.update(|state, tx| state.open_reader_find(tx));
+    runtime.frame(0.0);
+    let query = active_tab(&runtime.state).view.reader_find.query.text.clone();
+    assert_eq!(query, "Before  after.", "the exact selected text: the object is uncopied, not replaced");
+    assert!(!query.contains('\u{fffc}'), "the object placeholder is not a find query: {query:?}");
+    assert!(!query.contains('\n'), "one line: {query:?}");
+    assert_eq!(query.split_whitespace().collect::<Vec<_>>(), ["Before", "after."], "the text on both sides");
+}
+
+#[test]
+fn a_selection_that_trims_to_nothing_opens_an_empty_query() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Gap", "alpha  beta\n");
+    state.show_reader_find("alpha");
+    assert_eq!(active_tab(&state).view.reader_find.matches.len(), 1);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+    // The two spaces between the words: a real, non-collapsed selection that
+    // trims to nothing.
+    runtime.update(|_, tx| tx.select_text("text", 5..7));
+    runtime.frame(0.0);
+    runtime.update(|state, tx| state.open_reader_find(tx));
+    runtime.frame(0.0);
+    let find = &active_tab(&runtime.state).view.reader_find;
+    assert!(find.open);
+    assert_eq!(find.query.text, "", "the whitespace selection is the query, not the last query");
+    assert!(find.matches.is_empty(), "an empty query has no hits");
+    assert_eq!(find.counter(), "0/0");
+    assert_eq!(find.query.range(), (0, 0));
+    let query = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("reader-find-query"))
+        .expect("the query field");
+    assert!(query.focused, "the field keeps the keyboard");
 }
 
 // ---- R-19: the scroll band ----------------------------------------------

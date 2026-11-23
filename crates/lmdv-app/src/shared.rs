@@ -27,13 +27,36 @@ use crate::jobs::{JobHub, WorkerMailbox};
 use crate::transfer::{TransferMsg, TransferToken};
 use crate::windows::{
     OpenedWindow, RouteAction, RouteDecision, RouteQuery, WakeSet, WindowEntry, WindowHandles, WindowKind,
-    WindowOpenRequest, WindowOpener, WindowRegistry, WindowSnapshot, close_title,
+    WindowOpenRequest, WindowOpener, WindowPlan, WindowRegistry, WindowSnapshot, close_title,
 };
 
 /// A test seam that records a window's always-on-top request.
 type PinSink = Box<dyn Fn(WindowId, bool)>;
 /// A test seam that records a desktop-open request.
 type ExternalSink = Box<dyn Fn(&Path)>;
+
+/// A new window's cascade step, in points (S-13).
+pub const CASCADE_STEP_POINTS: f64 = 32.0;
+
+/// How long a just-created window is the cascade anchor for the next one
+/// (T-31/S-13): three Ctrl+Shift+N presses chain, a pause starts over.
+pub const CASCADE_CHAIN_SECONDS: f64 = 3.0;
+
+/// A placement's scale, with the platform's zero treated as 1.
+fn sane_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 { scale } else { 1.0 }
+}
+
+/// The physical cascade step for a display scale.
+fn cascade_step(scale: f64) -> i32 {
+    (CASCADE_STEP_POINTS * sane_scale(scale)).round() as i32
+}
+
+/// One placement cascaded 32 points down and right.
+fn cascade_point(placement: WindowPlacement) -> (i32, i32) {
+    let step = cascade_step(placement.scale);
+    (placement.position.0.saturating_add(step), placement.position.1.saturating_add(step))
+}
 
 /// The application id reported to the desktop (Wayland `app_id`, X11 `WM_CLASS`).
 /// It matches the desktop-file basename (`lmdv.desktop`), not the XDG data root.
@@ -78,6 +101,13 @@ pub struct AppShared {
     next_window: Cell<u64>,
     next_transfer: Cell<u64>,
     next_paste: Cell<u64>,
+    /// The last window the user created at runtime and its poll clock (T-31).
+    last_created: Cell<Option<(WindowId, f64)>>,
+    /// The poll clock as the windows last reported it, for a window created
+    /// between frames (S-13's 3 s chain).
+    clock: Cell<f64>,
+    /// The first frame a new window inherits, read by its opener (S-13/T-31).
+    pending_plan: Cell<Option<WindowPlan>>,
     /// The latest restorable state of every live window, by process id.
     session_windows: RefCell<BTreeMap<WindowId, WindowSession>>,
     quitting: Cell<bool>,
@@ -208,6 +238,9 @@ impl AppShared {
             next_window: Cell::new(1),
             next_transfer: Cell::new(1),
             next_paste: Cell::new(1),
+            last_created: Cell::new(None),
+            clock: Cell::new(0.0),
+            pending_plan: Cell::new(None),
             session_windows: RefCell::new(BTreeMap::new()),
             quitting: Cell::new(false),
             headless: Cell::new(false),
@@ -400,6 +433,16 @@ impl AppShared {
             return None;
         }
         Some(self.jobs.open_external(mailbox, path))
+    }
+
+    /// Reveals a path in the desktop's file manager on a worker, or hands it to
+    /// the test sink (X-05's Show in folder, OI-104).
+    pub fn reveal_external(&self, mailbox: Arc<WorkerMailbox>, path: PathBuf) -> Option<lmdv_core::JobId> {
+        if let Some(sink) = self.external_sink.borrow().as_ref() {
+            sink(&path);
+            return None;
+        }
+        Some(self.jobs.reveal(mailbox, path))
     }
 
     /// Records desktop-open requests instead of spawning a handler.
@@ -1103,8 +1146,75 @@ impl AppShared {
     pub fn cascade_position(&self, origin: WindowId) -> Option<(i32, i32)> {
         self.refresh_placement(origin);
         let placement = self.windows.borrow().get(origin).and_then(|entry| entry.placement)?;
-        let step = (32.0 * placement.scale).round() as i32;
-        Some((placement.position.0.saturating_add(step), placement.position.1.saturating_add(step)))
+        Some(cascade_point(placement))
+    }
+
+    /// Records the window the user just created, for T-31's 3 s cascade chain.
+    /// A repeated note for the same window keeps the later time.
+    pub(crate) fn note_window_created(&self, id: WindowId, now: f64) {
+        match self.last_created.get() {
+            Some((existing, at)) if existing == id && now < at => {}
+            _ => self.last_created.set(Some((id, now))),
+        }
+    }
+
+    /// The windows' poll clock, for a window created between frames.
+    pub(crate) fn note_now(&self, now: f64) {
+        self.clock.set(now);
+    }
+
+    /// The last poll time any window reported.
+    pub(crate) fn now(&self) -> f64 {
+        self.clock.get()
+    }
+
+    /// The window a new one cascades from (T-31/S-13): the last window the user
+    /// created less than [`CASCADE_CHAIN_SECONDS`] ago, else `current`.
+    pub(crate) fn cascade_anchor(&self, current: WindowId, now: f64) -> WindowId {
+        let Some((id, created)) = self.last_created.get() else { return current };
+        let fresh = now >= created && now - created <= CASCADE_CHAIN_SECONDS;
+        let alive = self.windows.borrow().get(id).is_some();
+        if fresh && alive { id } else { current }
+    }
+
+    /// The first frame a new window from `current` takes (S-13/T-31):
+    ///
+    /// * the cascade anchor is the previous window created within 3 s, else
+    ///   `current`;
+    /// * an ordinary source cascades 32 points down/right, restarting at the
+    ///   work area's top-left + 32 when that would leave it;
+    /// * a maximized source yields a maximized child;
+    /// * a minimized source yields the default size, centred on its display.
+    ///
+    /// Rune exposes no work-area API, so the display's frame stands in for it:
+    /// a cascade that crosses the display's edge restarts at its top-left.
+    /// Wayland reports no placement, so the compositor keeps placing children.
+    pub(crate) fn new_window_plan(&self, current: WindowId, now: f64) -> WindowPlan {
+        let anchor = self.cascade_anchor(current, now);
+        self.refresh_placement(anchor);
+        let Some(placement) = self.window_placement(anchor) else { return WindowPlan::default() };
+        let scale = sane_scale(placement.scale);
+        if placement.minimized {
+            let Some(((x, y), (width, height))) = placement.display else { return WindowPlan::default() };
+            let position = crate::app::centered_position((x, y, width, height), crate::app::WINDOW_SIZE, scale);
+            return WindowPlan { position: Some(position), maximized: false };
+        }
+        let mut position = cascade_point(placement);
+        if let Some((origin, size)) = placement.display {
+            let step = cascade_step(scale);
+            let width = (f64::from(crate::app::WINDOW_SIZE.0) * scale).round() as i32;
+            let height = (f64::from(crate::app::WINDOW_SIZE.1) * scale).round() as i32;
+            let right = origin.0.saturating_add(size.0 as i32);
+            let bottom = origin.1.saturating_add(size.1 as i32);
+            if position.0 < origin.0
+                || position.1 < origin.1
+                || position.0.saturating_add(width) > right
+                || position.1.saturating_add(height) > bottom
+            {
+                position = (origin.0.saturating_add(step), origin.1.saturating_add(step));
+            }
+        }
+        WindowPlan { position: Some(position), maximized: placement.maximized }
     }
 
     /// Whether any window reports `doc` dirty.
@@ -1175,6 +1285,26 @@ impl AppShared {
             return Err(lmdv_i18n::t!("msg.noWindowHost").to_owned());
         };
         opener(&self, request)
+    }
+
+    /// [`Self::request_new_window`] with the source frame the child inherits
+    /// (S-13/T-31): its maximized flag reaches the native spec through
+    /// [`Self::take_window_plan`]. The plan is one synchronous request's, so it
+    /// never leaks into an unrelated opener.
+    pub(crate) fn request_new_window_planned(
+        self: Rc<Self>,
+        request: WindowOpenRequest,
+        plan: WindowPlan,
+    ) -> Result<OpenedWindow, String> {
+        self.pending_plan.set(Some(plan));
+        let result = Rc::clone(&self).request_new_window(request);
+        self.pending_plan.set(None);
+        result
+    }
+
+    /// The plan a window opener applies to its first frame, consumed once.
+    pub(crate) fn take_window_plan(&self) -> WindowPlan {
+        self.pending_plan.take().unwrap_or_default()
     }
 
     /// Claims `doc` for `window` until its tab appears, so a burst of launches

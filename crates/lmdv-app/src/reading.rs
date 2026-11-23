@@ -204,19 +204,36 @@ impl WindowState {
     /// target that is scrolled out of view takes the instant key request
     /// instead: a long jump across the page should not animate every line.
     /// Reduced motion turns the glide into one frame in Rune itself (A-15).
+    /// O-11: a footnote is not a heading, so the section line does not step
+    /// aside; when it covers the landing point the target keeps
+    /// [`crate::section::SECTION_LINE_HEIGHT`] clear of it.
     pub(crate) fn jump_to_footnote(&mut self, label: &str, back: bool, tx: &mut Tx) {
         let scroll = self.reading.scroll.get();
         let top = self.footnote_target(label, back).flatten();
-        match footnote_glide(scroll, top, crate::nav::JUMP_INSET) {
+        let inset = self.jump_reserve(top.unwrap_or(0.0));
+        match footnote_glide(scroll, top, inset) {
             Some(y) => tx.scroll_to(ARTICLE_SCROLL_KEY, 0.0, y),
             None => {
                 // A reference jumps to the block the model puts it in; an entry
                 // is keyed by its own row. A document without the definition
                 // has nothing to scroll to.
                 let Some(key) = self.footnote_target_key(label, back) else { return };
-                tx.scroll_key_to(key, crate::nav::JUMP_INSET);
+                tx.scroll_key_to(key, inset);
             }
         }
+    }
+
+    /// The top reserve a non-heading jump must clear (O-11).
+    ///
+    /// `target_top` is the target's last measured top below the viewport top,
+    /// or 0 when the frame did not measure it. [`crate::nav::landing_inset`]
+    /// adds a stuck table header's measured height, which also hides the
+    /// section line (O-09): the header's height is then the whole cover.
+    /// Otherwise a visible section line covers the top
+    /// [`crate::section::SECTION_LINE_HEIGHT`] points — the height its element
+    /// is drawn at, not a guessed margin — so the jump moves below it.
+    pub(crate) fn jump_reserve(&self, target_top: f32) -> f32 {
+        jump_inset(&self.section_line.tables(), self.reading.scroll.get(), target_top, self.section_line.visible())
     }
 
     /// The element key an off-screen footnote jump names, from the last frame.
@@ -441,22 +458,33 @@ impl WindowState {
     /// Consumes the active tab's `--line` target: lands on its block.
     ///
     /// `line_starts[line - 1]` maps the requested line to its first byte, and
-    /// `MdDoc::block_index_at` to the top-level block that owns it. The paint
-    /// range is kept in [`LineFlash`] for the find/`--line` highlight work
-    /// (OI-043): the renderer has no paint-only highlight API yet.
+    /// `MdDoc::block_index_at` to the top-level block that owns it. A line in
+    /// the leading front matter has no `MdDoc` block; it targets the card the
+    /// renderer draws there. The paint range is kept in [`LineFlash`] for the
+    /// find/`--line` highlight work (OI-043): the renderer has no paint-only
+    /// highlight API yet.
+    ///
+    /// O-11: `--line` is never a heading jump, even when the line belongs to a
+    /// heading. The section line therefore keeps its place and the landing
+    /// clears it (or a stuck table header) through [`Self::jump_reserve`].
     pub(crate) fn apply_line_target(&mut self, now: f64, tx: &mut Tx) -> bool {
         let Some(tab) = self.active_tab() else { return false };
         let Some(requested) = tab.view.line else { return false };
         let Some(reader) = tab.view.reader.clone() else { return false };
         let doc = tab.document_id();
         let line = requested.max(1).min(reader.line_count().max(1));
-        let key = crate::reader::block_key_at_line(&reader, line);
+        let key = crate::reader::block_key_at_line(&reader, line)
+            .or_else(|| front_matter_line(&reader, line).then(|| lmdv_render::FRONT_MATTER_KEY.to_owned()));
         let range = crate::reader::line_range(&reader, line).unwrap_or(0..0);
         if let Some(tab) = self.active_tab_mut() {
             tab.view.line = None;
         }
+        // A `--line` has no measured top: 0 asks `landing_inset` whether a
+        // stuck header covers the viewport's own top, which is where the
+        // instant request puts the block's top.
+        let inset = self.jump_reserve(0.0);
         if let Some(key) = key {
-            tx.scroll_key_to(key, 24.0);
+            tx.scroll_key_to(key, inset);
         }
         if let Some(doc) = doc {
             self.reading.line_flash = Some(LineFlash { doc, line, range, until: now + LINE_FLASH_SECONDS });
@@ -638,6 +666,43 @@ pub(crate) fn footnote_glide(scroll: ScrollSnapshot, top: Option<f32>, inset: f3
         .map(|top| crate::nav::heading_destination(scroll, top, inset))
 }
 
+/// The top reserve a non-heading jump clears (O-11).
+///
+/// The base is [`crate::nav::JUMP_INSET`] plus a stuck table header's measured
+/// height ([`crate::nav::landing_inset`]). A stuck header also hides the
+/// section line (O-09), so its height is the whole cover and the line adds
+/// nothing. Otherwise a visible line covers the top
+/// [`crate::section::SECTION_LINE_HEIGHT`] points — the height the line's
+/// element is drawn at — and the target moves below it.
+pub(crate) fn jump_inset(
+    tables: &[crate::section::MeasuredTable],
+    scroll: ScrollSnapshot,
+    target_top: f32,
+    line_visible: bool,
+) -> f32 {
+    let inset = crate::nav::landing_inset(tables, scroll, target_top);
+    if inset > crate::nav::JUMP_INSET {
+        inset
+    } else if line_visible {
+        inset + crate::section::SECTION_LINE_HEIGHT
+    } else {
+        inset
+    }
+}
+
+/// Whether `line` (1-based) sits in the leading front matter, before the first
+/// `MdDoc` block, so a `--line` jump has no block key of its own (O-11).
+pub(crate) fn front_matter_line(doc: &MdDoc, line: usize) -> bool {
+    if doc.front_matter.is_none() {
+        return false;
+    }
+    let Some(first_block) = doc.block_spans.first().map(|span| span.source.start) else {
+        // A document that is only front matter: every line belongs to the card.
+        return true;
+    };
+    doc.line_starts.get(line.max(1) - 1).is_some_and(|start| (*start as usize) < first_block)
+}
+
 /// Where each footnote's entry and first reference were drawn, relative to the
 /// article viewport's top (OI-162).
 ///
@@ -776,6 +841,79 @@ mod tests {
 
         assert!(state.expire_line_flash(flash.until + 0.1));
         assert!(state.reading.line_flash.is_none());
+    }
+
+    #[test]
+    fn a_jump_reserves_the_measured_section_line_and_a_stuck_table_header() {
+        let scroll = ScrollSnapshot { offset: 100.0, max: 2000.0, viewport: 700.0 };
+        assert_eq!(jump_inset(&[], scroll, 40.0, false), 24.0, "O-11: the plain L-01 margin");
+        assert_eq!(
+            jump_inset(&[], scroll, 40.0, true),
+            24.0 + crate::section::SECTION_LINE_HEIGHT,
+            "a visible line covers the 24-point landing; the drawn line height moves it clear"
+        );
+        let stuck = [crate::section::MeasuredTable { top: -30.0, bottom: 200.0, header: 38.0 }];
+        assert_eq!(
+            jump_inset(&stuck, scroll, 40.0, true),
+            24.0 + 38.0,
+            "a stuck header hides the line and its measured height is the whole cover"
+        );
+    }
+
+    #[test]
+    fn a_line_jump_reserves_a_visible_section_line() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("Line", "# One\n\nfirst\n\n## Two\n\nsecond\n");
+        assert_eq!(state.jump_reserve(0.0), 24.0, "no line: the plain L-01 margin");
+        state.section_line.publish(crate::section::SectionLineFrame {
+            segments: vec![crate::section::SectionSegment { heading: 0, text: "One".to_owned() }],
+        });
+        assert_eq!(
+            state.jump_reserve(0.0),
+            24.0 + crate::section::SECTION_LINE_HEIGHT,
+            "O-11: a `--line` jump clears the visible line, heading line or not"
+        );
+        state.section_line.reset();
+    }
+
+    #[test]
+    fn a_line_in_the_front_matter_targets_its_card() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let mut source = String::from("---\ntitle: Hello\n---\n\n# Page\n\n");
+        for index in 0..60 {
+            source.push_str(&format!("Paragraph {index} fills the page so the card can scroll away.\n\n"));
+        }
+        state.open_synthetic("Front matter", &source);
+        let doc = state.active_reader().expect("a model");
+        assert!(front_matter_line(&doc, 2), "the title line is before the first block");
+        assert!(!front_matter_line(&doc, 5), "the first heading is not");
+        let only = lmdv_md::parse("---\ntitle: Only\n---\n");
+        assert!(front_matter_line(&only, 2), "a document that is only front matter has no blocks");
+        state.set_pending_line(2);
+        let mut tx = Tx::default();
+        assert!(state.apply_line_target(2.0, &mut tx));
+        let flash = state.reading.line_flash.clone().expect("the line is painted");
+        assert_eq!(&source[flash.range], "title: Hello", "the front matter line still flashes");
+
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.frame(0.0);
+        runtime.update(|_, tx| tx.scroll_to_y(ARTICLE_SCROLL_KEY, 600.0));
+        for _ in 0..4 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let mid = runtime.state.reading.scroll.get();
+        assert!(mid.offset > 100.0, "the page scrolled away from the card: {mid:?}");
+        runtime.update(|state, tx| {
+            state.set_pending_line(2);
+            state.apply_line_target(tx.clock(), tx);
+        });
+        for _ in 0..8 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let end = runtime.state.reading.scroll.get();
+        assert!(end.offset < 100.0, "the front matter card is back in view: {end:?}");
     }
 
     #[test]
@@ -965,6 +1103,112 @@ mod tests {
             .find(|element| element.key.as_deref() == Some("fn-1"))
             .expect("the entry row");
         assert!(entry.visible[1] >= 0.0 && entry.visible[1] < 760.0, "the entry is in view: {:?}", entry.visible);
+    }
+
+    #[test]
+    fn a_footnote_back_jump_reserves_the_visible_section_line() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let mut source = String::from("# Top\n\nIntro.\n\n## Section\n\n");
+        for index in 0..3 {
+            source.push_str(&format!("Filler {index} keeps the heading clear of the top band.\n\n"));
+        }
+        source.push_str("A reference.[^1]\n\n");
+        for index in 0..40 {
+            source.push_str(&format!("Paragraph {index} fills the page so the note is below it.\n\n"));
+        }
+        source.push_str("[^1]: The note.\n");
+        state.open_synthetic("Notes", &source);
+        state.left.set_open(false);
+        state.right.set_open(false);
+        if let Some(tab) = state.active_tab_mut() {
+            tab.view.outline_hidden = true;
+        }
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        runtime.frame(0.0);
+        runtime.update(|_, tx| tx.scroll_to_bottom_instant(ARTICLE_SCROLL_KEY));
+        for _ in 0..30 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.state.section_line.visible(), "the line is on screen at the note");
+
+        // The backlink's target is far above: the instant key request lands the
+        // reference's block at the reserve, not at the plain 24-point margin.
+        runtime.update(|state: &mut WindowState, tx: &mut Tx| state.jump_to_footnote("1", true, tx));
+        for _ in 0..30 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.state.section_line.visible(), "the line is back after the jump settles");
+        let elements = runtime.elements();
+        let viewport = elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(ARTICLE_SCROLL_KEY))
+            .expect("the article viewport");
+        let line = elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(crate::section::SECTION_LINE_KEY))
+            .expect("the section line");
+        let reference = elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some("fn:1"))
+            .expect("the footnote reference link");
+        let top = reference.rect[1] - viewport.rect[1];
+        assert!(top >= line.rect[3] - 1.0, "O-11: the backlink lands below the line ({top} vs {})", line.rect[3]);
+    }
+
+    #[test]
+    fn a_footnote_jump_lands_below_the_visible_section_line() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let mut source = String::from("# Top\n\nIntro.\n\n## Section\n\n");
+        for index in 0..30 {
+            source.push_str(&format!("Paragraph {index} with enough words to fill the reading column and scroll.\n\n"));
+        }
+        source.push_str("The reference.[^1]\n\n[^1]: The note.\n\n");
+        // Keep the note away from the end so the instant jump can land it at
+        // the inset instead of clamping to the document's maximum scroll.
+        for index in 0..30 {
+            source.push_str(&format!("Tail paragraph {index} keeps the note off the last page.\n\n"));
+        }
+        state.open_synthetic("Notes", &source);
+        state.left.set_open(false);
+        state.right.set_open(false);
+        if let Some(tab) = state.active_tab_mut() {
+            tab.view.outline_hidden = true;
+        }
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        runtime.frame(0.0);
+        runtime.update(|_, tx| tx.scroll_to_y(ARTICLE_SCROLL_KEY, 900.0));
+        for _ in 0..30 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.state.section_line.visible(), "the line is on screen before the jump");
+
+        runtime.update(|state: &mut WindowState, tx: &mut Tx| state.open_link("fn:1", tx));
+        for _ in 0..30 {
+            runtime.frame(1.0 / 60.0);
+        }
+        assert!(runtime.state.section_line.visible(), "the line is back after the jump settles");
+        let elements = runtime.elements();
+        let viewport = elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(ARTICLE_SCROLL_KEY))
+            .expect("the article viewport");
+        let line = elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(crate::section::SECTION_LINE_KEY))
+            .expect("the section line");
+        assert!(
+            (line.rect[3] - crate::section::SECTION_LINE_HEIGHT).abs() < 0.5,
+            "the reserve uses the drawn line's height: {} vs {}",
+            line.rect[3],
+            crate::section::SECTION_LINE_HEIGHT
+        );
+        let entry = elements.iter().find(|element| element.key.as_deref() == Some("fn-1")).expect("the entry row");
+        let top = entry.rect[1] - viewport.rect[1];
+        assert!(top >= line.rect[3] - 1.0, "O-11: the footnote lands below the line, at {top} points");
     }
 
     #[test]

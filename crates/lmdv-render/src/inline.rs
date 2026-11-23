@@ -262,7 +262,9 @@ impl<'a> Renderer<'a> {
                         rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h).label(alt));
                         rep.uncopied.push(0..3);
                     } else {
-                        let fallback = if alt.is_empty() { &self.theme.labels.image } else { alt };
+                        // M-25: with no alt text the placeholder shows the
+                        // source address, exactly as a block image does.
+                        let fallback = if alt.is_empty() { src } else { alt };
                         rep.text.push_str(fallback);
                         rep.muted = true;
                     }
@@ -284,7 +286,9 @@ impl<'a> Renderer<'a> {
                             rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h).label(alt));
                             rep.uncopied.push(0..3);
                         } else {
-                            rep.text.push_str(&self.theme.labels.image);
+                            // M-25: no alt falls back to the chosen source.
+                            let fallback = if alt.is_empty() { src } else { alt };
+                            rep.text.push_str(fallback);
                             rep.muted = true;
                         }
                     } else {

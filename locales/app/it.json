@@ -170,6 +170,8 @@
   "keys.dblclick": "Porta lì il cursore",
   "help.close": "Chiudi (Esc)",
   "help.title": "Guida",
+  "help.repository": "Repository",
+  "help.license": "Licenza",
   "zoom.open": "Apri l'anteprima",
   "zoom.dialog": "Anteprima",
   "zoom.viewport": "Anteprima ingrandibile. Più e meno ingrandiscono, 0 adatta, W adatta alla larghezza, 1 mostra le dimensioni reali, le frecce spostano, Esc chiude.",

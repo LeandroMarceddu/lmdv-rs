@@ -618,6 +618,15 @@ fn an_inline_picture_is_a_preview_link_when_the_link_wire_is_set() {
 }
 
 #[test]
+fn a_missing_inline_image_without_alt_shows_its_source() {
+    // M-25: the inline placeholder names the source when there is no alt,
+    // exactly as a block image does.
+    let tree = Scene::new("Before ![](./missing.png) and ![]() after\n").render();
+    assert!(tree.has_text("./missing.png"), "{:?}", tree.texts());
+    assert!(!tree.has_text("Image"), "the generic label is not used when a source exists");
+}
+
+#[test]
 fn an_open_html_details_card_shows_its_body() {
     let scene = Scene::new("<details><summary>More</summary>Hidden body</details>\n").details(true);
     let tree = scene.render();

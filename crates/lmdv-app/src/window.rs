@@ -30,6 +30,11 @@ use crate::windows::{CloseDoc, WindowKind, WindowOpenRequest, WindowSnapshot, cl
 /// How long a status notice stays visible, in virtual clock seconds.
 pub const NOTICE_SECONDS: f64 = 4.0;
 
+/// How long a sticky notice stays: until the document changes, a save, a
+/// reload or an explicit dismiss (R-29). `f64::INFINITY` keeps the ordinary
+/// deadline arithmetic honest.
+pub const NOTICE_STICKY_SECONDS: f64 = f64::INFINITY;
+
 /// A tab's rendering mode. `Editor` is legal only while the tab holds the
 /// document's edit lease (D4).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -264,7 +269,7 @@ fn is_confirmation(text: &str) -> bool {
 pub struct Notice {
     pub text: String,
     /// Virtual clock seconds from `poll`; notices set before the first frame
-    /// expire four seconds in.
+    /// expire four seconds in. `f64::INFINITY` marks a sticky notice (R-29).
     pub deadline: f64,
     /// An action the notice offers, such as the task tick's Undo.
     pub action: Option<NoticeAction>,
@@ -273,6 +278,14 @@ pub struct Notice {
     /// The number of notices this window has shown (H-07). The bar alternates
     /// an invisible mark on it, so the same words twice are announced twice.
     pub seq: u64,
+}
+
+impl Notice {
+    /// Whether this notice waits for the document or the user (R-29) instead
+    /// of expiring on its own deadline.
+    pub fn is_sticky(&self) -> bool {
+        !self.deadline.is_finite()
+    }
 }
 
 /// An action a notice offers. The payload is UI state, never a live job.
@@ -408,7 +421,8 @@ impl DropState {
 enum OpenPlace {
     /// The normal open: in front, replacing a front start page (T-13).
     Front,
-    /// Appended behind the front tab (T-14's background open).
+    /// T-14's background open: behind the front tab, and after the last
+    /// background tab already queued from it.
     Background,
     /// At a strip index, in front (D-02's first dropped file).
     At(usize),
@@ -561,6 +575,9 @@ pub struct WindowState {
     /// The documents whose tabs show T-03's post-save check: those written by
     /// the save that armed `editor.saved_flash_until`.
     pub(crate) saved_flash_docs: BTreeSet<DocumentId>,
+    /// T-14: the last background tab this window opened. The next background
+    /// open joins after it; any tab coming forward forgets the queue.
+    pub(crate) background_queue: Option<TabId>,
     next_tab: TabId,
 }
 
@@ -657,6 +674,7 @@ impl WindowState {
             session_flushed: false,
             session_publish: RefCell::new(crate::session::PublishedSession::default()),
             saved_flash_docs: BTreeSet::new(),
+            background_queue: None,
             next_tab: 1,
         };
         state.push_start_tab();
@@ -967,10 +985,22 @@ impl WindowState {
 
     /// Opens `path` behind the front tab (T-13/T-14): a start page or a pasted
     /// tab in front keeps its place, and the new tab joins the strip without
-    /// taking the keyboard. The browser and palette's background opens use this
+    /// taking the keyboard.
+    ///
+    /// T-14: it joins right after the tab it was opened from, and successive
+    /// background tabs queue after each other; another tab coming forward
+    /// starts a new queue. The browser and palette's background opens use this
     /// path instead of opening in front and switching back.
     pub fn open_path_background(&mut self, path: PathBuf) -> TabId {
         self.open_path_placed(path, OpenPlace::Background).0
+    }
+
+    /// The slot a background open takes (T-14): after the last queued
+    /// background tab, else right after the front tab, else the end.
+    fn background_insert_index(&self) -> usize {
+        let anchor =
+            self.background_queue.and_then(|id| self.tabs.iter().position(|tab| tab.id == id)).unwrap_or(self.active);
+        (anchor + 1).min(self.tabs.len())
     }
 
     /// [`Self::open_path`] with D-02's drop placements, returning the tab and
@@ -1002,7 +1032,14 @@ impl WindowState {
         }
 
         let needs_load = !matches!(*doc.status.borrow(), DocStatus::Ready);
-        let tab = self.attach_document_placed(doc.clone(), place.index(), None, place.background());
+        let index = match place {
+            OpenPlace::Background => Some(self.background_insert_index()),
+            _ => place.index(),
+        };
+        let tab = self.attach_document_placed(doc.clone(), index, None, place.background());
+        if place == OpenPlace::Background {
+            self.background_queue = Some(tab);
+        }
         if needs_load {
             self.start_load(doc.id, path);
         } else if !self.restoring_tabs {
@@ -1040,7 +1077,9 @@ impl WindowState {
                 Some(at) if index == 0 => OpenPlace::At(at),
                 Some(at) => OpenPlace::AtBackground(at),
                 None if index == 0 => OpenPlace::Front,
-                None => OpenPlace::Background,
+                // D-02: a drop on the window itself opens the rest behind the
+                // first at the end, not through T-14's background queue.
+                None => OpenPlace::AtBackground(self.tabs.len()),
             };
             let (tab, opened) = self.open_path_placed(path, place);
             if let Some(at) = cursor {
@@ -1152,6 +1191,9 @@ impl WindowState {
             self.shared.watch_path(&path);
         }
         if !keep_front {
+            // R-29: a document coming forward ends the previous document's
+            // notice, sticky or not.
+            self.ui.notice = None;
             self.note_active_tab();
             self.sync_editor_panes();
             self.begin_restore(&anchor);
@@ -1230,6 +1272,9 @@ impl WindowState {
             self.export_holds_tab();
             return false;
         }
+        // R-29: a notice belongs to the document it was raised for; another
+        // document coming forward removes it, sticky or not.
+        self.ui.notice = None;
         self.flush_active_draft();
         self.capture_active_position();
         self.save_outline_filter();
@@ -1264,9 +1309,11 @@ impl WindowState {
     }
 
     /// Records the active tab as the most recently shown (C-02's tab order) and
-    /// forgets tabs that closed. A tab switch also drops the hover card (T-16).
+    /// forgets tabs that closed. A tab switch also drops the hover card (T-16)
+    /// and ends T-14's background queue.
     pub(crate) fn note_active_tab(&mut self) {
         self.hide_tab_card();
+        self.background_queue = None;
         let Some(id) = self.tabs.get(self.active).map(|tab| tab.id) else { return };
         self.tab_recent.retain(|other| *other != id);
         self.tab_recent.insert(0, id);
@@ -1401,6 +1448,12 @@ impl WindowState {
 
     /// Closes the active tab, or requests the window close for a lone start page.
     pub fn close_active_tab(&mut self) {
+        // T-29: the close key ends a tab drag in hand first, and stops there;
+        // a second press closes the tab. The drag is the nearer surface.
+        if !matches!(self.drag.phase(), rune_kit::shell::TabDragPhase::Idle) {
+            self.drag.cancel();
+            return;
+        }
         if let Some(id) = self.active_tab().map(|tab| tab.id) {
             self.request_close_tab(id);
         }
@@ -1415,13 +1468,20 @@ impl WindowState {
         self.ui.close_requested = true;
     }
 
-    /// Opens a start-page window cascaded 32 points from this one, or lets the
-    /// compositor place it where positions are not exposed (Wayland).
+    /// Opens a start-page window cascaded from the previous one created within
+    /// three seconds, else from this one (T-31/S-13): 32 points down and right,
+    /// restarting at the work area's top-left when that leaves it. A maximized
+    /// source makes a maximized child; a minimized one opens the default size,
+    /// centred. The compositor places it where positions are not exposed
+    /// (Wayland).
     pub fn request_new_window(&mut self) {
-        let position = self.shared.cascade_position(self.id);
-        let request = WindowOpenRequest { launch: Launch::default(), kind: WindowKind::Normal, position };
-        if let Err(error) = Rc::clone(&self.shared).request_new_window(request) {
-            self.notice_kind(lmdv_i18n::t!("msg.openWindowFailed", "err" => error), NoticeKind::Error);
+        let now = self.ui.last_now;
+        let plan = self.shared.new_window_plan(self.id, now);
+        let request =
+            WindowOpenRequest { launch: Launch::default(), kind: WindowKind::Normal, position: plan.position };
+        match Rc::clone(&self.shared).request_new_window_planned(request, plan) {
+            Ok(opened) => self.shared.note_window_created(opened.id, now),
+            Err(error) => self.notice_kind(lmdv_i18n::t!("msg.openWindowFailed", "err" => error), NoticeKind::Error),
         }
     }
 
@@ -1564,7 +1624,9 @@ impl WindowState {
         }
     }
 
-    /// The window title for the native frame and the desktop.
+    /// The window title for the native frame and the desktop (W-09):
+    /// `“name” — lmdv`, with `• ` in front while the front tab is dirty, and
+    /// exactly `lmdv` on a start page.
     pub fn window_title(&self) -> String {
         match self.active_tab() {
             Some(Tab { source: TabSource::Document(doc), view, .. }) => {
@@ -1576,8 +1638,9 @@ impl WindowState {
                     // dirtied in another window still reads dirty here without
                     // hashing the buffer every frame.
                     let dirty = view.dirty || self.shared.document_is_dirty(doc.id);
-                    let dot = if dirty { " •" } else { "" };
-                    lmdv_i18n::t!("toolbar.windowTitle", "name" => format!("{title}{dot}"))
+                    let name = format!("\u{201c}{}\u{201d}", title.trim());
+                    let name = if dirty { format!("\u{2022} {name}") } else { name };
+                    lmdv_i18n::t!("toolbar.windowTitle", "name" => name)
                 }
             }
             _ => "lmdv".to_owned(),
@@ -1600,6 +1663,14 @@ impl WindowState {
         self.show_notice(text.into(), kind, None, NOTICE_SECONDS);
     }
 
+    /// A notice that does not expire on its own (R-29): an empty/error state
+    /// stays readable until another document comes forward, a save, a reload,
+    /// or the user's dismiss. Use it for a fact about the document on screen,
+    /// never for a confirmation.
+    pub fn sticky_notice(&mut self, text: impl Into<String>, kind: NoticeKind) {
+        self.show_notice(text.into(), kind, None, NOTICE_STICKY_SECONDS);
+    }
+
     /// [`Self::notice`] whose words are the strip's, with its own stay.
     ///
     /// Every notice is numbered here (H-07): the bar alternates an invisible
@@ -1607,7 +1678,7 @@ impl WindowState {
     /// screen reader is told.
     pub(crate) fn show_notice(&mut self, text: String, kind: NoticeKind, action: Option<NoticeAction>, seconds: f64) {
         self.ui.notice_seq = self.ui.notice_seq.wrapping_add(1);
-        let deadline = self.ui.last_now + seconds;
+        let deadline = if seconds.is_finite() { self.ui.last_now + seconds } else { f64::INFINITY };
         self.ui.notice = Some(Notice { text, deadline, action, kind, seq: self.ui.notice_seq });
     }
 
@@ -1632,6 +1703,11 @@ impl WindowState {
             }
             self.saved_flash_docs.clear();
             return true;
+        }
+        // R-29: a save is a document event: a sticky empty/error notice gives
+        // way to the save's own transient “Saved”.
+        if self.ui.notice.as_ref().is_some_and(Notice::is_sticky) {
+            self.ui.notice = None;
         }
         let mut docs = BTreeSet::new();
         for tab in &self.tabs {
@@ -1659,6 +1735,7 @@ impl WindowState {
     /// functions stay free of host-specific `Tx` effects.
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         let mut changed = false;
+        self.shared.note_now(now);
         // T-03: what a save completion in this poll may change, for the tab's
         // check: the flash deadline and each document's last own write.
         let saved_flash_before = self.editor.saved_flash_until;
@@ -1693,6 +1770,14 @@ impl WindowState {
         }
         changed |= self.reap_transfers();
         changed |= self.pump_timers(now);
+        // R-29: an ordinary notice names its own wake, so it disappears on
+        // time even when nothing else changes; a sticky one waits for the
+        // document or the user.
+        if let Some(deadline) =
+            self.ui.notice.as_ref().filter(|notice| !notice.is_sticky()).map(|notice| notice.deadline)
+        {
+            tx.wake_at(deadline);
+        }
         // L-09: a notice's **Save as…** needs the frame's `Tx` for the native
         // dialog, so the press only asks and this poll opens it.
         if let Some(doc) = self.ui.save_as_requested.take() {
@@ -1929,7 +2014,9 @@ impl WindowState {
                         *document.status.borrow_mut() = DocStatus::Error(error.to_string());
                         let name = document.title.borrow().clone();
                         if !travel {
-                            self.notice_kind(
+                            // R-29: the document's error card stays behind its
+                            // sticky notice until another document comes forward.
+                            self.sticky_notice(
                                 lmdv_i18n::t!("msg.openFailed", "name" => name, "err" => error),
                                 NoticeKind::Error,
                             );
@@ -2091,6 +2178,10 @@ impl WindowState {
     /// revision baseline change. The last good model stays on screen until the
     /// parse for the new revision lands.
     fn reset_views_after_load(&mut self, doc: DocumentId) {
+        // R-29: a reload is a document event; a sticky empty/error notice goes.
+        if self.ui.notice.as_ref().is_some_and(Notice::is_sticky) {
+            self.ui.notice = None;
+        }
         let Some(document) = self.shared.docs().get(doc) else { return };
         let text = document.text().text().to_owned();
         let eol = document.text().eol();
@@ -2411,7 +2502,6 @@ impl WindowState {
             false
         }
     }
-
     fn refresh_titles(&mut self) {
         for tab in &mut self.tabs {
             tab.refresh_title();
@@ -2705,6 +2795,50 @@ mod tests {
     }
 
     #[test]
+    fn the_window_title_quotes_the_name_and_prefixes_the_dirty_dot() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        ready_doc(&shared, "/tmp/lmdv-app-test/notes.md", "# Notes\n");
+        let tab = state.open_path(PathBuf::from("/tmp/lmdv-app-test/notes.md"));
+
+        assert_eq!(state.window_title(), "\u{201c}notes.md\u{201d} \u{2014} lmdv", "W-09: quotes, no dot when clean");
+        assert!(!state.window_title().contains('\u{2022}'));
+
+        state.tabs.iter_mut().find(|candidate| candidate.id == tab).expect("the tab").view.dirty = true;
+        assert_eq!(
+            state.window_title(),
+            "\u{2022} \u{201c}notes.md\u{201d} \u{2014} lmdv",
+            "W-09: the dirty dot prefixes the quoted name"
+        );
+
+        state.tabs.iter_mut().find(|candidate| candidate.id == tab).expect("the tab").view.dirty = false;
+        assert_eq!(state.window_title(), "\u{201c}notes.md\u{201d} \u{2014} lmdv", "clean again clears the dot");
+
+        state.new_start_tab();
+        assert_eq!(state.window_title(), "lmdv", "W-09: a start page is exactly the app name");
+    }
+
+    #[test]
+    fn a_document_empty_in_the_registry_keeps_the_plain_title() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let id = shared.docs_mut().allocate_id();
+        let doc = Rc::new(Document::ready(
+            id,
+            DocumentKey::Untitled(lmdv_core::PasteId(0)),
+            "",
+            SourceBuffer::new("no title"),
+        ));
+        shared.docs_mut().insert_ready(doc.clone());
+        let tab = state.attach_document(doc);
+
+        assert!(state.activate_tab(tab));
+        assert_eq!(state.window_title(), "lmdv", "an untitled document does not read as `“” — lmdv`");
+    }
+
+    #[test]
     fn new_tab_appends_at_the_end_and_brings_it_forward() {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
@@ -2783,6 +2917,64 @@ mod tests {
         assert!(state.tabs()[0].is_start());
         assert_eq!(state.active_tab().map(|tab| tab.id), Some(start), "the front tab did not change");
         assert_eq!(state.tab(tab).map(Tab::title).as_deref(), Some("background"), "the file opened behind");
+    }
+
+    #[test]
+    fn background_tabs_open_after_their_origin_and_queue_until_another_tab_comes_forward() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        for name in ["front", "tail", "a", "b", "c"] {
+            ready_doc(&shared, &format!("/tmp/lmdv-app-test/{name}.md"), name);
+        }
+        let front = state.open_path(PathBuf::from("/tmp/lmdv-app-test/front.md"));
+        state.open_path(PathBuf::from("/tmp/lmdv-app-test/tail.md"));
+        assert_eq!(state.tabs().iter().map(Tab::title).collect::<Vec<_>>(), ["front", "tail"]);
+        assert!(state.activate_tab(front));
+
+        // T-14: each background tab joins after the one it was opened from,
+        // and the next one queues after it, not at the end of the strip.
+        let a = state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/a.md"));
+        let b = state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/b.md"));
+        assert_eq!(
+            state.tabs().iter().map(Tab::title).collect::<Vec<_>>(),
+            ["front", "a", "b", "tail"],
+            "the queue sits between the origin and the tab that was after it"
+        );
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(front), "a background open never comes forward");
+        assert_eq!(state.tabs().get(2).map(|tab| tab.id), Some(b));
+
+        // Opening an already-open document behind the front changes nothing
+        // and does not move the queue.
+        assert_eq!(state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/a.md")), a);
+        assert_eq!(state.tabs().iter().map(Tab::title).collect::<Vec<_>>(), ["front", "a", "b", "tail"]);
+
+        // Another tab coming forward starts a new queue: the next background
+        // tab joins right after it.
+        assert!(state.activate_tab(b));
+        state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/c.md"));
+        assert_eq!(state.tabs().iter().map(Tab::title).collect::<Vec<_>>(), ["front", "a", "b", "c", "tail"]);
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(b));
+    }
+
+    #[test]
+    fn files_opened_from_outside_still_go_at_the_end_after_a_background_queue() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        for name in ["front", "a", "outside"] {
+            ready_doc(&shared, &format!("/tmp/lmdv-app-test/{name}.md"), name);
+        }
+        let front = state.open_path(PathBuf::from("/tmp/lmdv-app-test/front.md"));
+        state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/a.md"));
+        assert!(state.activate_tab(front));
+        state.open_path(PathBuf::from("/tmp/lmdv-app-test/outside.md"));
+
+        assert_eq!(
+            state.tabs().iter().map(Tab::title).collect::<Vec<_>>(),
+            ["front", "a", "outside"],
+            "T-14: a foreground file open still appends"
+        );
     }
 
     #[test]
@@ -3161,6 +3353,40 @@ mod tests {
     }
 
     #[test]
+    fn a_sticky_notice_lasts_until_the_document_changes_or_is_saved() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        ready_doc(&shared, "/tmp/lmdv-app-test/one.md", "one");
+        let mut tx = Tx::default();
+
+        // The start page lets the poll run without a load, watch or draft job:
+        // this test is the notice's own clock, not a worker race.
+        state.sticky_notice("Not found: gone.md", NoticeKind::Error);
+        assert!(state.ui.notice.as_ref().is_some_and(Notice::is_sticky));
+        state.poll(30.0, &mut tx);
+        assert!(state.ui.notice.is_some(), "R-29: a sticky notice does not expire on its own");
+        assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.deadline.is_infinite()));
+
+        // An ordinary notice still lives exactly its four seconds.
+        state.notice("hello");
+        assert!(state.ui.notice.as_ref().is_some_and(|notice| !notice.is_sticky()));
+        state.poll(30.0 + NOTICE_SECONDS - 0.1, &mut tx);
+        assert!(state.ui.notice.is_some(), "the ordinary notice is still up before its deadline");
+        state.poll(30.0 + NOTICE_SECONDS + 0.1, &mut tx);
+        assert!(state.ui.notice.is_none(), "the ordinary notice expired on its deadline");
+
+        state.sticky_notice("Not found: gone.md", NoticeKind::Error);
+        state.open_path(PathBuf::from("/tmp/lmdv-app-test/one.md"));
+        assert!(state.ui.notice.is_none(), "R-29: another document removes the previous notice");
+
+        state.sticky_notice("Preview error", NoticeKind::Error);
+        state.editor.saved_flash_until = Some(9.0);
+        assert!(state.track_saved_flash(None, &[]));
+        assert!(state.ui.notice.is_none(), "R-29: a save force-hides a sticky notice");
+    }
+
+    #[test]
     fn ui_open_messages_are_applied_by_poll() {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
@@ -3253,7 +3479,7 @@ mod tests {
         second.poll(0.0, &mut tx);
         let registry = shared.windows();
         let entry = registry.get(first.id()).expect("first registered");
-        assert_eq!(entry.title, "Shared — lmdv");
+        assert_eq!(entry.title, "\u{201c}Shared\u{201d} \u{2014} lmdv");
         assert_eq!(entry.active_document, Some(doc.id));
         assert_eq!(entry.documents, BTreeSet::from([doc.id]));
         assert_eq!(registry.window_showing(doc.id), Some(second.id()), "focus order picks the window");

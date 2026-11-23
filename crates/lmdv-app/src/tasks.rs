@@ -423,8 +423,11 @@ impl WindowState {
         self.dismiss_notice();
         match action {
             NoticeAction::TaskUndo(undo) => self.undo_task(undo),
+            // X-05/OI-104: the payload is the exported file (or a folder); the
+            // helper selects the file in its folder where the desktop can, and
+            // shows the folder when it is gone.
             NoticeAction::ShowInFolder(path) => {
-                self.shared.open_external(self.worker().clone(), path);
+                self.shared.reveal_external(self.worker().clone(), path);
             }
             NoticeAction::OpenFile(path) => {
                 // L-07: the desktop's own handler opens a whitelisted

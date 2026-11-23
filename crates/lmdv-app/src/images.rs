@@ -27,12 +27,14 @@ pub const RESOLVED_CACHE: usize = 512;
 /// pictures it draws alive on its own).
 pub const HANDLE_CACHE: usize = 256;
 
+/// `(document folder, source, outside allowed, source is a URL path)`.
+type ResolveKey = (PathBuf, String, bool, bool);
+
 /// One window's image state.
 pub struct ImageCacheState {
     cache: rune::ImageCache,
-    /// `(document folder, source)` → validated path, or `None` when missing
-    /// or refused.
-    resolved: RefCell<HashMap<(PathBuf, String), Option<PathBuf>>>,
+    /// Each [`ResolveKey`] → validated path, or `None` when missing or refused.
+    resolved: RefCell<HashMap<ResolveKey, Option<PathBuf>>>,
     /// Decoded handles, so a second frame asks the cache for a live entry.
     handles: RefCell<HashMap<PathBuf, Image>>,
     /// `(ready, failed)` at the last `refresh`.
@@ -63,21 +65,48 @@ impl ImageCacheState {
     /// tells `poll` when to rebuild for the real aspect ratio, and when a
     /// decoder failed so the placeholder replaces the empty frame.
     pub fn resolve(&self, root: &Path, src: &str, size_pt: f32, scale: f32) -> Option<Image> {
+        self.resolve_with(root, src, size_pt, scale, false, true)
+    }
+
+    /// An image a link named (L-06), which may leave the document folder the
+    /// way L-07's document links may; system, device and network paths stay
+    /// refused. `src` is the resolved filesystem path, not a URL spelling, so
+    /// `%`, `#` and `?` in a real file name stay literal.
+    pub(crate) fn resolve_linked(&self, root: &Path, src: &str, size_pt: f32, scale: f32) -> Option<Image> {
+        self.resolve_with(root, src, size_pt, scale, true, false)
+    }
+
+    fn resolve_with(
+        &self,
+        root: &Path,
+        src: &str,
+        size_pt: f32,
+        scale: f32,
+        allow_outside: bool,
+        url_path: bool,
+    ) -> Option<Image> {
         // M-24: a query (`?raw=1`) is a fetch hint and a fragment
         // (`#gh-dark-mode-only`) is a theme hint; neither is part of the file
         // on disk, so both are dropped before resolution. The renderer keeps
-        // reading the fragment from the source as written.
-        let (path, _fragment) = lmdv_md::url_path_and_fragment(src);
-        let src = path.trim();
-        if src.is_empty() || is_not_a_local_path(root, src) {
+        // reading the fragment from the source as written. L-15: the relative
+        // spelling is a URL path, so `%20` names a space. A linked image
+        // already arrives as a decoded filesystem path.
+        let source = if url_path {
+            let (path, _fragment) = lmdv_md::url_path_and_fragment(src);
+            lmdv_md::decode_url_path(path.trim())
+        } else {
+            std::borrow::Cow::Borrowed(src.trim())
+        };
+        let src = source.as_ref();
+        if src.is_empty() || (url_path && is_not_a_local_path(root, src)) {
             return None;
         }
-        let key = (root.to_path_buf(), src.to_owned());
+        let key = (root.to_path_buf(), src.to_owned(), allow_outside, url_path);
         let cached = self.resolved.borrow().get(&key).cloned();
         let path = match cached {
             Some(path) => path,
             None => {
-                let policy = PathPolicy::new(root);
+                let policy = PathPolicy::new(root).with_allow_outside(allow_outside);
                 let path = policy.resolve_asset(Path::new(src)).ok().map(|file| file.path);
                 let mut resolved = self.resolved.borrow_mut();
                 if resolved.len() >= RESOLVED_CACHE {
@@ -303,6 +332,39 @@ mod tests {
             "another share stays missing"
         );
         assert!(images.resolve(temp.path(), "//elsewhere/share/pic.png", 32.0, 2.0).is_none());
+    }
+
+    #[test]
+    fn a_percent_encoded_source_resolves_once() {
+        // L-15: a Markdown URL path names the file, so `%20` is a space.
+        let temp = TempDir::new().unwrap();
+        fs::write(temp.path().join("my pic.png"), PNG).unwrap();
+        fs::write(temp.path().join("100%.png"), PNG).unwrap();
+        let images = state();
+        assert!(images.resolve(temp.path(), "my%20pic.png", 32.0, 2.0).is_some());
+        assert!(images.resolve(temp.path(), "my pic.png", 32.0, 2.0).is_some());
+        assert!(images.resolve(temp.path(), "100%25.png", 32.0, 2.0).is_some(), "one layer: %25 is a literal %");
+        assert!(images.resolve(temp.path(), "100%25.png?raw=1#gh-dark-mode-only", 32.0, 2.0).is_some());
+        assert!(images.resolve(temp.path(), "%FF.png", 32.0, 2.0).is_none(), "a broken escape is lossy, not a panic");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_linked_filesystem_path_is_not_decoded_as_a_url() {
+        // L-06: the link resolver hands over the real path, so `%`, `#` and
+        // `?` in the name are literal rather than URL syntax.
+        let temp = TempDir::new().unwrap();
+        for name in ["100%25.png", "hash#1.png", "what?.png"] {
+            fs::write(temp.path().join(name), PNG).unwrap();
+        }
+        let images = state();
+        for name in ["100%25.png", "hash#1.png", "what?.png"] {
+            let path = temp.path().join(name);
+            assert!(
+                images.resolve_linked(temp.path(), path.to_str().unwrap(), 32.0, 2.0).is_some(),
+                "{name} stays a literal file name"
+            );
+        }
     }
 
     #[test]

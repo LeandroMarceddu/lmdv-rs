@@ -15,8 +15,8 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use rune::{Color, Cx, El, ScrollSpec, Span, TextStyle, col, el, icon, row, text};
-use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit};
+use rune::{Color, Cx, El, ScrollSpec, Span, TextStyle, Tx, col, el, icon, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit};
 
 use crate::window::{HelpView, WindowState};
 
@@ -32,6 +32,20 @@ pub const HELP_TITLE: &str = "help-full-title";
 pub const HELP_CLOSE: &str = "help-full-close";
 /// The scrolling page body's key.
 pub const HELP_BODY: &str = "help-full-body";
+/// H-04's About/links row.
+pub const HELP_ABOUT: &str = "help-full-about";
+/// H-04's repository link.
+pub const HELP_REPOSITORY: &str = "help-full-repository";
+/// H-04's license link.
+pub const HELP_LICENSE: &str = "help-full-license";
+/// The version text in the header and the About row.
+pub const HELP_VERSION: &str = "help-full-version";
+/// The version repeated in the About row.
+pub const HELP_ABOUT_VERSION: &str = "help-full-about-version";
+/// H-04: the public repository the app is developed in.
+pub const HELP_REPOSITORY_URL: &str = "https://github.com/LeandroMarceddu/lmdv-rs";
+/// H-04: the MIT license file in the same repository.
+pub const HELP_LICENSE_URL: &str = "https://github.com/LeandroMarceddu/lmdv-rs/blob/main/LICENSE";
 
 /// The panel's widest, in points.
 pub const HELP_WIDTH: f32 = 720.0;
@@ -586,7 +600,7 @@ pub fn full_help_dialog(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit
                 )
                 .child(
                     text(lmdv_i18n::t!("start.version", "version" => env!("CARGO_PKG_VERSION")))
-                        .key("help-full-version")
+                        .key(HELP_VERSION)
                         .font(kit.ty.small)
                         .color(c.text_muted)
                         .w_full(),
@@ -616,6 +630,28 @@ pub fn full_help_dialog(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit
         .scroll(ScrollSpec { stick_bottom: false })
         .child(blocks_column(&page, panel_width - 40.0, kit));
 
+    // H-04: the About/links footer. The repository and the MIT license open
+    // in the system's browser (`Tx::open_url`, the app's only external-open
+    // path); the version is the same string the header and start page show.
+    let about = row()
+        .key(HELP_ABOUT)
+        .w_full()
+        .px(20.0)
+        .py(6.0)
+        .gap(10.0)
+        .center_y()
+        .child(icon(&crate::icons::APP, 16.0).color(c.icon_muted).a11y_hidden())
+        .child(text("lmdv").font(kit.ty.small_medium).color(c.text_muted))
+        .child(
+            text(lmdv_i18n::t!("start.version", "version" => env!("CARGO_PKG_VERSION")))
+                .key(HELP_ABOUT_VERSION)
+                .font(kit.ty.small)
+                .color(c.text_faint),
+        )
+        .child(row().grow(1.0))
+        .child(help_link(lmdv_i18n::t!("help.repository"), HELP_REPOSITORY, HELP_REPOSITORY_URL, kit))
+        .child(help_link(format!("{} (MIT)", lmdv_i18n::t!("help.license")), HELP_LICENSE, HELP_LICENSE_URL, kit));
+
     let panel = col()
         .key(HELP_PANEL)
         .w(panel_width)
@@ -627,7 +663,9 @@ pub fn full_help_dialog(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit
         .preserve_focus_on_press(true)
         .child(header)
         .child(el().key("help-full-rule").w_full().h(1.0).fill(c.border_muted))
-        .child(body);
+        .child(body)
+        .child(el().key("help-full-about-rule").w_full().h(1.0).fill(c.border_muted))
+        .child(about);
 
     let centred =
         col().key("help-full-layer").absolute(0.0, 0.0).w_full().h_full().py(24.0).px(24.0).items_center().child(panel);
@@ -644,6 +682,25 @@ pub fn full_help_dialog(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit
         .child(scrim)
         .child(centred);
     layer.push(root);
+}
+
+/// One external link in the About row: a link-role button that hands its URL
+/// to the system's browser. Headless runs record the request instead of opening
+/// anything (`Runtime::take_url_requests`).
+fn help_link(label: impl Into<String>, key: &str, url: &str, kit: &Kit) -> El {
+    let target = url.to_owned();
+    let notice_url = target.clone();
+    Button::new(label.into())
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Small)
+        .on_press_tx(move |state: &mut WindowState, tx: &mut Tx| {
+            if let Err(error) = tx.open_url(&target) {
+                state.notice(lmdv_i18n::t!("msg.openFailed", "name" => notice_url.clone(), "err" => error));
+            }
+        })
+        .build(kit)
+        .key(key)
+        .role("link")
 }
 
 fn blocks_column(page: &HelpPage, content_width: f32, kit: &Kit) -> El {

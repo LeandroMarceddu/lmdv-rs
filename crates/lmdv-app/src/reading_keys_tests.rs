@@ -9,12 +9,12 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime, Tx, WheelEvent};
 use tempfile::TempDir;
 
 use crate::nav::{JUMP_INSET, heading_destination};
-use crate::reader::{ScrollSnapshot, toc_headings};
+use crate::reader::{ARTICLE_SCROLL_KEY, ScrollSnapshot, toc_headings};
 use crate::reading_keys::{
     DOUBLE_G_SECONDS, KEY_ACCUMULATE_SECONDS, KEY_SCROLL, ReadingKeys, WHEEL_ACCUMULATE_SECONDS,
 };
 use crate::test_support;
-use crate::view::{scene_reader, scene_reader_outline, scene_reader_progress, view};
+use crate::view::{scene_reader, scene_reader_outline, scene_reader_progress, scene_reader_section, view};
 use crate::window::WindowState;
 
 fn window(temp: &TempDir) -> WindowState {
@@ -550,6 +550,39 @@ fn the_key_target_starts_over_after_the_window_expires() {
 }
 
 // ---- landing geometry ----------------------------------------------------
+
+#[test]
+fn a_heading_jump_under_the_section_line_holds_the_line_away() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    scene_reader_section(&mut state);
+    let mut runtime = open(state);
+    settle(&mut runtime, 60);
+    assert!(runtime.state.section_line.visible(), "the line is on screen before the jump");
+
+    let doc = runtime.state.active_reader().expect("a model");
+    let target = doc.headings.iter().position(|heading| heading.text == "Reading positions").expect("the h2");
+    let key = heading_key(target);
+    let before = scroll(&runtime);
+    let top = runtime.state.heading_top(target).expect("the last frame measured the heading");
+
+    runtime.update(|state, tx| state.jump_to_heading(&key, tx));
+    assert!(runtime.state.section_line.holding(), "O-11: a heading jump steps the line aside, no reserve");
+    settle(&mut runtime, 90);
+
+    let destination = heading_destination(before, top, JUMP_INSET);
+    assert!((scroll(&runtime).offset - destination).abs() < 2.0, "the heading lands at the plain inset");
+    let elements = runtime.elements();
+    let viewport = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some(ARTICLE_SCROLL_KEY))
+        .expect("the article viewport");
+    let heading =
+        elements.iter().find(|element| element.key.as_deref() == Some(key.as_str())).expect("the landed heading");
+    let landed_top = heading.rect[1] - viewport.rect[1];
+    assert!(landed_top < crate::section::SECTION_LINE_HEIGHT, "the heading sits where the line would be: {landed_top}");
+    assert!(!runtime.state.section_line.visible(), "the heading owns the top band, so the line is not painted over it");
+}
 
 #[test]
 fn a_heading_lands_an_inset_below_the_top_and_clamps_to_the_document() {

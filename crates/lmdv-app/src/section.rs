@@ -583,9 +583,10 @@ fn focus_rect_hits(rect: [f32; 4], viewport: [f32; 4]) -> bool {
 
 /// The top-level tables' edges relative to the article viewport's top.
 ///
-/// The header row's height is measured from the drawn table (`b7/table/head`,
-/// or `b7/scroll/table/head` when the table scrolls sideways) so a jump that
-/// lands under a stuck header can clear it (L-01).
+/// The header row's height is measured from the drawn table (under the app's
+/// `TableWire` wrapper, `b7/table-block-b7/table/head`, or `…/scroll/table/head`
+/// when the table scrolls sideways) so a jump that lands under a stuck header
+/// can clear it (L-01).
 pub(crate) fn measure_tables(cx: &Cx<WindowState>, doc: &MdDoc, viewport_top: f32) -> Vec<MeasuredTable> {
     let mut tables = Vec::new();
     for (index, block) in doc.blocks.iter().enumerate() {
@@ -597,9 +598,9 @@ pub(crate) fn measure_tables(cx: &Cx<WindowState>, doc: &MdDoc, viewport_top: f3
         if !rect[3].is_finite() || rect[3] <= 0.0 {
             continue;
         }
-        let header = ["table/head", "scroll/table/head"]
+        let header = crate::editor::scroll_sync::table_head_paths(key)
             .iter()
-            .find_map(|path| cx.window_layout(&format!("{key}/{path}")))
+            .find_map(|path| cx.window_layout(path))
             .filter(|rect| rect[3].is_finite() && rect[3] > 0.0)
             .map_or(0.0, |rect| rect[3]);
         tables.push(MeasuredTable { top: rect[1] - viewport_top, bottom: rect[1] + rect[3] - viewport_top, header });

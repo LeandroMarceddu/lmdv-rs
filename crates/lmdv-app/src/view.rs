@@ -8,12 +8,12 @@ use lmdv_core::{DocStatus, Document, DocumentKey, ScrollAnchor, ThemePref};
 use lmdv_render::{DetailsState, RenderWires};
 use rune::{
     Align, Color, Cursor, Cx, El, GrowthSpec, LiveRegion, Phase, PointerButton, PointerPress, ScrollSpec, TextStyle,
-    Tx, col, el, icon, row, text, text_input,
+    Transition, Tx, col, el, icon, row, text, text_input,
 };
 use rune_kit::shell::{SidebarPeek, SplitView, TabItem, TabItemStatus, TabOrientation, TabStrip, Toolbar};
 use rune_kit::syntax::SyntaxTheme;
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Placement,
+    Button, ButtonVariant, ControlSize, Dialog, IconButton, IconButtonVariant, Kit, Menu, MenuItem, Placement, State,
 };
 
 use crate::commands::lookup_command;
@@ -498,6 +498,19 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
         .build(kit)
         .key(crate::edit_ui::PREVIEW_TOGGLE_KEY);
 
+    // W-07: the same per-window fact the palette's `view.pin` check reads.
+    let pin = IconButton::new(&icons::PIN)
+        .variant(IconButtonVariant::GhostMuted)
+        .state(if state.pinned { State::Pressed } else { State::Rest })
+        .expanded(state.pinned)
+        .label(lmdv_i18n::t!("toolbar.pin"))
+        .help(lmdv_i18n::t!("toolbar.pin"))
+        .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
+            state.run_command("view.pin", tx);
+        })
+        .build(kit)
+        .key("pin-toggle");
+
     let mut bar = Toolbar::new()
         .leading(text("lmdv").font(TextStyle::new(14.0, 600.0)).color(c.text_muted))
         .title(title)
@@ -506,6 +519,7 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
         .trailing(browser)
         .trailing(outline)
         .trailing(share)
+        .trailing(pin)
         .trailing(settings)
         .trailing(help);
     if editing {
@@ -1048,16 +1062,20 @@ fn editor_view(
 ) -> El {
     let width = cx.layout_size("window-body").map_or(1100.0, |size| size[0]);
     let wide = width >= NARROW_SPLIT_WIDTH;
+    let reduced = cx.is_reduced_motion();
     if !wide {
         // Below 760 pt the source is alone; its header's Preview button swaps
         // in the live preview, which has a Source button back (E-02).
         if !(state.editor.preview_narrow && state.editor.preview_visible) {
-            return col()
-                .key("editor-single")
-                .w_full()
-                .h_full()
-                .min_h(0.0)
-                .child(source_editor(cx, tab, state, kit, true, layer));
+            return editor_surface(
+                col()
+                    .key("editor-single")
+                    .w_full()
+                    .h_full()
+                    .min_h(0.0)
+                    .child(source_editor(cx, tab, state, kit, true, layer)),
+                reduced,
+            );
         }
         let preview: El = match &tab.view.reader {
             Some(model) => reader_article(doc, model, tab, state, cx, kit),
@@ -1081,19 +1099,22 @@ fn editor_view(
                     .build(kit)
                     .key("editor-source-open"),
             );
-        return col()
-            .key("editor-preview-only")
-            .w_full()
-            .h_full()
-            .min_h(0.0)
-            .child(header)
-            .child(el().w_full().h(1.0).fill(kit.c.border_muted))
-            .child(col().grow(1.0).min_h(0.0).child(preview));
+        return editor_surface(
+            col()
+                .key("editor-preview-only")
+                .w_full()
+                .h_full()
+                .min_h(0.0)
+                .child(header)
+                .child(el().w_full().h(1.0).fill(kit.c.border_muted))
+                .child(col().grow(1.0).min_h(0.0).child(preview)),
+            reduced,
+        );
     }
     let show_preview = state.editor.preview_visible;
     let source = source_editor(cx, tab, state, kit, false, layer);
     if !show_preview {
-        return col().key("editor-single").w_full().h_full().min_h(0.0).child(source);
+        return editor_surface(col().key("editor-single").w_full().h_full().min_h(0.0).child(source), reduced);
     }
 
     let split = state.editor_split();
@@ -1115,14 +1136,27 @@ fn editor_view(
         Some(model) => reader_article(doc, model, tab, state, cx, kit),
         None => status_card(kit, lmdv_i18n::t!("editor.preparingPreview"), lmdv_i18n::t!("editor.previewDetail"), None),
     };
-    row()
-        .key("editor-split")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .child(source.grow(split).min_w(0.0))
-        .child(divider)
-        .child(col().key("preview-pane").grow(1.0 - split).min_w(0.0).h_full().child(preview))
+    editor_surface(
+        row()
+            .key("editor-split")
+            .w_full()
+            .h_full()
+            .min_h(0.0)
+            .child(source.grow(split).min_w(0.0))
+            .child(divider)
+            .child(col().key("preview-pane").grow(1.0 - split).min_w(0.0).h_full().child(preview)),
+        reduced,
+    )
+}
+
+/// E-01: the editor surface fades in over 0.2 s when edit mode starts.
+///
+/// The transition is paint-only: the first frame lays out at its final place
+/// and input is live at once. Rune lands every transition at its end under
+/// Reduce Motion, and a Reduced Motion frame asks for `Transition::none()`
+/// explicitly rather than relying on that.
+fn editor_surface(surface: El, reduced: bool) -> El {
+    surface.transition(if reduced { Transition::none() } else { Transition::opacity() })
 }
 
 /// The source field inside its scroll viewport (6.2).
@@ -1146,7 +1180,6 @@ fn source_editor(
     // E-07: measure where the first visible source line sits. A view without a
     // preview (narrow source-only) leaves the preview geometry empty.
     state.clear_preview_geometry();
-    state.publish_editor_top(cx);
     let theme = SyntaxTheme::from_kit(kit);
     // E-37: the source is 87.5% of the reading size at a proportional line
     // height, in both the single field and the block fields. The Aa stepper
@@ -1157,6 +1190,27 @@ fn source_editor(
     let caret_selection = kit.alpha(caret, 0.28);
     let spell_underline = c.danger.fg;
     let block_mode = editor.block_mode_active();
+    // The visible field's own spans, so the visual-line measurement wraps at
+    // the field's width with the faces it draws (E-07). The single field reuses
+    // them below; block rows build their own and only the visible one is
+    // measured here.
+    let measured_spans = if block_mode {
+        let index = state
+            .editor
+            .visible_blocks
+            .as_ref()
+            .map(|range| range.start)
+            .or_else(|| editor.active_block())
+            .unwrap_or(0);
+        editor
+            .block_editor()
+            .and_then(|blocks| blocks.block(index))
+            .map(|block| state.editor_block_spans(&block.edit, &theme, block.range.clone(), spell_underline))
+            .unwrap_or_default()
+    } else {
+        state.editor_spans(tab, &editor.edit, &theme, None, spell_underline)
+    };
+    state.publish_editor_top(cx, &measured_spans, source_font);
     let field = if block_mode {
         el()
     } else {
@@ -1165,7 +1219,7 @@ fn source_editor(
             .label(lmdv_i18n::t!("editor.markdownSource"))
             .caret(caret, caret_selection)
             .w_full()
-            .spans(state.editor_spans(tab, &editor.edit, &theme, None, c.danger.fg))
+            .spans(measured_spans)
             .on_edit(|state: &mut WindowState| state.active_editor_edit())
             .on_input_change(|state: &mut WindowState, _| state.editor_changed())
             .on_input_key(|state: &mut WindowState, event, tx| state.editor_key(event, tx))

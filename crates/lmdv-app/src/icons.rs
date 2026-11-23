@@ -48,6 +48,13 @@ pub static PLUS: Icon = Icon {
     body: r#"<path d="M8 3.4v9.2M3.4 8h9.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>"#,
 };
 
+/// Keep this window on top (`view.pin`, W-07).
+pub static PIN: Icon = Icon {
+    name: "lmdv-pin",
+    view: 16.0,
+    body: r#"<path d="M6.2 2.6h3.6l-.9 3.1 2 2v1.1H8.8V13L8 14l-.8-1V8.8H5.1V7.7l2-2-.9-3.1Z" stroke="currentColor" stroke-width="1.1" fill="none" stroke-linejoin="round"/>"#,
+};
+
 /// Take away: the reader-size stepper's smaller end.
 pub static MINUS: Icon = Icon {
     name: "lmdv-minus",

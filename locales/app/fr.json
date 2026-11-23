@@ -170,6 +170,8 @@
   "keys.dblclick": "Y placer le curseur",
   "help.close": "Fermer (Échap)",
   "help.title": "Aide",
+  "help.repository": "Dépôt",
+  "help.license": "Licence",
   "zoom.open": "Ouvrir l'aperçu",
   "zoom.dialog": "Aperçu",
   "zoom.viewport": "Aperçu zoomable. Plus et moins zooment, 0 ajuste, W ajuste à la largeur, 1 affiche la taille réelle, les flèches déplacent, Échap ferme.",

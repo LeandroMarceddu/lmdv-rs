@@ -134,6 +134,7 @@ pub(crate) fn allowed_tag(name: &str) -> Option<HtmlTag> {
     Some(match name.to_ascii_lowercase().as_str() {
         "a" => HtmlTag::A,
         "abbr" => HtmlTag::Abbr,
+        "area" => HtmlTag::Area,
         "b" => HtmlTag::B,
         "blockquote" => HtmlTag::Blockquote,
         "br" => HtmlTag::Br,
@@ -148,6 +149,7 @@ pub(crate) fn allowed_tag(name: &str) -> Option<HtmlTag> {
         "kbd" => HtmlTag::Kbd,
         "li" => HtmlTag::Li,
         "mark" => HtmlTag::Mark,
+        "map" => HtmlTag::Map,
         "ol" => HtmlTag::Ol,
         "p" => HtmlTag::P,
         "picture" => HtmlTag::Picture,
@@ -159,6 +161,7 @@ pub(crate) fn allowed_tag(name: &str) -> Option<HtmlTag> {
         "sub" => HtmlTag::Sub,
         "summary" => HtmlTag::Summary,
         "sup" => HtmlTag::Sup,
+        "svg" => HtmlTag::Svg,
         "table" => HtmlTag::Table,
         "tbody" => HtmlTag::Tbody,
         "td" => HtmlTag::Td,
@@ -182,7 +185,8 @@ pub(crate) fn filter_attrs(
 ) -> (Vec<(String, String)>, Vec<SrcSetCandidate>) {
     const ALLOWED: &[&str] = &[
         "href", "src", "alt", "title", "width", "height", "media", "type", "start", "colspan", "rowspan", "align",
-        "poster", "controls", "loop", "muted", "preload", "kind", "srclang", "label", "id", "class",
+        "poster", "controls", "loop", "muted", "preload", "kind", "srclang", "label", "id", "class", "usemap", "name",
+        "shape", "coords",
     ];
     let mut kept = Vec::new();
     let mut srcset = Vec::new();
@@ -196,6 +200,12 @@ pub(crate) fn filter_attrs(
                 srcset = parse_srcset(&value)
                     .into_iter()
                     .filter_map(|candidate| {
+                        // M-26: a network or device candidate is off limits and is
+                        // dropped here, not left for the resolver. A local spelling
+                        // (including `///abs`) stays as written.
+                        if is_off_limits_url(&candidate.url) {
+                            return None;
+                        }
                         let url = sanitize_url(tag, "src", &candidate.url)?;
                         Some(SrcSetCandidate { url, descriptor: candidate.descriptor })
                     })
@@ -221,7 +231,11 @@ pub(crate) fn filter_attrs(
                     kept.push(("id".to_owned(), namespaced));
                 }
             }
-            "href" | "src" | "poster" => {
+            "href" | "src" | "poster" | "xlink:href" => {
+                // L-12: SVG's `xlink:href` names the same destination as
+                // `href`, so both spellings reach the inline link parser and a
+                // future link menu under one name.
+                let name = if name == "xlink:href" { "href".to_owned() } else { name };
                 if let Some(url) = sanitize_url(tag, &name, &value) {
                     kept.push((name, url));
                 }
@@ -231,6 +245,18 @@ pub(crate) fn filter_attrs(
         }
     }
     (kept, srcset)
+}
+
+/// Whether a URL names another computer or a device instead of a local path
+/// (M-26): `//host/share`, a UNC spelling, or a Windows drive.
+///
+/// A `///abs` spelling is an ordinary absolute path, as in `links.rs`.
+fn is_off_limits_url(url: &str) -> bool {
+    if (url.starts_with("//") && !url.starts_with("///")) || url.starts_with(r"\\") {
+        return true;
+    }
+    let bytes = url.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 fn sanitize_url(tag: HtmlTag, name: &str, value: &str) -> Option<String> {

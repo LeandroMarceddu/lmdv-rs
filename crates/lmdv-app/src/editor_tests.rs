@@ -1405,7 +1405,8 @@ fn the_dirty_dot_and_title_clear_after_save() {
     state.request_save_active(&mut tx);
     wait_for_save(&mut state);
     assert!(!state.window_title().contains('•'));
-    assert_eq!(state.window_title(), "dot.md — lmdv");
+    // W-09: the title quotes the document name.
+    assert_eq!(state.window_title(), "\u{201c}dot.md\u{201d} \u{2014} lmdv");
 }
 
 #[test]
@@ -1553,6 +1554,101 @@ fn save_all_waits_for_a_pasted_save_as_before_closing() {
     });
     assert!(!state.ui.close_requested, "poll issued the close it was waiting for");
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "text");
+}
+
+// --------------------------------------------------- E-01 round trip (P0)
+
+/// One element as a comparable snapshot: key, role, label, text, focus and
+/// drawn geometry (rounded to a tenth of a point).
+type TreeRow = (Option<String>, &'static str, Option<String>, Option<String>, bool, [f32; 4]);
+
+fn element(runtime: &rune::Runtime<WindowState>, key: &str) -> ElementInfo {
+    runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key))
+        .unwrap_or_else(|| panic!("no element keyed {key}"))
+}
+
+fn reading_tree(runtime: &rune::Runtime<WindowState>) -> Vec<TreeRow> {
+    runtime
+        .elements()
+        .into_iter()
+        .filter(|element| !element.exiting)
+        .map(|element| {
+            let round = |value: f32| (value * 10.0).round() / 10.0;
+            (element.key, element.role, element.label, element.text, element.focused, element.rect.map(round))
+        })
+        .collect()
+}
+
+fn settle_frames(runtime: &mut rune::Runtime<WindowState>, frames: usize) {
+    for frame in 0..frames {
+        runtime.frame(f64::from(frame as u32) / 60.0);
+    }
+}
+
+fn ctrl_e() -> rune::KeyEvent {
+    rune::KeyEvent { key: rune::Key::Command('e'), mods: rune::Mods { cmd: true, ctrl: true, ..rune::Mods::default() } }
+}
+
+#[test]
+fn ctrl_e_twice_returns_to_the_same_reading_view() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Round trip", "# Round trip\n\nintro\n\n## Section\n\nbody text\n\n## End\n\nmore\n");
+    let mut runtime = runtime(state);
+    settle_frames(&mut runtime, 6);
+    runtime.wheel(700.0, 420.0, -60.0);
+    settle_frames(&mut runtime, 20);
+    let reading = reading_tree(&runtime);
+    let scroll = runtime.state.scroll_snapshot();
+
+    runtime.key(ctrl_e());
+    runtime.frame(0.0);
+    assert_eq!(runtime.state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor), "Ctrl+E edits");
+    settle_frames(&mut runtime, 4);
+    assert!(element(&runtime, "editor-source").rect[2] > 0.0, "the source field is drawn");
+
+    runtime.key(ctrl_e());
+    settle_frames(&mut runtime, 30);
+    assert_eq!(runtime.state.active_tab().map(|tab| tab.view.mode), Some(Mode::Viewer), "Ctrl+E again reads");
+    assert_eq!(runtime.state.scroll_snapshot(), scroll, "the reading position is unchanged");
+    assert_eq!(reading_tree(&runtime), reading, "roles, labels, text, focus and geometry are identical");
+}
+
+#[test]
+fn the_editor_surface_fades_in_and_reduced_motion_lands_at_once() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Fade", "# Fade\n\nbody\n");
+    let mut faded = runtime(state);
+    settle_frames(&mut faded, 3);
+
+    faded.key(ctrl_e());
+    faded.frame(0.0);
+    let surface = element(&faded, "editor-split");
+    assert!(surface.opacity < 0.99, "E-01: the editor surface enters on its fade: {}", surface.opacity);
+    assert!(
+        surface.rect[2] > 0.0 && surface.rect[3] > 0.0,
+        "the first frame already lays the surface out whole: {:?}",
+        surface.rect
+    );
+    settle_frames(&mut faded, 20);
+    let landed = element(&faded, "editor-split").opacity;
+    assert!((landed - 1.0).abs() < 1e-3, "the fade lands whole: {landed}");
+
+    // Reduced motion: no transition frame at all.
+    let mut reduced = window(&temp);
+    reduced.open_synthetic("Fade", "# Fade\n\nbody\n");
+    let mut reduced_runtime = runtime(reduced);
+    settle_frames(&mut reduced_runtime, 3);
+    reduced_runtime.set_system_reduced_motion(true);
+    reduced_runtime.frame(0.1);
+    reduced_runtime.key(ctrl_e());
+    reduced_runtime.frame(0.2);
+    let opacity = element(&reduced_runtime, "editor-split").opacity;
+    assert!((opacity - 1.0).abs() < 1e-3, "Reduce Motion shows the editor whole at once: {opacity}");
 }
 
 #[test]
@@ -2080,7 +2176,9 @@ fn a_foreign_edit_lease_is_a_notice_not_a_takeover() {
 
 // ------------------------------------------------- E-07 scroll sync (P3-04c2)
 
-use crate::editor::scroll_sync::{self, EditorTop, Placement, PreviewBlock, PreviewGeometry, PreviewTable};
+use crate::editor::scroll_sync::{
+    self, EditorTop, Placement, PreviewAnchor, PreviewBlock, PreviewGeometry, PreviewTable, VisualLines,
+};
 use crate::reader::ScrollSnapshot;
 
 /// A document long enough for both source panes to scroll, under the
@@ -2096,16 +2194,26 @@ fn scrolling_markdown(paragraphs: usize) -> String {
 }
 
 fn preview_block(index: usize, key: &str, top: f32, height: f32, next_top: f32) -> PreviewBlock {
-    PreviewBlock { index, key: key.to_owned(), top, height, next_top, heading: None, table: None }
+    PreviewBlock { index, key: key.to_owned(), top, height, next_top, heading: None }
 }
 
 fn geometry(blocks: Vec<PreviewBlock>, viewport: f32, max: f32) -> PreviewGeometry {
-    PreviewGeometry { blocks, content_bottom: 1200.0, viewport, max }
+    PreviewGeometry {
+        blocks,
+        tables: Vec::new(),
+        front_matter: None,
+        reserve: 0.0,
+        content_bottom: 1200.0,
+        viewport,
+        max,
+    }
 }
 
 fn runtime(state: WindowState) -> rune::Runtime<WindowState> {
     let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
     runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+    // The AppSpec's key router: Ctrl+E, Escape and the editing keys.
+    runtime.on_key = Some(crate::app::on_key);
     runtime
 }
 
@@ -2172,9 +2280,9 @@ fn the_preview_reveal_keeps_a_bottom_block_in_view() {
 #[test]
 fn a_table_header_is_covered_when_the_top_line_is_inside_a_table() {
     let doc = lmdv_md::parse("| A | B |\n| --- | --- |\n| one | two |\n| three | four |\n");
-    let mut block = preview_block(0, "b0", 40.0, 200.0, 300.0);
-    block.table = Some(PreviewTable { top: 40.0, bottom: 240.0, head: 30.0 });
-    let geometry = geometry(vec![block], 700.0, 2000.0);
+    let block = preview_block(0, "b0", 40.0, 200.0, 300.0);
+    let mut geometry = geometry(vec![block], 700.0, 2000.0);
+    geometry.tables = vec![PreviewTable { top: 40.0, bottom: 240.0, head: 30.0 }];
     let line = 2.0; // a row line
     let placement = scroll_sync::preview_placement(&doc, line, false, &geometry).expect("the table block");
     let span = &doc.block_spans[0];
@@ -2533,6 +2641,222 @@ fn block_mode_fields_follow_the_reading_size() {
         (focused_caret_height(&runtime) - metrics.line_height).abs() < 0.5,
         "the block field re-measured at 19.25 pt on a 30.8 pt line: {}",
         focused_caret_height(&runtime)
+    );
+}
+
+// ---- E-07: exact visual-line mapping, table cover, front matter, reserve ----
+
+/// The source field's style at the default reading size, as the view draws it.
+fn field_style() -> rune::TextStyle {
+    rune::TextStyle { line_height: 22.4, ..rune::TextStyle::new(14.0, 400.0).mono() }
+}
+
+#[test]
+fn wrapped_lines_take_one_entry_each_and_map_by_their_drawn_line() {
+    let text = "a short line\nthis line is long enough that it must wrap into several visual lines at a narrow \
+                width, which is the whole point of measuring the field instead of counting lines\nend\n";
+    let style = field_style();
+    let visual = VisualLines::measure(text, &[], style, 180.0, 0);
+    assert!(visual.measured);
+    assert_eq!(visual.tops.len(), 5, "four \n-delimited lines (the final newline ends an empty one) plus the bottom");
+    let wrapped = visual.visual_count(1).expect("the long line") / style.line_height;
+    assert!(wrapped > 2.5, "the long line wraps into {wrapped} visual lines");
+    // A point 40% down the wrapped line's band is still source line 1, not
+    // line 2 or 3, and keeps its fraction inside the line.
+    let band = visual.tops[2] - visual.tops[1];
+    let line = visual.line_at(visual.tops[1] + band * 0.4).expect("inside the text");
+    assert_eq!(line.floor() as usize, 1, "{line}");
+    assert!((line - 1.4).abs() < 0.05, "{line}");
+    // The measurement's total is the text's drawn height.
+    let drawn = rune::text::measure(text, &[], style, Some(180.0)).1;
+    assert!((visual.tops.last().unwrap() - drawn).abs() < 1.0, "{visual:?} vs {drawn}");
+}
+
+#[test]
+fn a_block_row_maps_wrapped_lines_inside_its_own_block() {
+    let style = field_style();
+    let text = "first short line\nthis block line is long enough to wrap several times at a narrow field width, \
+                so a row-height fraction would land on the wrong source line\nlast\n\n";
+    let visual = VisualLines::measure(text, &[], style, 180.0, 7);
+    assert!(visual.visual_count(8).expect("the wrapped line") > style.line_height * 1.5);
+    let top = EditorTop {
+        measured: true,
+        block: Some(0),
+        block_top: 16.0,
+        block_height: *visual.tops.last().expect("the bottom"),
+        ..EditorTop::default()
+    };
+    let y = visual.tops[1] + style.line_height * 0.5;
+    let line = scroll_sync::mapped_top_line(&top, Some(&visual), 16.0 + y, (7, 11), 30, style.line_height);
+    assert_eq!(line.floor() as usize, 8, "inside the wrapped block line: {line}");
+    // Scaling the row's height across the block's source lines is a different
+    // line: the row is taller because of the wrapping, not the line count.
+    let naive = scroll_sync::top_line(&top, 16.0 + y, (7, 11), 30, style.line_height);
+    assert!((naive - line).abs() > 0.25, "naive {naive} vs exact {line}");
+}
+
+#[test]
+fn the_app_maps_wrapped_prose_to_the_line_it_draws() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Wrap", &scrolling_markdown(40));
+    enter_editor(&mut state);
+    state.editor.sync_suppressed_until = None;
+    let mut runtime = runtime(state);
+    for frame in 0..4 {
+        runtime.frame(f64::from(frame) / 60.0);
+    }
+
+    let visual = runtime.state.editor.visual.borrow().get().clone();
+    assert!(visual.measured, "the view measured the field's visual lines");
+    let top = runtime.state.editor.editor_top.get();
+    assert!(top.measured);
+    let line_height = runtime.state.editor_metrics().line_height;
+    let field = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("editor-source"))
+        .expect("the source field");
+    let drawn = *visual.tops.last().expect("the text's bottom");
+    assert!((drawn - field.rect[3]).abs() < 2.0, "the measured height {drawn} matches the field's {}", field.rect[3]);
+
+    // The first wrapped source line: a point in its second visual line must
+    // map back to that line, not two source lines further on.
+    let long = (0..visual.tops.len() - 1)
+        .find(|&line| visual.visual_count(line).is_some_and(|height| height > line_height * 1.5))
+        .expect("a wrapped line");
+    let y = visual.tops[long] + line_height * 1.5;
+    let lines = runtime.state.active_tab().and_then(Tab::document).expect("document").text().line_count().max(1);
+    runtime.update(|state, _| {
+        state.editor.scroll.set(ScrollSnapshot { offset: top.start + y, max: 80_000.0, viewport: 700.0 });
+    });
+    let mapped = runtime.state.editor_top_line().expect("a mapping");
+    assert_eq!(mapped.floor() as usize, long, "mapped {mapped} for source line {long}");
+    // Counting visual lines as source lines is a different line: the field is
+    // taller because of the wrapping, not because the text has more lines.
+    let naive = scroll_sync::top_line(&top, top.start + y, (0, lines), lines, line_height);
+    assert!((naive - mapped).abs() > 0.5, "counting visual lines maps elsewhere: {naive} vs {mapped}");
+}
+
+#[test]
+fn every_table_crossing_the_viewport_top_contributes_its_header() {
+    // Two tables whose rows hold the top: the later one wins the maximum, and
+    // a table entirely above the viewport adds nothing without the fade.
+    let mut geometry = geometry(Vec::new(), 700.0, 4000.0);
+    geometry.tables = vec![
+        PreviewTable { top: -120.0, bottom: 180.0, head: 30.0 },
+        PreviewTable { top: -40.0, bottom: 60.0, head: 26.0 },
+    ];
+    assert_eq!(geometry.cover_at(50.0, false), 30.0, "a table crossing the top still covers it");
+    assert_eq!(geometry.cover_at(0.0, false), 30.0, "the first row sits under its header");
+    assert_eq!(geometry.cover_at(200.0, true), 10.0, "the fade carries one header height past the bottom");
+    assert_eq!(geometry.cover_at(300.0, true), 0.0, "the fade ends");
+    assert_eq!(geometry.cover_at(-130.0, false), 0.0, "above every table");
+    // A table that starts below the viewport's top covers only what it has.
+    let below = PreviewTable { top: 20.0, bottom: 320.0, head: 30.0 };
+    geometry.tables.push(below);
+    assert_eq!(geometry.cover_at(35.0, false), 30.0, "past the header, the whole header covers");
+    assert_eq!(geometry.cover_at(25.0, false), 30.0, "the max of the two tables");
+}
+
+#[test]
+fn every_table_that_can_stick_is_measured_across_the_preview() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let mut text = String::from("# Tables\n\n");
+    for index in 0..3 {
+        text.push_str(&format!("paragraph {index}\n\n| A | B |\n| --- | --- |\n| {index} | x |\n\n"));
+    }
+    state.open_synthetic("Tables", &text);
+    enter_editor(&mut state);
+    state.editor.sync_suppressed_until = None;
+    let mut runtime = runtime(state);
+    // Let the 200 ms preview parse land so the article is drawn and measured.
+    for frame in 0..30 {
+        runtime.frame(f64::from(frame) / 60.0);
+    }
+    // Scroll the preview by hand into the third table while the source stays
+    // at its top: the cover must still know about that table.
+    let doc = runtime.state.active_reader().expect("parsed");
+    let third = (0..doc.blocks.len()).find(|&index| index > 4 && matches!(doc.blocks[index], lmdv_md::Block::Table(_)));
+    let third = third.expect("a third table");
+    let key = doc.block_key(third).expect("a table key").to_owned();
+    let elements = runtime.elements();
+    let article_top = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some(crate::reader::ARTICLE_SCROLL_KEY))
+        .map(|element| element.rect[1])
+        .expect("the article viewport");
+    let table_rect = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some(key.as_str()))
+        .map(|element| element.rect)
+        .expect("the table is drawn");
+    // Content points at rest: the drawn rect minus the viewport's own top.
+    let offset = table_rect[1] - article_top + table_rect[3] * 0.5;
+    runtime.update(|state, _| {
+        state.reading.scroll.set(ScrollSnapshot { offset, max: 4000.0, viewport: 700.0 });
+    });
+    runtime.frame(0.5);
+    let geometry = runtime.state.editor.preview.borrow().clone();
+    assert!(
+        geometry.tables.iter().any(|table| table.top <= article_top + offset && article_top + offset < table.bottom),
+        "the table under the viewport's top is measured: {:?} at {offset}",
+        geometry.tables
+    );
+    assert!(geometry.cover_at(article_top + offset + 4.0, false) > 0.0, "its header covers the top");
+}
+
+#[test]
+fn a_front_matter_line_interpolates_across_the_card() {
+    let doc = lmdv_md::parse("---\ntitle: Notes\nauthor: A\n---\n\n# Body\n\ntext\n");
+    assert!(doc.front_matter.is_some());
+    let first_line = doc.block_spans[0].line;
+    assert!(first_line >= 3, "the body starts after the card: {first_line}");
+    let mut geometry = geometry(Vec::new(), 700.0, 4000.0);
+    geometry.content_bottom = 900.0;
+    geometry.front_matter =
+        Some(PreviewAnchor { key: "front-matter".to_owned(), top: 40.0, height: 80.0, next_top: 140.0 });
+    let mid = (first_line as f32) * 0.5;
+    let placement = scroll_sync::preview_placement(&doc, mid, false, &geometry).expect("the card anchors it");
+    assert_eq!(placement.key, "front-matter");
+    assert_eq!(placement.index, None);
+    let t = (mid / first_line as f32).clamp(0.0, 1.0);
+    let y_line = 40.0 + t * 100.0;
+    assert!((placement.target - (y_line - 16.0)).abs() < 1e-3, "target {} for {y_line}", placement.target);
+    assert!((placement.y - (40.0 - placement.target)).abs() < 1e-3);
+    let at_top = scroll_sync::preview_placement(&doc, mid, true, &geometry).expect("the card anchors it");
+    assert_eq!(at_top.target, 0.0, "an editor at its top shows the preview's top");
+    // Without the measured card the fixed fallback lands at the margin.
+    let mut unmeasured = geometry.clone();
+    unmeasured.front_matter = None;
+    let fallback = scroll_sync::preview_placement(&doc, 1.0, false, &unmeasured).expect("the card");
+    assert!(fallback.fallback);
+    assert_eq!(fallback.y, -16.0);
+}
+
+#[test]
+fn the_section_line_reserve_moves_the_preview_below_it() {
+    let doc = lmdv_md::parse("# A\n\nfirst\n\nsecond\n");
+    let line = doc.block_spans[0].line as f32;
+    let mut geometry = geometry(vec![preview_block(0, "b0", 100.0, 50.0, 200.0)], 700.0, 4000.0);
+    let plain = scroll_sync::preview_placement(&doc, line, false, &geometry).expect("the block");
+    assert!((plain.target - (100.0 - 16.0)).abs() < 1e-3);
+    geometry.reserve = crate::section::SECTION_LINE_HEIGHT;
+    let reserved = scroll_sync::preview_placement(&doc, line, false, &geometry).expect("the block");
+    assert!(
+        (reserved.target - (plain.target - crate::section::SECTION_LINE_HEIGHT)).abs() < 1e-3,
+        "the line's height is reserved: {} vs {}",
+        reserved.target,
+        plain.target
+    );
+    // The reveal clears the line too when the caret sits at the top.
+    let base = Placement { key: "b0".to_owned(), y: 0.0, target: 100.0, index: Some(0), fallback: false };
+    let reveal = scroll_sync::reveal_placement(&doc, line, &base, &geometry).expect("the block");
+    assert!(
+        reveal.target <= plain.target - crate::section::SECTION_LINE_HEIGHT + 1e-3,
+        "the caret reveal keeps the line's band clear: {}",
+        reveal.target
     );
 }
 

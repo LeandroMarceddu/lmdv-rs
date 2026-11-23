@@ -308,12 +308,19 @@ impl WindowState {
             Ok(Some(lmdv_io::LinkResolution::File { path, markdown: true })) => {
                 self.place_linked_document(path, fragment, placement, tx);
             }
-            // L-07: an existing non-Markdown file never opens as text. The
-            // notice offers Open for a document/media/archive extension and
-            // Show in folder otherwise, so a program or script is only ever
-            // revealed, never run.
+            // L-06: a real image opens the full-window preview, decode-tested
+            // through the image cache; a missing or broken picture falls through
+            // to L-07's honest notice instead of opening as text.
             Ok(Some(lmdv_io::LinkResolution::File { path, markdown: false })) => {
-                self.show_non_markdown_notice(&path);
+                // The link run's key is its destination as written; with a
+                // fragment, the renderer kept the whole spelling.
+                let opener = match &fragment {
+                    Some(fragment) => format!("{dest}#{fragment}"),
+                    None => dest.clone(),
+                };
+                if !(is_image_path(&path) && self.open_image_link(path.clone(), opener, tx)) {
+                    self.show_non_markdown_notice(&path);
+                }
             }
             // L-05: a link resolving to a directory roots the file pane there
             // and shows it, with no tab.
@@ -339,7 +346,7 @@ impl WindowState {
     }
 
     /// L-07's notice for an existing file that is not a Markdown document.
-    fn show_non_markdown_notice(&mut self, path: &Path) {
+    pub(crate) fn show_non_markdown_notice(&mut self, path: &Path) {
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -480,18 +487,24 @@ impl WindowState {
             // L-09: pasted text has no folder; the notice offers Save as…
             return LinkTarget::NeedsFile;
         };
-        // M-24: a picture's or media file's URL query is a fetch hint that has
-        // no meaning for a local file, so it never becomes part of the path.
-        let dest = if media { dest.split_once('?').map_or(dest, |(path, _)| path) } else { dest };
         let (dest, fragment) = match dest.split_once('#') {
             Some((dest, fragment)) if !fragment.is_empty() => (dest, Some(fragment.to_owned())),
             Some((dest, _)) => (dest, None),
             None => (dest, None),
         };
+        // M-24/L-15: a URL query is a fetch hint that has no meaning for a
+        // local file, so it never becomes part of the path. Splitting the
+        // fragment first keeps `file.md?plain=1#section` landing on `section`.
+        // A literal `?` in a file name is written `%3F` and decoded below.
+        let dest = dest.split_once('?').map_or(dest, |(path, _)| path);
         if dest.is_empty() {
             return LinkTarget::Refused(lmdv_i18n::t!("link.noTarget").to_owned());
         }
-        let path = lmdv_io::absolute_lexical(&root.join(dest));
+        // L-15: the spelling is a URL path, so `%20` names a space. The
+        // fragment was split first, so `%23` stays part of the file name and a
+        // literal `#section` still travels separately.
+        let decoded = lmdv_md::decode_url_path(dest);
+        let path = lmdv_io::absolute_lexical(&root.join(decoded.as_ref()));
         let markdown = !media && is_markdown(&path);
         LinkTarget::Local { path, markdown, fragment: if media { None } else { fragment } }
     }
@@ -564,6 +577,20 @@ pub const OPENABLE_EXTENSIONS: &[&str] = &[
     "html", "htm", "xhtml",
 ];
 
+/// The extensions a plain link may open in the media preview (L-06).
+///
+/// They are the raster and vector pictures the window's image cache decodes;
+/// anything else keeps L-07's notice.
+pub const IMAGE_EXTENSIONS: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "svgz", "avif", "tif", "tiff", "ico", "heic"];
+
+/// Whether a path names a picture the preview can try to open (L-06).
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| IMAGE_EXTENSIONS.iter().any(|known| extension.eq_ignore_ascii_case(known)))
+}
+
 /// Whether a non-Markdown file may be opened by the desktop's handler (L-07).
 ///
 /// Extensions are compared case-insensitively; a file with no extension, or
@@ -630,6 +657,14 @@ mod tests {
     fn canonical(path: &Path) -> PathBuf {
         std::fs::canonicalize(path).unwrap()
     }
+
+    /// A valid 1x1 PNG, for L-06's decode test.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+        0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D,
+        0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     fn shows(state: &WindowState, path: &Path) -> bool {
         let path = canonical(path);
@@ -1236,6 +1271,131 @@ mod tests {
         let doc = state.active_doc().expect("parsed");
         let id = doc.headings[0].id.clone();
         assert_eq!(state.classify_link(&format!("#{id}")), LinkTarget::Fragment(id));
+    }
+
+    #[test]
+    fn a_percent_encoded_relative_path_decodes_once_before_joining() {
+        // L-15: the Markdown spelling is a URL path.
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        write(&temp, "my notes.md");
+        write(&temp, "sub dir/next.md");
+        std::fs::write(root.join("100% done.md"), "# Percent\n").unwrap();
+        let index = write(&temp, "index.md");
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+
+        assert_eq!(
+            state.classify_link("my%20notes.md"),
+            LinkTarget::Local { path: root.join("my notes.md"), markdown: true, fragment: None }
+        );
+        assert_eq!(
+            state.classify_link("sub%20dir/next.md#part"),
+            LinkTarget::Local { path: root.join("sub dir/next.md"), markdown: true, fragment: Some("part".to_owned()) }
+        );
+        assert_eq!(
+            state.classify_link("100%25%20done.md"),
+            LinkTarget::Local { path: root.join("100% done.md"), markdown: true, fragment: None }
+        );
+        assert_eq!(
+            state.classify_link("my%20notes.md?plain=1#part"),
+            LinkTarget::Local { path: root.join("my notes.md"), markdown: true, fragment: Some("part".to_owned()) },
+            "a query is not part of the file and the fragment still travels"
+        );
+        assert_eq!(
+            state.classify_link("100% done.md"),
+            LinkTarget::Local { path: root.join("100% done.md"), markdown: true, fragment: None },
+            "a stray % stays as written"
+        );
+        assert_eq!(
+            state.classify_link("%FF.md"),
+            LinkTarget::Local { path: root.join("\u{FFFD}.md"), markdown: true, fragment: None },
+            "invalid UTF-8 is lossy, never a panic"
+        );
+
+        // The worker probe receives the decoded spelling and opens the file.
+        let mut tx = Tx::default();
+        state.open_link("my%20notes.md", &mut tx);
+        poll_until(&mut state, "the encoded link following", |state| {
+            state.active_path().as_deref() == Some(canonical(&root.join("my notes.md")).as_path())
+        });
+    }
+
+    #[test]
+    fn an_image_link_opens_the_preview_and_a_broken_one_reports_honestly() {
+        // L-06: a real image opens the preview, decode-tested through the image
+        // cache; a broken or non-image file keeps L-07's notice, and a folder
+        // still roots the file pane (L-05).
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let index = write(&temp, "index.md");
+        std::fs::write(root.join("my pic.png"), PNG).unwrap();
+        std::fs::write(root.join("broken.png"), b"not a png").unwrap();
+        std::fs::write(
+            root.join("drawing.svg"),
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><rect width="10" height="10" fill="#0969da"/></svg>"##,
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("pics")).unwrap();
+        let mut state = window(&temp);
+        state.shared.set_headless();
+        open_file(&mut state, index);
+
+        let mut tx = Tx::default();
+        state.open_link("my%20pic.png", &mut tx);
+        poll_until(&mut state, "the image preview", |state| state.lightbox().is_some());
+        let lightbox = state.lightbox().expect("the preview");
+        assert_eq!(lightbox.media.kind, lmdv_render::MediaKind::Image);
+        assert_eq!(lightbox.title, "my pic.png");
+        assert_eq!(lightbox.caption, "my pic.png", "no alt text names the file");
+        assert_eq!(lightbox.opener, "my%20pic.png", "focus returns to the link run that was clicked");
+        assert_eq!(state.tabs().len(), 1, "no document tab opened for the picture");
+        state.close_lightbox();
+
+        // An SVG is a picture too: the image cache rasterizes it natively.
+        state.open_link("drawing.svg", &mut tx);
+        poll_until(&mut state, "the SVG preview", |state| state.lightbox().is_some());
+        assert_eq!(state.lightbox().expect("the SVG preview").title, "drawing.svg");
+        state.close_lightbox();
+
+        state.open_link("broken.png", &mut tx);
+        poll_until(&mut state, "the broken-image notice", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown"))
+        });
+        assert!(state.lightbox().is_none(), "a picture that cannot decode never stays open");
+
+        state.dismiss_notice();
+        state.open_link("pics", &mut tx);
+        poll_until(&mut state, "the folder link", |state| {
+            state.browser.root().is_some_and(|folder| folder.ends_with("pics"))
+        });
+        assert!(state.lightbox().is_none(), "a folder is not a picture");
+    }
+
+    #[test]
+    fn an_image_link_outside_the_document_folder_opens_the_preview() {
+        // L-06 with L-07's scope: a click may leave the document folder, while
+        // an embedded picture may not (OI-009). The media copy/save worker
+        // follows the same allowance, so the preview is not read-only.
+        let temp = TempDir::new().unwrap();
+        let notes = temp.path().join("notes");
+        std::fs::create_dir_all(&notes).unwrap();
+        std::fs::create_dir_all(temp.path().join("shared")).unwrap();
+        let index = notes.join("index.md");
+        std::fs::write(&index, "# Notes\n\n[Picture](../shared/pic.png)\n").unwrap();
+        std::fs::write(temp.path().join("shared/pic.png"), PNG).unwrap();
+        let mut state = window(&temp);
+        state.shared.set_headless();
+        open_file(&mut state, index);
+
+        let mut tx = Tx::default();
+        state.open_link("../shared/pic.png", &mut tx);
+        poll_until(&mut state, "the outside image preview", |state| state.lightbox().is_some());
+        let lightbox = state.lightbox().expect("the preview");
+        assert_eq!(lightbox.title, "pic.png");
+        poll_until(&mut state, "the linked picture's PNG preload", |state| {
+            state.lightbox().is_some_and(|lightbox| lightbox.png_ready())
+        });
     }
 
     #[test]

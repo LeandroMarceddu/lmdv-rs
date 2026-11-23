@@ -1570,11 +1570,14 @@ impl WindowState {
         }
         // Tab lands on the tree with the active file as its roving row (F-10),
         // so arrows and Return start there before the first key sets a focus.
+        // With neither, Down takes the first visible row and Up the last: the
+        // implicit first row is not a selection to step from.
         let at = self
             .browser
             .focus
             .clone()
-            .or_else(|| self.browser.active_descendant())
+            .filter(|path| self.browser.has_row(path))
+            .or_else(|| self.browser.active.clone().filter(|path| self.browser.has_row(path)))
             .and_then(|path| self.browser.rows.iter().position(|row| row.path == path));
         let page = 10usize;
         let target = match &event.key {

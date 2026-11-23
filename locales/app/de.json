@@ -170,6 +170,8 @@
   "keys.dblclick": "Cursor dorthin setzen",
   "help.close": "Schließen (Esc)",
   "help.title": "Hilfe",
+  "help.repository": "Repository",
+  "help.license": "Lizenz",
   "zoom.open": "Vorschau öffnen",
   "zoom.dialog": "Vorschau",
   "zoom.viewport": "Zoombare Vorschau. Plus und Minus zoomen, 0 passt ein, W passt an die Breite an, 1 zeigt die Originalgröße, Pfeiltasten verschieben, Esc schließt.",

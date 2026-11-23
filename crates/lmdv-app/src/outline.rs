@@ -99,10 +99,19 @@ impl WindowState {
     }
 
     /// The first heading that passes the active filter, for Enter in the field.
+    ///
+    /// Below [`OUTLINE_FILTER_MIN_HEADINGS`] the field is absent, so a filter
+    /// left on the tab (a tab that lost headings, a transfer) is not applied:
+    /// the first outline heading is the target.
     pub(crate) fn first_visible_heading_key(&self) -> Option<String> {
         let tab = self.active_tab()?;
         let doc = tab.view.reader.as_ref()?;
-        let needle = tab.view.toc_filter.trim().to_lowercase();
+        let total = toc_headings(doc).count();
+        let needle = if total >= OUTLINE_FILTER_MIN_HEADINGS {
+            tab.view.toc_filter.trim().to_lowercase()
+        } else {
+            String::new()
+        };
         toc_headings(doc)
             .find(|(_, heading)| needle.is_empty() || heading.text.to_lowercase().contains(&needle))
             .map(|(index, _)| lmdv_render::heading_key(index))
@@ -239,8 +248,11 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
         })
         .collect();
     let total = rows.len();
-
-    let needle = tab.view.toc_filter.trim().to_lowercase();
+    // Below the threshold the field is not drawn, so the tab's filter is not
+    // applied either: a filter left from a longer revision of the document
+    // must never hide every row with no visible way to clear it.
+    let filtered = total >= OUTLINE_FILTER_MIN_HEADINGS;
+    let needle = if filtered { tab.view.toc_filter.trim().to_lowercase() } else { String::new() };
     let visible: Vec<&Row> = rows
         .iter()
         .take(OUTLINE_MAX_ROWS)
@@ -251,7 +263,7 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
         .label(lmdv_i18n::t!("pane.outline"))
         .header(SidebarHeader::new(lmdv_i18n::t!("pane.outline")).count(total).build(kit));
 
-    if total >= OUTLINE_FILTER_MIN_HEADINGS {
+    if filtered {
         sidebar = sidebar.header(
             TextInput::new(&state.outline_filter)
                 .placeholder(lmdv_i18n::t!("pane.filterPlaceholder"))
@@ -261,12 +273,24 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
                 .clear_button()
                 .on_edit(|state: &mut WindowState| &mut state.outline_filter)
                 .on_change(|state: &mut WindowState, _: &mut Tx| state.outline_filter_changed())
+                .on_key(|state: &mut WindowState, event: &rune::KeyEvent, tx: &mut Tx| {
+                    // O-05: Esc clears and leaves the field.
+                    if event.key != rune::Key::Escape {
+                        return false;
+                    }
+                    state.clear_outline_filter();
+                    tx.blur();
+                    true
+                })
                 .on_submit(|state: &mut WindowState, tx: &mut Tx| {
                     if let Some(key) = state.first_visible_heading_key() {
                         state.jump_to_heading(&key, tx);
                     }
                 })
-                .on_action(|state: &mut WindowState, _: &mut Tx| state.clear_outline_filter())
+                .on_action(|state: &mut WindowState, tx: &mut Tx| {
+                    state.clear_outline_filter();
+                    tx.focus("outline-filter", false);
+                })
                 .build(kit)
                 .key("outline-filter"),
         );
@@ -330,6 +354,155 @@ mod tests {
         WindowState::new(test_support::shared(temp))
     }
 
+    /// A document with `count` h2 headings, each with a body paragraph.
+    fn headings(count: usize, prefix: &str) -> String {
+        let mut source = String::new();
+        for index in 0..count {
+            source.push_str(&format!("## {prefix} {index}\n\nBody {index}.\n\n"));
+        }
+        source
+    }
+
+    /// A window showing `count` headings with the outline open.
+    fn outlined(temp: &TempDir, count: usize, prefix: &str) -> WindowState {
+        let mut state = window(temp);
+        state.open_synthetic("Outline", &headings(count, prefix));
+        state.right.set_open(true);
+        if let Some(tab) = state.active_tab_mut() {
+            tab.view.outline_hidden = false;
+        }
+        state
+    }
+
+    /// One headless frame of the window, as `--tree` sees it.
+    fn draw(state: WindowState) -> Vec<rune::ElementInfo> {
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.elements()
+    }
+
+    fn has_key(elements: &[rune::ElementInfo], key: &str) -> bool {
+        elements.iter().any(|element| element.key.as_deref() == Some(key))
+    }
+
+    /// The drawn outline rows, by label.
+    fn row_labels(elements: &[rune::ElementInfo]) -> Vec<String> {
+        elements
+            .iter()
+            .filter(|element| !element.exiting)
+            .filter(|element| element.key.as_deref().is_some_and(|key| key.starts_with("outline-h")))
+            .filter_map(|element| element.label.clone())
+            .collect()
+    }
+
+    #[test]
+    fn the_filter_appears_from_eight_headings_and_never_at_seven() {
+        let temp = TempDir::new().unwrap();
+        let seven = outlined(&temp, 7, "Section");
+        let elements = draw(seven);
+        assert!(!has_key(&elements, "outline-filter"), "O-05: seven headings have no filter");
+        assert_eq!(row_labels(&elements).len(), 7);
+
+        // The field is absent below the threshold, so a filter left on the tab
+        // must not hide rows with no visible way to clear it.
+        let mut seven = outlined(&temp, 7, "Section");
+        seven.outline_filter.replace_text("no such heading");
+        seven.outline_filter_changed();
+        assert_eq!(
+            seven.first_visible_heading_key().as_deref(),
+            Some("h0"),
+            "Enter in an absent field still targets the first heading"
+        );
+        let elements = draw(seven);
+        assert!(!has_key(&elements, "outline-filter"));
+        assert!(!has_key(&elements, "outline-empty"));
+        assert_eq!(row_labels(&elements).len(), 7, "a stale filter is not applied without its field");
+
+        let eight = outlined(&temp, 8, "Section");
+        let elements = draw(eight);
+        assert!(has_key(&elements, "outline-filter"), "O-05: eight headings show the filter");
+    }
+
+    #[test]
+    fn a_filter_with_no_matches_shows_the_empty_state() {
+        let temp = TempDir::new().unwrap();
+        let mut state = outlined(&temp, 10, "Section");
+        state.outline_filter.replace_text("no such heading");
+        state.outline_filter_changed();
+        let elements = draw(state);
+        assert!(has_key(&elements, "outline-filter"), "the field stays, so the filter can be cleared");
+        assert!(has_key(&elements, "outline-empty"), "the no-matches row is drawn");
+        assert!(row_labels(&elements).is_empty(), "no heading rows remain");
+    }
+
+    #[test]
+    fn escape_clears_the_filter_and_leaves_the_field() {
+        let temp = TempDir::new().unwrap();
+        let mut state = outlined(&temp, 9, "Section");
+        state.outline_filter.replace_text("no such heading");
+        state.outline_filter_changed();
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.update(|_, tx| tx.focus("outline-filter", false));
+        runtime.frame(0.0);
+        runtime.key(rune::KeyEvent { key: rune::Key::Escape, mods: rune::Mods::default() });
+        runtime.frame(0.0);
+        assert_eq!(runtime.state.outline_filter.text, "", "O-05: Esc clears the filter");
+        assert_eq!(
+            runtime.state.active_tab().map(|tab| tab.view.toc_filter.as_str()),
+            Some(""),
+            "and the tab's filter"
+        );
+        let input = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("input"))
+            .expect("the filter's input");
+        assert!(!input.focused, "and leaves the field");
+    }
+
+    #[test]
+    fn the_filter_survives_a_tab_switch_and_filters_that_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let first = state.open_synthetic("Alpha", &headings(9, "Alpha"));
+        state.right.set_open(true);
+        state.outline_filter.replace_text("Alpha 3");
+        state.outline_filter_changed();
+
+        let second = state.open_synthetic("Beta", &headings(9, "Beta"));
+        assert_eq!(state.outline_filter.text, "", "a new tab starts unfiltered");
+        state.outline_filter.replace_text("Beta 5");
+        state.outline_filter_changed();
+
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.update(|state, _| {
+            assert!(state.activate_tab(first));
+            if let Some(tab) = state.active_tab_mut() {
+                tab.view.outline_hidden = false;
+            }
+            state.right.set_open(true);
+        });
+        runtime.frame(0.0);
+        assert_eq!(runtime.state.outline_filter.text, "Alpha 3", "the first tab's filter comes back");
+        let elements = runtime.elements();
+        assert_eq!(row_labels(&elements), ["Alpha 3"], "and it filters the first tab");
+        assert!(!has_key(&elements, "outline-empty"));
+
+        runtime.update(|state, _| {
+            assert!(state.activate_tab(second));
+            if let Some(tab) = state.active_tab_mut() {
+                tab.view.outline_hidden = false;
+            }
+            state.right.set_open(true);
+        });
+        runtime.frame(0.0);
+        assert_eq!(runtime.state.outline_filter.text, "Beta 5");
+        let elements = runtime.elements();
+        assert_eq!(row_labels(&elements), ["Beta 5"], "each tab keeps its own filter");
+    }
+
     #[test]
     fn the_outline_follows_headings_and_the_user_choice() {
         let temp = TempDir::new().unwrap();
@@ -357,22 +530,23 @@ mod tests {
     fn the_filter_is_per_tab() {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
-        let first = state.open_synthetic("One", "# Alpha\n\n## Beta\n");
-        state.outline_filter.replace_text("beta");
+        let first = state.open_synthetic("One", &headings(9, "Alpha"));
+        state.outline_filter.replace_text("Alpha 7");
         state.outline_filter_changed();
-        assert_eq!(state.tab(first).map(|tab| tab.view.toc_filter.as_str()), Some("beta"));
+        assert_eq!(state.tab(first).map(|tab| tab.view.toc_filter.as_str()), Some("Alpha 7"));
 
-        let second = state.open_synthetic("Two", "# Gamma\n");
+        let second = state.open_synthetic("Two", &headings(9, "Beta"));
         assert_eq!(state.outline_filter.text, "", "the new tab starts unfiltered");
-        state.outline_filter.replace_text("gamma");
+        state.outline_filter.replace_text("Beta 5");
         state.outline_filter_changed();
 
         assert!(state.activate_tab(first));
-        assert_eq!(state.outline_filter.text, "beta");
-        assert_eq!(state.first_visible_heading_key().as_deref(), Some("h1"));
+        assert_eq!(state.outline_filter.text, "Alpha 7");
+        assert_eq!(state.first_visible_heading_key().as_deref(), Some("h7"));
 
         assert!(state.activate_tab(second));
-        assert_eq!(state.outline_filter.text, "gamma");
+        assert_eq!(state.outline_filter.text, "Beta 5");
+        assert_eq!(state.first_visible_heading_key().as_deref(), Some("h5"));
     }
 
     #[test]

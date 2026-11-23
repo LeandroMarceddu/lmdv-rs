@@ -5,7 +5,8 @@ use rune::{ElementInfo, Env, Key, KeyEvent, Mods, Runtime};
 use tempfile::TempDir;
 
 use crate::help::{
-    Block, HELP_BODY, HELP_CLOSE, HELP_KEY, HELP_PANEL, HELP_SCRIM, HELP_TITLE, HelpPage, Inline, KeyRow, Run, page,
+    Block, HELP_ABOUT, HELP_ABOUT_VERSION, HELP_BODY, HELP_CLOSE, HELP_KEY, HELP_LICENSE, HELP_LICENSE_URL, HELP_PANEL,
+    HELP_REPOSITORY, HELP_REPOSITORY_URL, HELP_SCRIM, HELP_TITLE, HELP_VERSION, HelpPage, Inline, KeyRow, Run, page,
     parse,
 };
 use crate::test_support;
@@ -206,6 +207,57 @@ fn stray_text_and_unclosed_blocks_still_reach_the_page() {
 // ---- the dialog -----------------------------------------------------------
 
 #[test]
+fn the_full_help_shows_the_repository_license_and_version() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    crate::view::scene_help_full(&mut state);
+    let mut runtime = runtime(state, (1100.0, 760.0));
+    runtime.frame(0.0);
+
+    let elements = runtime.elements();
+    let about = by_key(&elements, HELP_ABOUT);
+    assert_eq!(about.role, "group", "the About row is one group");
+    let repository = by_key(&elements, HELP_REPOSITORY);
+    assert_eq!(repository.role, "link", "the repository is a link");
+    assert_eq!(repository.label.as_deref(), Some("Repository"));
+    let license = by_key(&elements, HELP_LICENSE);
+    assert_eq!(license.role, "link", "the license is a link");
+    assert_eq!(license.label.as_deref(), Some("License (MIT)"));
+    let version = by_key(&elements, HELP_ABOUT_VERSION);
+    assert_eq!(version.text.as_deref(), Some(concat!("Version ", env!("CARGO_PKG_VERSION"))));
+    assert_eq!(by_key(&elements, HELP_VERSION).text.as_deref(), Some(concat!("Version ", env!("CARGO_PKG_VERSION"))));
+    assert_eq!(HELP_REPOSITORY_URL, "https://github.com/LeandroMarceddu/lmdv-rs");
+    assert_eq!(HELP_LICENSE_URL, "https://github.com/LeandroMarceddu/lmdv-rs/blob/main/LICENSE");
+
+    // Both links go through the app's external-open path; headless runs record
+    // the request instead of opening a browser.
+    click(&mut runtime, HELP_REPOSITORY);
+    runtime.frame(1.0 / 60.0);
+    assert_eq!(runtime.take_url_requests(), [HELP_REPOSITORY_URL], "the repository URL is opened");
+    click(&mut runtime, HELP_LICENSE);
+    runtime.frame(2.0 / 60.0);
+    assert_eq!(runtime.take_url_requests(), [HELP_LICENSE_URL.to_string()], "the license URL is opened");
+}
+
+#[test]
+fn the_about_labels_are_localized_in_all_six_catalogs() {
+    let expected = [
+        ("en", "Repository", "License"),
+        ("it", "Repository", "Licenza"),
+        ("de", "Repository", "Lizenz"),
+        ("fr", "Dépôt", "Licence"),
+        ("es", "Repositorio", "Licencia"),
+        ("zh-CN", "代码仓库", "许可证"),
+    ];
+    assert_eq!(lmdv_i18n::locales().len(), expected.len());
+    for (index, (id, repository, license)) in expected.into_iter().enumerate() {
+        assert_eq!(lmdv_i18n::locales()[index].id(), id);
+        assert_eq!(lmdv_i18n::text_in(index, lmdv_i18n::key("help.repository")), repository, "{id}");
+        assert_eq!(lmdv_i18n::text_in(index, lmdv_i18n::key("help.license")), license, "{id}");
+    }
+}
+
+#[test]
 fn the_full_scene_exposes_the_dialog_and_its_section_headings() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
@@ -268,6 +320,13 @@ fn the_full_page_fits_a_480_pixel_window() {
     );
     assert!(offenders.is_empty(), "drawn past the right edge: {offenders:?}");
     assert!(elements.iter().any(|element| element.text.as_deref() == Some("Opening documents")));
+    // H-04's About row fits too, with both links drawn and the panel on screen.
+    let about = by_key(&elements, HELP_ABOUT);
+    assert!(about.rect[0] >= 0.0 && about.rect[0] + about.rect[2] <= 480.5, "{:?}", about.rect);
+    assert!(by_key(&elements, HELP_REPOSITORY).rect[2] > 0.0, "the repository link draws");
+    assert!(by_key(&elements, HELP_LICENSE).rect[2] > 0.0, "the license link draws");
+    assert!(panel.rect[1] >= 0.0 && panel.rect[1] + panel.rect[3] <= 760.5, "the panel fits: {:?}", panel.rect);
+    assert!(by_key(&elements, HELP_BODY).rect[3] > 100.0, "the guide still has room to scroll");
 }
 
 #[test]

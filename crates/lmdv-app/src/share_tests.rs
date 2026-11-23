@@ -10,9 +10,12 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::commands::lookup_command;
-use crate::share::{ExportJob, PdfExport, RichCopyJob, SHARE_ITEMS, export_title, pdf_export};
+use crate::share::{
+    ExportJob, PdfExport, RichCopyJob, SHARE_ITEMS, export_title, is_print_temp, medium_date_at, pdf_export,
+    pdf_export_at, print_temp_path, remove_print_temp,
+};
 use crate::test_support;
-use crate::window::{WindowState, title_for_path};
+use crate::window::{Notice, NoticeAction, NoticeKind, WindowState, title_for_path};
 
 fn window(temp: &TempDir) -> WindowState {
     WindowState::new(test_support::shared(temp))
@@ -165,6 +168,11 @@ fn pdf_settings_take_the_h1_break_from_prefs_and_the_localized_date() {
     let pdf = pdf_export(&state);
     assert!(pdf.break_on_h1);
     assert!(pdf.date.contains("20"), "the medium date: {}", pdf.date);
+
+    // OI-104: the header date comes from the local-time formatter, not a
+    // separate UTC path.
+    let at = 1_794_612_600; // 2026-11-13, 23:30 UTC
+    assert_eq!(pdf_export_at(&state, at).date, medium_date(at, lmdv_i18n::locale()));
 }
 
 #[test]
@@ -191,7 +199,7 @@ fn a_pdf_export_writes_an_a4_document_with_the_h1_break_from_prefs() {
     prefs.print_break_h1 = true;
     state.shared().set_prefs(prefs);
     let target = export_target(&temp, "notes.pdf");
-    let pdf = PdfExport { date: medium_date(1_794_614_400, lmdv_i18n::locale()), break_on_h1: true };
+    let pdf = PdfExport { date: medium_date_at(1_794_614_400, 0, lmdv_i18n::locale()), break_on_h1: true };
 
     state.start_export(ExportFormat::Pdf, target.clone(), Some(pdf), false);
     wait_for_export(&mut state);
@@ -206,7 +214,100 @@ fn a_pdf_export_writes_an_a4_document_with_the_h1_break_from_prefs() {
     assert!(text.contains("MediaBox[0 0 595.2756 841.8898]"), "A4 page size");
     assert!(text.contains("/Count 2"), "two H1s, one page each");
     assert!(state.share.flashing());
-    assert!(state.ui.notice.as_ref().and_then(|notice| notice.action.clone()).is_some(), "Show in folder");
+    let action = state.ui.notice.as_ref().and_then(|notice| notice.action.clone());
+    assert_eq!(
+        action,
+        Some(NoticeAction::ShowInFolder(std::fs::canonicalize(&target).expect("the written file"))),
+        "X-05's Show in folder carries the exported file, not just its folder"
+    );
+}
+
+#[test]
+fn the_pdf_success_notice_reveals_the_exported_file() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("notes", "# Notes\n");
+    let target = export_target(&temp, "notes.pdf");
+    let pdf = PdfExport { date: "Nov 14, 2026".to_owned(), break_on_h1: false };
+    state.start_export(ExportFormat::Pdf, target.clone(), Some(pdf), false);
+    wait_for_export(&mut state);
+
+    let revealed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    state.shared().set_external_sink({
+        let revealed = revealed.clone();
+        Box::new(move |path| revealed.borrow_mut().push(path.to_path_buf()))
+    });
+    state.run_notice_action();
+
+    let canonical = std::fs::canonicalize(&target).expect("the written file");
+    assert_eq!(revealed.borrow().len(), 1, "one reveal request");
+    assert_eq!(revealed.borrow()[0], canonical, "Show in folder reveals the file, selecting it (OI-104)");
+    assert!(state.ui.notice.is_none(), "the notice closes when its action runs");
+}
+
+#[test]
+fn a_failed_pdf_export_offers_the_print_dialog() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("notes", "# Notes\n");
+    // X-15 refuses a destination whose folder does not exist, so the worker
+    // fails exactly like a full disk or a Typst error would (X-05).
+    let target = temp.path().join("missing").join("notes.pdf");
+    let pdf = PdfExport { date: "Nov 14, 2026".to_owned(), break_on_h1: false };
+
+    state.start_export(ExportFormat::Pdf, target, Some(pdf), false);
+    wait_for_export(&mut state);
+
+    let notice = state.ui.notice.as_ref().expect("the failure is shown");
+    assert_eq!(notice.kind, NoticeKind::Error);
+    let prefix = lmdv_i18n::t!("msg.pdfFailed", "err" => "");
+    assert!(notice.text.starts_with(prefix.trim_end()), "{}", notice.text);
+    assert_eq!(notice.action, Some(NoticeAction::UsePrintDialog), "X-05's Use the print dialog");
+    assert_eq!(notice.action.as_ref().expect("the action").label(), lmdv_i18n::t!("msg.usePrintDialog"));
+    assert!(!state.share.flashing(), "a failure shows no success check");
+}
+
+#[test]
+fn the_print_dialog_action_asks_for_a_print_and_refuses_while_one_runs() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("notes", "# Notes\n");
+    let doc = state.active_document_id().expect("the document");
+    state.ui.notice = Some(Notice {
+        text: String::new(),
+        deadline: 0.0,
+        action: Some(NoticeAction::UsePrintDialog),
+        kind: NoticeKind::Error,
+        seq: 1,
+    });
+
+    // One export at a time (X-05): a second request is refused with the busy
+    // notice and leaves the first job alone, so no viewer is ever started here.
+    state.share.in_flight = Some(ExportJob { job: 9, doc, format: ExportFormat::Pdf, open_viewer: true });
+    state.run_notice_action();
+
+    assert_eq!(
+        state.ui.notice.as_ref().map(|notice| notice.text.as_str()),
+        Some(lmdv_i18n::t!("msg.exportBusy")),
+        "the action reached Print…, which refuses while an export runs"
+    );
+    assert_eq!(state.share.in_flight.as_ref().map(|job| job.job), Some(9), "the running job is untouched");
+}
+
+#[test]
+fn a_printed_pdf_is_removed_but_the_users_export_is_kept() {
+    let temp = TempDir::new().unwrap();
+    let exported = export_target(&temp, "notes.pdf");
+    std::fs::write(&exported, b"%PDF-").unwrap();
+    assert!(!remove_print_temp(&exported).expect("the export is left alone"));
+    assert!(exported.exists(), "a file the user saved is never removed");
+
+    let printed = print_temp_path();
+    std::fs::write(&printed, b"%PDF-").unwrap();
+    assert!(is_print_temp(&printed), "Print…'s own temporary: {}", printed.display());
+    assert!(remove_print_temp(&printed).expect("the temp is removed"));
+    assert!(!printed.exists(), "the print temporary is gone after the viewer had it");
+    assert!(remove_print_temp(&printed).expect("removing it again is not an error"));
 }
 
 #[test]
@@ -303,10 +404,28 @@ fn the_pdf_fonts_are_cached_and_come_from_the_system() {
 #[test]
 fn the_medium_date_is_localized() {
     let at = 1_794_614_400; // 2026-11-14, 00:00 UTC
-    assert_eq!(medium_date(at, lmdv_i18n::find_locale("en").unwrap()), "Nov 14, 2026");
-    assert_eq!(medium_date(at, lmdv_i18n::find_locale("it").unwrap()), "14 nov 2026");
-    assert_eq!(medium_date(at, lmdv_i18n::find_locale("de").unwrap()), "14.11.2026");
-    assert_eq!(medium_date(at, lmdv_i18n::find_locale("zh-CN").unwrap()), "2026年11月14日");
+    assert_eq!(medium_date_at(at, 0, lmdv_i18n::find_locale("en").unwrap()), "Nov 14, 2026");
+    assert_eq!(medium_date_at(at, 0, lmdv_i18n::find_locale("it").unwrap()), "14 nov 2026");
+    assert_eq!(medium_date_at(at, 0, lmdv_i18n::find_locale("de").unwrap()), "14.11.2026");
+    assert_eq!(medium_date_at(at, 0, lmdv_i18n::find_locale("zh-CN").unwrap()), "2026年11月14日");
+}
+
+#[test]
+fn the_medium_date_follows_the_local_day_across_midnight() {
+    let en = lmdv_i18n::find_locale("en").unwrap();
+    let it = lmdv_i18n::find_locale("it").unwrap();
+    // 2026-11-13, 23:30 UTC: +00:30 is already the 14th locally, while UTC and
+    // a western zone still say the 13th (X-14, OI-104).
+    let at = 1_794_612_600;
+    assert_eq!(medium_date_at(at, 0, en), "Nov 13, 2026");
+    assert_eq!(medium_date_at(at, 30 * 60, en), "Nov 14, 2026");
+    assert_eq!(medium_date_at(at, 30 * 60, it), "14 nov 2026");
+    assert_eq!(medium_date_at(at, -4 * 3_600, en), "Nov 13, 2026", "a western zone is still on the 13th");
+
+    // The same instant at UTC midnight names the previous day in the Americas.
+    let midnight = 1_794_614_400;
+    assert_eq!(medium_date_at(midnight, 0, en), "Nov 14, 2026");
+    assert_eq!(medium_date_at(midnight, -4 * 3_600, en), "Nov 13, 2026");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-23
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (205 done, 52 substitutes, 56 partial, 11 missing, 18 n/a), the P0 missing and the app-side P0 cleanup are implemented, the default Markdown handler covers Windows and Linux, the scroll/article-reuse fix is in, and v0.8.0 is released. Remaining: 13 P0 partials (mostly Rune/rune-kit or held export items), the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (223 done, 52 substitutes, 40 partial, 9 missing, 18 n/a), the P0 missing and app-side P0 cleanup plus a broad P1 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll fixes are in, and v0.9.0 is released. Remaining: 9 P0 partials (Rune/rune-kit or the T-26/X-02 edges), the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -372,7 +372,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0**, **v0.7.0** and **v0.8.0** were published from it (unsigned, no checksums).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0**, **v0.7.0**, **v0.8.0** and **v0.9.0** were published from it (unsigned, no checksums).
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
@@ -471,7 +471,7 @@
 - `ReaderView::memo` now wraps the article in `rune::memo`, versioned by document revision (+ source hash while revision 0), theme fingerprint, content width, scale, highlight hash and app state (tab, mode, open details/front matter, table copy flash). Documents drawing a picture or diagram stay unmemoised (a picture decodes on a worker, a diagram follows the appearance).
 - The wheel glide is speed-aware: Rune's 0.32 s spring for a single notch or a wheel after a pause, stiffening to 0.10 s during a burst so the content trails ~72 pt instead of ~300. Single-notch motion is unchanged.
 - Result: **20 → 41 FPS** at 1200×860 (46.5 at 900×700), `view_cpu` **1.9 ms**, burst trail **297 → 117 pt**. The renderer's own commit/apply/paint over 15.5k nodes is now the cost; 60 FPS on this document needs Rune-side work or a virtualized article.
-- No FPS setting: this Rune rev exposes no present mode or refresh cap, and every surface is already `AutoVsync` (desktop refresh). A row would be inert; the Rune API request is OI-193.
+- No FPS setting: this Rune rev exposes no present mode or refresh cap, and every surface is already `AutoVsync` (desktop refresh). The speedup is the fix the reporter asked for; no API request is tracked.
 - Fixture: `tests/fixtures/stress/developer-guide.md` (951 KiB, 10.5k lines, 51 tables, 186 fences); release notes in `docs/releases/v0.8.0.md`.
 
 ## P0 cleanup — E-22, H-06, E-15, E-17, T-12 — complete
@@ -492,14 +492,27 @@
 - The full-window table preview still uses its own 360-clamped planner (OI-194).
 - Tests: `lmdv-render` `a_long_word_widens_its_column_past_the_cap_and_the_table_scrolls`, `a_long_code_word_widens_its_table_column_in_the_monospace_face`; updated app `a_table_wider_than_the_reading_column_fits_the_column`.
 
+## P1 batch — editor, PDF, links, reading, windows — complete
+
+- E-01: the editor surface fades in (`Transition::opacity()`, off under Reduce Motion), and Ctrl+E twice returns to an identical reading tree/roles/anchor/focus/scroll.
+- E-07: exact per-source-line visual mapping (own font/spans/width, cached), block-local mapping, every table header that can stick measured, front-matter anchor, measured section-line reserve. Fixed the inert `b{n}/table/head` lookup shared with the section line.
+- E-15/E-17/X-05/X-14: PDF/Print dates use the local day; Show in folder reveals and selects via `FileManager1.ShowItems` / `explorer /select,` / `open -R` with a folder fallback; Print temps clean up after a 30 s grace; the print-dialog failure path is tested.
+- L-06/L-15/M-25/M-26: image links open the preview, percent-decoded paths, inline alt→src fallback, network `srcset` candidates dropped at parse. L-12 gained the safe `map`/`area`/`svg` + `xlink:href` parse subset.
+- R-17/O-05/O-11: reader-find prefill trims/caps and handles empty selections; outline threshold/empty/per-tab/Esc behavior; `--line`/footnote jumps reserve the section line and front matter, with the table-header exception.
+- T-14/T-29/T-31/S-13/F-11/W-07/W-09/R-29: background-tab queue insertion, drag-aware Ctrl+W, 3 s cascade + max/min inheritance, tree traversal (fixed Down skipping row 1), visible Pin button and quoted title, sticky notices.
+- H-04: full Help About row with Repository and License (MIT) links; MIT `LICENSE` added; repo is public.
+- Residuals/OIs: L-12 renderer/context menu (OI-195), SVG rasterizer (OI-196), R-17 block-menu find (OI-197), O-05 keyboard cursor (OI-198), inline picture hover (OI-182), diagram serializer (OI-181); T-26/X-02 and the Rune/kit P0s remain.
+- Audit: **223 done, 52 substitute, 40 partial, 9 missing, 18 n/a; 9 P0 gaps**.
+- v0.9.0; release notes in `docs/releases/v0.9.0.md`.
+
 ## Next up
 
 **Next when work resumes:**
 
-1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms; see the scroll section and OI-193).
-2. Close or accept the 13 remaining P0 rows: most need Rune/rune-kit APIs (T-01/T-03/T-19/D-04/I-10/C-01/O-14/L-11) or held export work (X-02/X-05); E-01/E-07/T-26 and H-04 remain app-side. D-03 image drop (OI-187) and drag-to-scroll (OI-186) follow.
+1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
+2. Close or accept the 9 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10; T-26 and X-02 (rune-mermaid serializer) are the app/vendor edges. D-03 image drop (OI-187) and drag-to-scroll (OI-186) follow.
 3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — the user asked to hold it for now.
-4. P7 packaging: LICENSE, three-part reverse-DNS id, installer icon, signed checksums (OI-153); Windows runtime only if it becomes a target (OI-155).
+4. P7 packaging: three-part reverse-DNS id, installer icon, signed checksums (OI-153); LICENSE is done. Windows runtime only if it becomes a target (OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

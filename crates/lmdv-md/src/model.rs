@@ -156,6 +156,21 @@ pub fn url_path_and_fragment(url: &str) -> (&str, Option<&str>) {
     (path, fragment)
 }
 
+/// One layer of percent escapes decoded in a link path (L-15).
+///
+/// The relative spelling in Markdown is a URL path, so `%20` names a space and
+/// `%23` a literal `#`. Decoding is lossy and never fails, as
+/// `decodeURIComponent` with a raw fallback: a stray `%` that does not begin a
+/// valid escape stays as written, and an escape that is not UTF-8 becomes
+/// U+FFFD instead of panicking. The caller must split the fragment first, so a
+/// `%23` in a file name is not mistaken for the start of a `#section`.
+pub fn decode_url_path(path: &str) -> Cow<'_, str> {
+    if !path.contains('%') {
+        return Cow::Borrowed(path);
+    }
+    percent_encoding::percent_decode_str(path).decode_utf8_lossy()
+}
+
 /// How many code blocks one block holds, in drawing order (M-13).
 fn count_code_texts(block: &Block) -> usize {
     match block {
@@ -765,6 +780,8 @@ pub enum HtmlTag {
     A,
     /// `<abbr>`
     Abbr,
+    /// `<area>` (L-12)
+    Area,
     /// `<b>`
     B,
     /// `<blockquote>`
@@ -793,6 +810,8 @@ pub enum HtmlTag {
     Li,
     /// `<mark>`
     Mark,
+    /// `<map>` (L-12)
+    Map,
     /// `<ol>`
     Ol,
     /// `<p>`
@@ -815,6 +834,8 @@ pub enum HtmlTag {
     Summary,
     /// `<sup>`
     Sup,
+    /// `<svg>` (L-12)
+    Svg,
     /// `<table>`
     Table,
     /// `<tbody>`
@@ -848,6 +869,7 @@ impl HtmlTag {
             Self::Fragment => "",
             Self::A => "a",
             Self::Abbr => "abbr",
+            Self::Area => "area",
             Self::B => "b",
             Self::Blockquote => "blockquote",
             Self::Br => "br",
@@ -862,6 +884,7 @@ impl HtmlTag {
             Self::Kbd => "kbd",
             Self::Li => "li",
             Self::Mark => "mark",
+            Self::Map => "map",
             Self::Ol => "ol",
             Self::P => "p",
             Self::Picture => "picture",
@@ -873,6 +896,7 @@ impl HtmlTag {
             Self::Sub => "sub",
             Self::Summary => "summary",
             Self::Sup => "sup",
+            Self::Svg => "svg",
             Self::Table => "table",
             Self::Tbody => "tbody",
             Self::Td => "td",

@@ -492,6 +492,23 @@ impl JobHub {
         job
     }
 
+    /// Reveals a path in the desktop's file manager on a worker and posts
+    /// [`JobMsg::Opened`]. The file manager selects the file where it can
+    /// (X-05, OI-104); the handler never spawns a process.
+    pub fn reveal(&self, mailbox: Arc<WorkerMailbox>, path: PathBuf) -> JobId {
+        let job = self.allocate();
+        let worker_mailbox = mailbox.clone();
+        let worker_path = path.clone();
+        let spawned = rune::task::spawn("lmdv-reveal", move || {
+            let result = crate::export_io::reveal_path(&worker_path);
+            worker_mailbox.post(JobMsg::Opened { job, path: worker_path, result });
+        });
+        if spawned.is_err() {
+            mailbox.post(JobMsg::Opened { job, path, result: Err("the reveal worker could not start".to_owned()) });
+        }
+        job
+    }
+
     /// Lists one folder for the file browser and posts [`JobMsg::TreeListed`].
     ///
     /// The walk happens on a worker (F-03): a slow FUSE folder must never block

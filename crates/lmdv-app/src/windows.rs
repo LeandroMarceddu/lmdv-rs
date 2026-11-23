@@ -234,6 +234,18 @@ pub struct WindowOpenRequest {
     pub position: Option<(i32, i32)>,
 }
 
+/// The first frame's facts a new window inherits from its source (S-13/T-31).
+///
+/// The position also goes into the [`WindowOpenRequest`]; the shared opener
+/// reads this plan for the maximized flag, which no request field carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct WindowPlan {
+    /// The cascade position in physical pixels, where the platform has one.
+    pub(crate) position: Option<(i32, i32)>,
+    /// A maximized source yields a maximized child (S-13).
+    pub(crate) maximized: bool,
+}
+
 /// A window the opener started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenedWindow {
@@ -517,11 +529,20 @@ pub fn open_runtime_window(shared: &Rc<AppShared>, request: WindowOpenRequest) -
         return Err(lmdv_i18n::t!("msg.headlessWindows").to_owned());
     }
     let id = shared.allocate_window();
+    // S-13/T-31: every runtime window the user causes is the next cascade's
+    // anchor for three seconds, not only Ctrl+Shift+N.
+    shared.note_window_created(id, shared.now());
     let mut state = WindowState::new_keyed(Rc::clone(shared), id, window_key(id));
     state.open_launch(&request.launch);
     state.sync_registry();
     let _ = state.publish_session();
-    let frame = crate::app::WindowFrame { position: request.position, ..crate::app::WindowFrame::default() };
+    // S-13/T-31: a maximized source's child opens maximized too.
+    let plan = shared.take_window_plan();
+    let frame = crate::app::WindowFrame {
+        position: request.position,
+        maximized: plan.maximized,
+        ..crate::app::WindowFrame::default()
+    };
     let spec = crate::app::window_spec(window_key(id), state, frame, request.kind);
     let app = spec.app.handle();
     let native = rune::open_window(spec);
@@ -766,6 +787,108 @@ mod tests {
         assert!(shared.set_window_placement(id, placement));
         assert_eq!(shared.cascade_position(id), Some((164, 264)), "32 points at scale 2, in physical pixels");
         assert_eq!(shared.cascade_position(WindowId(99)), None);
+    }
+
+    fn placed(id: WindowId, x: i32, y: i32, display: ((i32, i32), (u32, u32))) -> (WindowId, WindowPlacement) {
+        let placement = WindowPlacement {
+            position: (x, y),
+            content_size: (1200, 860),
+            scale: 1.0,
+            display: Some(display),
+            ..WindowPlacement::default()
+        };
+        (id, placement)
+    }
+
+    fn register_placed(shared: &AppShared, id: WindowId, placement: WindowPlacement) {
+        shared.register_window(id, window_key(id), Rc::new(UiMailbox::new()), "w", WindowKind::Normal);
+        assert!(shared.set_window_placement(id, placement));
+    }
+
+    #[test]
+    fn a_new_window_cascades_from_the_last_one_created_within_three_seconds() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let display = ((0, 0), (2560, 1440));
+        let first = shared.allocate_window();
+        let second = shared.allocate_window();
+        let (_, first_placement) = placed(first, 100, 100, display);
+        let (_, second_placement) = placed(second, 300, 300, display);
+        register_placed(&shared, first, first_placement);
+        register_placed(&shared, second, second_placement);
+
+        assert_eq!(shared.new_window_plan(first, 5.0).position, Some((132, 132)), "no previous window: from this one");
+
+        // T-31/S-13: for three seconds the last window created anchors the
+        // next cascade, even when the shortcut is pressed in another window.
+        shared.note_window_created(second, 10.0);
+        assert_eq!(shared.new_window_plan(first, 12.9).position, Some((332, 332)));
+        assert_eq!(
+            shared.new_window_plan(first, 13.1).position,
+            Some((132, 132)),
+            "after 3 s the current window anchors"
+        );
+        assert_eq!(
+            shared.new_window_plan(second, 12.9).position,
+            Some((332, 332)),
+            "the anchor is the current window too"
+        );
+    }
+
+    #[test]
+    fn a_cascade_that_leaves_the_display_restarts_at_its_top_left_plus_32() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let id = shared.allocate_window();
+        let (_, placement) = placed(id, 1800, 900, ((0, 0), (1920, 1080)));
+        register_placed(&shared, id, placement);
+
+        // (1832, 932) + the 1200×860 default window leaves the 1920×1080
+        // display on both axes (S-13): restart at its top-left + 32.
+        assert_eq!(shared.new_window_plan(id, 0.0).position, Some((32, 32)));
+
+        // At scale 2 the step is 64 physical pixels and the frame is 2400×1720.
+        let scaled = shared.allocate_window();
+        let mut scaled_placement = placement;
+        scaled_placement.position = (3700, 2000);
+        scaled_placement.scale = 2.0;
+        scaled_placement.display = Some(((0, 0), (3840, 2160)));
+        register_placed(&shared, scaled, scaled_placement);
+        assert_eq!(shared.new_window_plan(scaled, 0.0).position, Some((64, 64)));
+    }
+
+    #[test]
+    fn a_maximized_source_yields_a_maximized_child_and_a_minimized_one_is_centered() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let maximized = shared.allocate_window();
+        let (_, mut placement) = placed(maximized, 0, 0, ((0, 0), (1920, 1080)));
+        placement.maximized = true;
+        register_placed(&shared, maximized, placement);
+        let plan = shared.new_window_plan(maximized, 0.0);
+        assert!(plan.maximized, "S-13: maximized source, maximized child");
+        assert_eq!(plan.position, Some((32, 32)), "and it still cascades before the window manager maximizes it");
+
+        let minimized = shared.allocate_window();
+        let (_, mut placement) = placed(minimized, 1500, 700, ((0, 0), (1920, 1080)));
+        placement.minimized = true;
+        register_placed(&shared, minimized, placement);
+        let plan = shared.new_window_plan(minimized, 0.0);
+        assert!(!plan.maximized);
+        assert_eq!(plan.position, Some((360, 110)), "S-13: the default 1200×860 centred on the display");
+    }
+
+    #[test]
+    fn a_closed_anchor_falls_back_to_the_current_window() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let current = shared.allocate_window();
+        let (_, placement) = placed(current, 50, 60, ((0, 0), (1920, 1080)));
+        register_placed(&shared, current, placement);
+
+        shared.note_window_created(WindowId(999), 1.0);
+        assert_eq!(shared.cascade_anchor(current, 2.0), current, "a gone window cannot anchor");
+        assert_eq!(shared.new_window_plan(current, 2.0).position, Some((82, 92)));
     }
 
     #[test]
