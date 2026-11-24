@@ -52,6 +52,13 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.10.0" date="2026-11-24" type="development">
+      <description>
+        <p>Editor and preview parity, Find in document, selection rich copy,
+          outline cursor, per-tab notices, recents cleanup, a GitHub Pages
+          homepage, and signed release checksums.</p>
+      </description>
+    </release>
     <release version="0.9.0" date="2026-11-23" type="development">
       <description>
         <p>Editor fade and exact preview sync, local PDF dates with file

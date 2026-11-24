@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-24
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (242 done, 54 substitutes, 23 partial, 5 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.9.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), packaging signatures/reproducibility and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (242 done, 54 substitutes, 23 partial, 5 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.10.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -372,7 +372,7 @@
 
 - Desktop entry, AppStream metainfo, MIME XML, AppImage builder (`--dry-run`/AppDir staging), Windows NSIS installer, packaging README.
 - Original icon `assets/lmdv.svg` + 512/256 PNGs (page + ochre bookmark), validated at 16–1024 px and grayscale/light/dark.
-- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0**, **v0.7.0**, **v0.8.0** and **v0.9.0** were published from it (unsigned, no checksums).
+- `.github/workflows/release.yml` builds a Linux AppImage + raw binary and a Windows NSIS installer on `v*` tags; **v0.5.0**, **v0.5.5**, **v0.6.0**, **v0.7.0**, **v0.8.0** and **v0.9.0** were published from it; **v0.10.0** is the first with signed `SHA256SUMS`.
 - Validation: shellcheck, desktop-file-validate, xmllint, JSON; AppStream expected warnings; no signed or reproducible release yet (OI-153).
 
 ## Cross-platform compile — complete (Linux-tested, Windows compile-checked)
@@ -513,7 +513,7 @@
 - Packaging: S-08 `~/Templates` substitute, current installer icon, `SHA256SUMS` + signed `SHA256SUMS.asc` with the Ed25519 key, metainfo-only rDNS `io.github.leandromarceddu.lmdv`, ADR-026.
 - New scenes: `tab-notice`, `version`; help PageDown fix.
 - Audit: **242 done, 54 substitute, 23 partial, 5 missing, 18 n/a; 8 P0 gaps**.
-- Post-0.9.0 work; no new tag yet.
+- v0.10.0; release notes in `docs/releases/v0.10.0.md`.
 
 ## Project site — GitHub Pages — live
 
