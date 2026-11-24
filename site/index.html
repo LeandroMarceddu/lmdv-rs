@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>lmdv — a native Markdown reader and editor</title>
+<meta name="description" content="lmdv is a quiet, native Markdown viewer and editor for Linux and Windows: GitHub-flavored Markdown, math, tables, Mermaid, tabs, and an editor with live preview. Offline by default.">
+<link rel="canonical" href="https://leandromarceddu.github.io/lmdv-rs/">
+<link rel="icon" href="assets/lmdv.svg" type="image/svg+xml">
+<meta property="og:type" content="website">
+<meta property="og:title" content="lmdv — a native Markdown reader and editor">
+<meta property="og:description" content="A quiet, native Markdown viewer and editor for Linux and Windows. Offline by default.">
+<meta property="og:url" content="https://leandromarceddu.github.io/lmdv-rs/">
+<meta property="og:image" content="https://leandromarceddu.github.io/lmdv-rs/assets/start.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-header">
+  <a class="brand" href="./" aria-label="lmdv home">
+    <img src="assets/lmdv.svg" alt="" width="28" height="28">
+    <span>lmdv</span>
+  </a>
+  <nav aria-label="Site">
+    <a href="#features">Features</a>
+    <a href="#download">Download</a>
+    <a href="https://github.com/LeandroMarceddu/lmdv-rs" rel="noopener">GitHub</a>
+  </nav>
+</header>
+
+<main id="main">
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="eyebrow">Native Markdown, not a webview</p>
+      <h1>A quiet place<br>to read and write<br>Markdown.</h1>
+      <p class="lead">lmdv is a native viewer and editor for Linux and Windows. GitHub-flavored Markdown, math, tables and diagrams; tabs and reading positions that stay where you left them.</p>
+      <div class="actions">
+        <a class="button button-primary" href="https://github.com/LeandroMarceddu/lmdv-rs/releases/latest" rel="noopener">Download <span id="latest-version">latest</span></a>
+        <a class="button button-quiet" href="https://github.com/LeandroMarceddu/lmdv-rs" rel="noopener">View source</a>
+      </div>
+      <p class="fineprint">Linux AppImage · Windows installer · MIT · no telemetry</p>
+    </div>
+    <figure class="hero-art">
+      <img src="assets/start.png" alt="The lmdv start page with Open a file, Paste from clipboard, recent files and tips." width="2560" height="1600">
+    </figure>
+  </section>
+
+  <section id="features" class="section">
+    <div class="section-head">
+      <p class="eyebrow">What it is</p>
+      <h2>Everything a Markdown document needs.</h2>
+    </div>
+    <div class="grid">
+      <article class="card">
+        <h3>Native by design</h3>
+        <p>Rune's renderer, text layout and widgets. No embedded browser, no Electron, no HTML shell — just a fast native window.</p>
+      </article>
+      <article class="card">
+        <h3>Markdown as it should read</h3>
+        <p>GFM tables with sticky headers, task lists, callouts, footnotes, syntax-highlighted code, KaTeX math and Mermaid diagrams.</p>
+      </article>
+      <article class="card">
+        <h3>Edit when you want</h3>
+        <p>A source editor with live preview, format bar, block mode for large files, drafts and a real undo history. Save is always explicit.</p>
+      </article>
+      <article class="card">
+        <h3>Tabs, sessions, outline</h3>
+        <p>Open several documents, keep each tab's scroll, find state and outline filter, and return to the same place after a restart.</p>
+      </article>
+      <article class="card">
+        <h3>Offline by default</h3>
+        <p>No telemetry and no runtime network calls. Links open in your browser only when you click them; images resolve from the document's folder.</p>
+      </article>
+      <article class="card">
+        <h3>Six languages</h3>
+        <p>English, Italian, German, French, Spanish and Chinese, with localized keys, dates, menus and help.</p>
+      </article>
+    </div>
+  </section>
+
+  <section id="download" class="section download">
+    <div class="section-head">
+      <p class="eyebrow">Download</p>
+      <h2>Pick your platform.</h2>
+      <p class="muted">Every release also carries a <a id="checksums" href="https://github.com/LeandroMarceddu/lmdv-rs/releases/latest" rel="noopener">SHA256SUMS file and its signature</a>.</p>
+    </div>
+    <div class="download-grid">
+      <article class="download-card">
+        <p class="platform">Linux</p>
+        <h3>AppImage</h3>
+        <p>A single executable that runs on most distributions. The raw binary is beside it.</p>
+        <div class="actions">
+          <a class="button button-primary" data-asset="appimage" href="https://github.com/LeandroMarceddu/lmdv-rs/releases/latest" rel="noopener">Download AppImage</a>
+          <a class="text-link" data-asset="linux" href="https://github.com/LeandroMarceddu/lmdv-rs/releases/latest" rel="noopener">raw binary</a>
+        </div>
+      </article>
+      <article class="download-card">
+        <p class="platform">Windows</p>
+        <h3>Installer</h3>
+        <p>A per-user install with a Start Menu entry and optional Markdown association. A raw .exe is also published.</p>
+        <div class="actions">
+          <a class="button button-primary" data-asset="installer" href="https://github.com/LeandroMarceddu/lmdv-rs/releases/latest" rel="noopener">Download installer</a>
+          <a class="text-link" data-asset="windows" href="https://github.com/LeandroMarceddu/lmdv-rs/releases/latest" rel="noopener">raw binary</a>
+        </div>
+      </article>
+    </div>
+    <p class="fineprint">Windows is installer-built and compile-checked; runtime support is still being verified. Linux is the primary target.</p>
+  </section>
+
+  <section class="section shots" aria-labelledby="shots-title">
+    <div class="section-head">
+      <p class="eyebrow">A look inside</p>
+      <h2 id="shots-title">Reading, editing, and everything between.</h2>
+    </div>
+    <div class="shot-grid">
+      <figure>
+        <img src="assets/reader.png" alt="A Markdown document in lmdv's reading view, with a table, callout and inline math." width="2560" height="1600" loading="lazy">
+        <figcaption>Reading view: tables, callouts, math and code.</figcaption>
+      </figure>
+      <figure>
+        <img src="assets/editor.png" alt="lmdv's editor with the source pane beside the live preview." width="2560" height="1600" loading="lazy">
+        <figcaption>Edit mode: source, live preview and the format bar.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section about">
+    <div>
+      <p class="eyebrow">Under the hood</p>
+      <h2>Built with Rune.</h2>
+      <p>lmdv uses a pinned, patched <a href="https://github.com/anomalyco/rune" rel="noopener">Rune</a> workspace for its native renderer, text layout and widgets. Documents are Markdown files on disk; state is small JSON in the XDG directories. The project is MIT licensed and the full source is on GitHub.</p>
+      <p><a class="text-link" href="https://github.com/LeandroMarceddu/lmdv-rs/blob/main/LICENSE" rel="noopener">Read the MIT license</a> · <a class="text-link" href="https://github.com/LeandroMarceddu/lmdv-rs/releases" rel="noopener">Release notes</a></p>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <span>lmdv — native Markdown for Linux and Windows.</span>
+  <span><a href="https://github.com/LeandroMarceddu/lmdv-rs" rel="noopener">GitHub</a> · <a href="https://github.com/LeandroMarceddu/lmdv-rs/releases" rel="noopener">Releases</a> · MIT</span>
+</footer>
+
+<script>
+// Fill the direct asset links from the latest release; the links above already
+// point at the release page, so a rate limit or offline reader still works.
+(() => {
+  const api = "https://api.github.com/repos/LeandroMarceddu/lmdv-rs/releases/latest";
+  const pick = (assets, test) => assets.find((asset) => test(asset.name));
+  fetch(api, { headers: { Accept: "application/vnd.github+json" } })
+    .then((response) => (response.ok ? response.json() : Promise.reject(new Error("release"))))
+    .then((release) => {
+      const assets = release.assets || [];
+      const links = {
+        appimage: pick(assets, (name) => name.endsWith(".AppImage")),
+        linux: pick(assets, (name) => /-x86_64$/.test(name)),
+        installer: pick(assets, (name) => name.endsWith("-installer.exe")),
+        windows: pick(assets, (name) => name.endsWith("-windows-x86_64.exe")),
+        checksums: pick(assets, (name) => name.endsWith("SHA256SUMS.asc")),
+      };
+      for (const [key, asset] of Object.entries(links)) {
+        if (!asset) continue;
+        const nodes = document.querySelectorAll(`[data-asset="${key}"]`);
+        nodes.forEach((node) => { node.href = asset.browser_download_url; });
+        if (key === "checksums") {
+          const node = document.getElementById("checksums");
+          if (node) node.href = asset.browser_download_url;
+        }
+      }
+      const version = document.getElementById("latest-version");
+      if (version && release.tag_name) version.textContent = release.tag_name;
+    })
+    .catch(() => { /* keep the release-page fallbacks */ });
+})();
+</script>
+</body>
+</html>

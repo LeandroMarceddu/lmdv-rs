@@ -8,8 +8,8 @@
   (crates/lmdv-io/src/dirs.rs); the launchable bridges the AppStream id to
   lmdv.desktop. A full runtime rename would need a data migration.
 
-  Known validator finding (see packaging/README.md):
-    * url-homepage-missing: accepted by decision; no project homepage will be provided.
+  Known validator findings:
+    * none: the component id is reverse-DNS and the project homepage is published.
 -->
 <component type="desktop-application">
   <id>io.github.leandromarceddu.lmdv</id>
@@ -18,6 +18,10 @@
 
   <metadata_license>MIT</metadata_license>
   <project_license>MIT</project_license>
+
+  <url type="homepage">https://leandromarceddu.github.io/lmdv-rs/</url>
+  <url type="bugtracker">https://github.com/LeandroMarceddu/lmdv-rs/issues</url>
+  <url type="vcs-browser">https://github.com/LeandroMarceddu/lmdv-rs</url>
 
   <description>
     <p>lmdv is a native Linux Markdown viewer and editor built with Rust and Rune. It

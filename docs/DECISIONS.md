@@ -304,7 +304,7 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 
 ## ADR-025 — Product name is lmdv; no project homepage
 
-**Status:** Accepted · 2026-11-16
+**Status:** Accepted · 2026-11-16 · homepage clause superseded by ADR-027
 
 **Context:** The locale catalogs and help pages still carried a legacy product name, and packaging metadata was waiting on a public project URL. The user decided that the finished app must not use that name and that no homepage will be made or provided.
 
@@ -323,4 +323,17 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 
 **Decision:** Use `io.github.leandromarceddu.lmdv` as the AppStream component id and `io.github.leandromarceddu` as the developer id, with `<launchable type="desktop-id">lmdv.desktop</launchable>`. Keep the runtime id `lmdv`, the desktop/icon names and the `md.lmdv` data root unchanged. Sign `SHA256SUMS` with a dedicated Ed25519 release key (fingerprint `DD029B151E6A78B4D2357B17FEFE77EDE1F2E862`, expires 2028-11-24), publish the public half and `SHA256SUMS.asc`, and keep the private key/passphrase only in GitHub Actions secrets. X-15 keeps one stricter export rule: the parent must exist for HTML, DOCX and PDF; folders are never created.
 
-**Consequences:** The AppStream warning is gone with no migration; only `url-homepage-missing` remains accepted. A full runtime/data rename is a separate decision. Release checksums now detect tampering as well as transfer corruption; Windows Authenticode and AppImage signatures still need platform tooling. The first signed tag must be observed before calling a release signed.
+**Consequences:** The AppStream warning is gone with no migration. A full runtime/data rename is a separate decision. Release checksums now detect tampering as well as transfer corruption; Windows Authenticode and AppImage signatures still need platform tooling. The first signed tag must be observed before calling a release signed.
+
+
+---
+
+## ADR-027 — Project homepage on GitHub Pages
+
+**Status:** Accepted · 2026-11-24 · supersedes ADR-025's “no homepage” clause
+
+**Context:** AppStream reported `url-homepage-missing`, and the user asked for a project site. The app itself remains native, offline and webview-free; a static download page does not change that.
+
+**Decision:** Publish the static site in `site/` with GitHub Actions Pages at <https://leandromarceddu.github.io/lmdv-rs/>. The page is plain HTML/CSS, uses the app screenshots and icon, and offers release-page fallbacks plus direct latest-asset links from the GitHub API. Add `<url type="homepage">` to the AppStream metadata and set the repository homepage. Do not add analytics, tracking or an app webview.
+
+**Consequences:** `appstreamcli validate` is clean, and a channel that requires a homepage has one. The site is a separate deployment surface: update it with releases and do not treat it as the application. The homepage URL is now a stable public identity.

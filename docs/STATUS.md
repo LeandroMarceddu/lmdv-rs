@@ -1,6 +1,6 @@
 # Status
 
-**Updated:** 2026-11-23
+**Updated:** 2026-11-24
 **Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (242 done, 54 substitutes, 23 partial, 5 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.9.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), packaging signatures/reproducibility and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
@@ -515,6 +515,12 @@
 - Audit: **242 done, 54 substitute, 23 partial, 5 missing, 18 n/a; 8 P0 gaps**.
 - Post-0.9.0 work; no new tag yet.
 
+## Project site — GitHub Pages — live
+
+- `site/` is a static landing page (start/reader/editor screenshots, features, platform downloads, latest-release asset links with release-page fallbacks, checksums link) published by `.github/workflows/pages.yml` at <https://leandromarceddu.github.io/lmdv-rs/>.
+- The repository homepage and AppStream `<url type="homepage">` point at it; `appstreamcli validate` is now clean.
+- ADR-027 supersedes ADR-025's no-homepage clause; OI-157 is fixed. No analytics or app webview.
+
 ## Next up
 
 **Next when work resumes:**
@@ -522,7 +528,7 @@
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
 2. Close or accept the 8 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10; X-02 needs the rune-mermaid serializer. Remaining app-side P1s are D-06/R-28 drag-to-scroll, T-34/W-10 toolbar, T-15 pulse, E-29 multi-cursor (Rune), L-12 menu/OI-195, A-01/A-05/A-06/I-07/I-08.
 3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — the user asked to hold it for now.
-4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime only if it becomes a target (OI-155).
+4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime only if it becomes a target (OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

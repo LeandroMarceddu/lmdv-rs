@@ -3193,7 +3193,7 @@ pub fn block_scene_markdown() -> String {
 pub const EDITOR_MARKDOWN: &str = r#"# Editing notes
 
 The source pane on the left is the canonical buffer; the preview on the
-right is parsed 120 ms after the last keystroke.
+right is parsed 200 ms after the last keystroke.
 
 ## What the editor keeps
 

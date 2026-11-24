@@ -1,5 +1,7 @@
 # lmdv
 
+**Website:** <https://leandromarceddu.github.io/lmdv-rs/>
+
 A native Linux-first Markdown viewer and editor, written in Rust with [Rune](https://github.com/anomalyco/rune). It runs as a native GPU app with no webview.
 
 **Status:** P0–P5 complete; P6 and P7 in progress. Linux first, with Windows compilation verified. See [`docs/STATUS.md`](docs/STATUS.md) for the current phase and open items.

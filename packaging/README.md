@@ -31,6 +31,9 @@ Push a `v*` tag. `.github/workflows/release.yml` builds and publishes:
 
 - Linux: `dist/lmdv-<version>-<arch>.AppImage` and the raw `lmdv-<version>-x86_64` binary.
 - Windows: `dist/lmdv-<version>-installer.exe` (NSIS) and the raw `dist/lmdv-<version>-windows-x86_64.exe`, built with `packaging/windows/lmdv.nsi`.
+- Project site: `site/` is published by `.github/workflows/pages.yml` to
+  <https://leandromarceddu.github.io/lmdv-rs/>; it is static HTML/CSS and the
+  repository's homepage.
 - `dist/SHA256SUMS`: one `sha256sum` row for every other published file, sorted
   by name (the four assets above plus `lmdv-release-key.asc`; never the staged
   AppDir, the checksum files themselves or GitHub's generated source archives).
@@ -77,8 +80,8 @@ installed entry; the runtime/data ids stay `lmdv`/`md.lmdv`.
 
 Consequences, reported rather than hidden:
 
-* `appstreamcli validate` now only warns `url-homepage-missing` (no homepage by
-  decision); the rDNS warning is gone.
+* `appstreamcli validate` is clean: reverse-DNS id and the project homepage at
+  <https://leandromarceddu.github.io/lmdv-rs/> satisfy both old warnings.
 * `desktop-file-validate` emits an informational hint (exit 0) that
   `Categories=Office;Viewer;Utility;` has more than one main category. That is the
   requested category set; the app appears under both Office and Utilities.
@@ -258,9 +261,9 @@ possible later; they are separate changes.
 
 ## What remains for a signed, reproducible release
 
-1. **Release metadata.** No project homepage will be provided, so keep the
-   `url-homepage-missing` warning as accepted. Add `<screenshots>` if a channel needs
-   them.
+1. **Release metadata.** The homepage is published at
+   <https://leandromarceddu.github.io/lmdv-rs/> (static `site/`, GitHub Pages).
+   Add `<screenshots>` if a channel needs them.
 2. **Signing.** `SHA256SUMS.asc` is produced by the release workflow with the
    dedicated key; its public half and fingerprint are published. Windows
    Authenticode and an AppImage signature still need platform tooling/certs.
