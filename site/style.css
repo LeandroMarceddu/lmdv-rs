@@ -205,6 +205,15 @@ h3 { margin: 0 0 6px; font-size: 1.16rem; line-height: 1.25; }
   align-items: start;
 }
 .about p { color: var(--ink-soft); }
+.shoutout {
+  margin-top: 26px;
+  padding: 18px 20px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 10px 10px 0;
+  background: var(--paper-raised);
+}
+.shoutout .eyebrow { margin-bottom: 6px; }
+.shoutout p:last-child { margin: 0; color: var(--ink-soft); font-size: 0.94rem; }
 
 .site-footer {
   width: min(1120px, calc(100% - 40px));
