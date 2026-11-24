@@ -11,6 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
@@ -37,6 +38,12 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
+
+      # The Actions artifact API can lag a few seconds behind the upload on a
+      # push-triggered run. deploy-pages then reports 0 artifacts even though
+      # the upload succeeded. A short settle keeps the deploy deterministic.
+      - name: Wait for the Pages artifact
+        run: sleep 20
 
       - name: Deploy
         id: deployment
