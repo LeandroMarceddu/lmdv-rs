@@ -12,7 +12,7 @@ use lmdv_md::{
     Align, HtmlChild, HtmlNode, HtmlTag, ImageBlock, Inline, InlineLink, InlineObject, InlineObjectKind, InlineSpan,
     InlineStyle, SrcSetCandidate, Table,
 };
-use rune::{El, col, row, text};
+use rune::{El, col, el, row, text};
 
 use crate::block::Renderer;
 use crate::inline::InlineOptions;
@@ -28,11 +28,12 @@ impl Renderer<'_> {
             HtmlTag::Ul | HtmlTag::Ol => self.html_list(node),
             HtmlTag::Blockquote => self.html_quote(node),
             HtmlTag::Pre => self.html_pre(node),
-            HtmlTag::Img => self.image_block(&self.image_block_from(node)),
+            HtmlTag::Img => self.html_image(node, block),
             HtmlTag::Picture => match self.best_picture_candidate(node).filter(|n| n.tag == HtmlTag::Img) {
                 Some(img) => self.image_block(&self.image_block_from(img)),
                 None => self.html_children(node, &key, block),
             },
+            HtmlTag::Svg => self.html_svg(node, &key),
             HtmlTag::Video => self.html_media(node, "video"),
             HtmlTag::Audio => self.html_media(node, "audio"),
             _ => {
@@ -46,6 +47,10 @@ impl Renderer<'_> {
     /// Children in order: runs of inline content become one paragraph, block
     /// children are drawn as blocks.
     fn html_children(&self, node: &HtmlNode, key: &str, block: usize) -> El {
+        // L-12: an image map's `<map>` is metadata, and an `<img usemap>` may
+        // come before it in the same fragment. Collect the block's maps once,
+        // before any picture is drawn.
+        self.ensure_maps(node, block);
         let mut outer = col().key(key).w_full();
         let mut pending = Inline::default();
         let mut blocks: Vec<El> = Vec::new();
@@ -214,6 +219,119 @@ impl Renderer<'_> {
         self.code_block(lang.as_deref(), &node.text(), "code", None)
     }
 
+    /// An `<img>`, with its image map's `<area>` hit boxes when it names one
+    /// (L-12).
+    ///
+    /// Without a map, or without an [`AreaWire`](crate::AreaWire), this is the
+    /// ordinary block picture. With both, the picture keeps its media wire and
+    /// transparent link boxes are pinned over it at the areas' scaled geometry;
+    /// `circle` and `poly` get the box around their points (Rune has no shaped
+    /// hit region), and the exact source geometry rides on
+    /// [`AreaRef`](crate::AreaRef).
+    fn html_image(&self, node: &HtmlNode, block: usize) -> El {
+        let image = self.image_block_from(node);
+        // An image map is a safe-subset feature only when the picture, the map
+        // and a handler all exist. A missing picture draws its placeholder, and
+        // a hit box over it would open a link for a picture nobody sees.
+        let map = node
+            .attr("usemap")
+            .map(str::trim)
+            .and_then(|name| name.strip_prefix('#'))
+            .filter(|name| !name.is_empty())
+            .and_then(|name| self.map_areas(name, block));
+        let (Some((map_name, areas)), Some(wire)) = (map, self.opts.wires.area.as_ref()) else {
+            return self.image_block(&image);
+        };
+        let (src, alt, title) = self.image_source(&image);
+        let Some((drawn, box_)) = self.drawn_image(src, alt, title) else {
+            return self.image_block(&image);
+        };
+        let block_key = self.doc.block_key(block).map(str::to_owned).unwrap_or_else(|| format!("b{block}"));
+        let mut frame = el().key("image-map").w(box_.width).h(box_.height).child(drawn);
+        for (index, area) in areas.iter().enumerate() {
+            let Some(href) = area.attr("href").filter(|href| !href.is_empty()) else { continue };
+            let shape = area_shape(area.attr("shape"));
+            let coords = area_coords(area.attr("coords"));
+            let hit = area_hit_box(shape, &coords, box_.natural, box_.width, box_.height);
+            if hit[2] <= 0.0 || hit[3] <= 0.0 {
+                continue;
+            }
+            let label = area
+                .attr("alt")
+                .filter(|alt| !alt.trim().is_empty())
+                .map(str::to_owned)
+                .unwrap_or_else(|| href.to_owned());
+            let reference = crate::AreaRef {
+                block: block_key.clone(),
+                map: map_name.clone(),
+                dest: href.to_owned(),
+                alt: label.clone(),
+                shape,
+                coords,
+                hit_box: hit,
+            };
+            let hit_box = el()
+                .key(format!("area-{index}"))
+                .absolute(hit[0], hit[1])
+                .size(hit[2], hit[3])
+                .role("link")
+                .label(label)
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer);
+            frame = frame.child(wire(hit_box, &reference));
+        }
+        frame
+    }
+
+    /// An inline `<svg>` fragment (L-12).
+    ///
+    /// The parser keeps only the safe subset: its `<a>`/`xlink:href` links (both
+    /// stored as `href`) and any text, with shapes and scripts dropped. They
+    /// draw as one group, so the link runs keep their own clicks; an SVG with
+    /// no drawable text stays a labelled placeholder rather than an empty box.
+    fn html_svg(&self, node: &HtmlNode, key: &str) -> El {
+        let inline = self.inline_from_node(node);
+        let label = "SVG".to_owned();
+        if inline.text.trim().is_empty() {
+            return col().key(format!("{key}-svg")).role("group").label(label).w_full().h(0.0);
+        }
+        col()
+            .key(format!("{key}-svg"))
+            .role("group")
+            .label(label)
+            .w_full()
+            .child(self.inline(&inline, InlineOptions::new(self.theme.body, self.theme.text)))
+    }
+
+    /// Collects the block's `<map>` nodes once per block (L-12).
+    fn ensure_maps(&self, node: &HtmlNode, block: usize) {
+        let mut maps = self.html_maps.borrow_mut();
+        if maps.0 == block && !maps.1.is_empty() {
+            return;
+        }
+        maps.0 = block;
+        maps.1.clear();
+        collect_maps(node, &mut maps.1);
+    }
+
+    /// The named map's name and `<area>` children, from the block's maps.
+    fn map_areas(&self, name: &str, block: usize) -> Option<(String, Vec<HtmlNode>)> {
+        let maps = self.html_maps.borrow();
+        if maps.0 != block {
+            return None;
+        }
+        let map = maps.1.iter().find(|map| map.attr("name").is_some_and(|candidate| candidate == name))?;
+        let areas = map
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                HtmlChild::Node(child) if child.tag == HtmlTag::Area => Some(child.clone()),
+                _ => None,
+            })
+            .collect();
+        Some((name.to_owned(), areas))
+    }
+
     /// A video/audio placeholder card with an “Open externally” action.
     fn html_media(&self, node: &HtmlNode, kind: &str) -> El {
         let src = node_src(node).unwrap_or_default();
@@ -290,6 +408,7 @@ fn is_block_tag(tag: HtmlTag) -> bool {
             | HtmlTag::Pre
             | HtmlTag::Img
             | HtmlTag::Picture
+            | HtmlTag::Svg
             | HtmlTag::Video
             | HtmlTag::Audio
     )
@@ -355,6 +474,9 @@ fn push_node(inline: &mut Inline, node: &HtmlNode, stack: &mut Vec<InlineStyle>)
                 inline.links.push(InlineLink { range: start..end, dest, title: node.attr("title").map(str::to_owned) });
             }
         }
+        // L-12: an image map and its areas are metadata drawn by `html_image`;
+        // inline they contribute no text.
+        Map | Area => {}
         _ => {
             if let Some(style) = style_of(node.tag) {
                 stack.push(style);
@@ -470,5 +592,79 @@ fn html_align(attr: Option<&str>) -> Align {
         Some("center") => Align::Center,
         Some("right") => Align::Right,
         _ => Align::None,
+    }
+}
+
+/// Every `<map>` in a fragment, in document order (L-12).
+fn collect_maps(node: &HtmlNode, maps: &mut Vec<HtmlNode>) {
+    if node.tag == HtmlTag::Map {
+        maps.push(node.clone());
+    }
+    for child in &node.children {
+        if let HtmlChild::Node(child) = child {
+            collect_maps(child, maps);
+        }
+    }
+}
+
+/// An `<area>`'s shape from its `shape` attribute (L-12).
+fn area_shape(attr: Option<&str>) -> crate::AreaShape {
+    match attr.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("rect") | Some("rectangle") => crate::AreaShape::Rect,
+        Some("circle") | Some("circ") => crate::AreaShape::Circle,
+        Some("poly") | Some("polygon") => crate::AreaShape::Poly,
+        _ => crate::AreaShape::Default,
+    }
+}
+
+/// An `<area>`'s `coords`, parsed as the comma-separated numbers HTML allows.
+fn area_coords(attr: Option<&str>) -> Vec<f32> {
+    attr.unwrap_or_default()
+        .split(',')
+        .filter_map(|value| value.trim().parse::<f32>().ok())
+        .filter(|value| value.is_finite())
+        .collect()
+}
+
+/// The drawn hit box of one `<area>` (L-12).
+///
+/// `coords` are in the image's natural pixels and scale with it. `rect` and
+/// `default` are exact; `circle` and `poly` return the box around their points.
+/// A malformed rect/circle/poly falls back to the whole picture rather than a
+/// zero-size box.
+fn area_hit_box(shape: crate::AreaShape, coords: &[f32], natural: [f32; 2], width: f32, height: f32) -> [f32; 4] {
+    let scale_x = width / natural[0].max(1.0);
+    let scale_y = height / natural[1].max(1.0);
+    let clamp_x = |value: f32| value.clamp(0.0, width);
+    let clamp_y = |value: f32| value.clamp(0.0, height);
+    let boxed = |left: f32, top: f32, right: f32, bottom: f32| {
+        let (left, right) = (clamp_x(left.min(right)), clamp_x(left.max(right)));
+        let (top, bottom) = (clamp_y(top.min(bottom)), clamp_y(top.max(bottom)));
+        [left, top, (right - left).max(0.0), (bottom - top).max(0.0)]
+    };
+    match shape {
+        crate::AreaShape::Rect if coords.len() >= 4 => {
+            boxed(coords[0] * scale_x, coords[1] * scale_y, coords[2] * scale_x, coords[3] * scale_y)
+        }
+        crate::AreaShape::Circle if coords.len() >= 3 => {
+            let (cx, cy, radius) = (coords[0] * scale_x, coords[1] * scale_y, coords[2].abs());
+            let radius_x = radius * scale_x;
+            let radius_y = radius * scale_y;
+            boxed(cx - radius_x, cy - radius_y, cx + radius_x, cy + radius_y)
+        }
+        crate::AreaShape::Poly if coords.len() >= 4 => {
+            let mut left = f32::INFINITY;
+            let mut top = f32::INFINITY;
+            let mut right = f32::NEG_INFINITY;
+            let mut bottom = f32::NEG_INFINITY;
+            for pair in coords.as_chunks::<2>().0 {
+                left = left.min(pair[0] * scale_x);
+                top = top.min(pair[1] * scale_y);
+                right = right.max(pair[0] * scale_x);
+                bottom = bottom.max(pair[1] * scale_y);
+            }
+            boxed(left, top, right, bottom)
+        }
+        _ => [0.0, 0.0, width, height],
     }
 }

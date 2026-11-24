@@ -918,11 +918,10 @@ fn a_picture_source_with_a_query_and_escapes_is_copied_from_its_file() {
 }
 
 #[test]
-fn an_svg_picture_cannot_be_copied_until_a_svg_rasterizer_is_exposed() {
-    // V-09 names SVG rasterization on copy/save. Rune draws the file, but the
-    // copy worker can only re-encode a raster (`lmdv_export::raster_to_png`);
-    // `lmdv-export`'s SVG rasterizer is private and fixed at 2×. Pin the gap
-    // so a future public helper is a deliberate change.
+fn an_svg_picture_is_rasterized_for_copy_and_save() {
+    // OI-196/V-09: an SVG file has no PNG bytes of its own, so the copy worker
+    // rasterizes it through `lmdv_export::raster::svg_to_png` at twice its
+    // intrinsic size on white. The bytes then take the ordinary PNG path.
     let temp = TempDir::new().unwrap();
     let doc = temp.path().join("svg.md");
     std::fs::write(&doc, "# SVG\n\n![Drawing](./drawing.svg)\n").unwrap();
@@ -937,13 +936,22 @@ fn an_svg_picture_cannot_be_copied_until_a_svg_rasterizer_is_exposed() {
     let media = image_ref(&state);
     open_active(&mut state, media);
     assert!(state.lightbox().is_some(), "the SVG itself opens in the preview");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while state.lightbox().is_some_and(|lightbox| lightbox.png_unavailable().is_none()) {
-        assert!(Instant::now() < deadline, "the copy worker never answered");
-        std::thread::sleep(Duration::from_millis(5));
-    }
+    wait_for_png(&state);
+
     let lightbox = state.lightbox().expect("the preview");
-    assert!(lightbox.png_unavailable().is_some(), "no PNG bytes for a vector source yet");
+    assert!(lightbox.png_unavailable().is_none(), "the vector picture became a PNG");
+    let bytes = lightbox.png_bytes().expect("ready raster bytes");
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "a real PNG");
+    assert_eq!(u32::from_be_bytes(bytes[16..20].try_into().unwrap()), 40, "2× intrinsic width");
+    assert_eq!(u32::from_be_bytes(bytes[20..24].try_into().unwrap()), 20, "2× intrinsic height");
+
+    // The ordinary copy path hands the rasterized bytes to the clipboard.
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| state.copy_lightbox_png(2, tx));
+    let copied = board.content().expect("clipboard content");
+    let image = copied.image().expect("an image on the clipboard");
+    assert!(image.png().starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert_eq!(image.png().len(), bytes.len(), "the same raster the worker made");
 }
 
 #[test]

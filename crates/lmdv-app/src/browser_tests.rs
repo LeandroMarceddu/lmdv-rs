@@ -1366,6 +1366,19 @@ fn a_folded_pane_opens_as_a_peek_over_the_text() {
 
     state.left.end_peek();
     assert!(!state.left.is_peeking(), "a click or Escape ends it");
+
+    // A peek is visible, so the pane must draw its real tree, not the empty
+    // placeholder a folded (but not peeking) pane returns.
+    state.left.peek();
+    let elements = render(state);
+    assert!(
+        elements.iter().any(|element| element.key.as_deref() == Some("browser-tree") && element.role == "tree"),
+        "a peeking sidebar draws its tree"
+    );
+    assert!(
+        elements.iter().any(|element| element.role == "treeitem" && element.label.as_deref() == Some("a.md")),
+        "the tree's rows are in the peek"
+    );
 }
 
 #[test]

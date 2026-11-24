@@ -798,7 +798,7 @@ fn closing_restores_the_page_selection() {
     let mut runtime = Runtime::new(state, crate::view::view, (1100.0, 760.0), Env::new(false, 2.0));
     runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
     runtime.frame(0.0);
-    runtime.update(|_, tx| tx.select_text("text", 0..4));
+    runtime.update(|_, tx| tx.select_text("b1-text-0", 0..4));
     runtime.frame(1.0 / 60.0);
     let selected = runtime.elements().into_iter().find_map(|element| element.selected);
     assert_eq!(selected.as_deref(), Some("Body"), "the paragraph's first word is selected");

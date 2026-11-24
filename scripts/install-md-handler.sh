@@ -4,6 +4,12 @@
 # Per-user only: never needs sudo, never writes outside $HOME / the XDG dirs.
 # Safe to re-run: every file it writes carries a marker and is replaced whole.
 #
+# It also drops an empty "Markdown document" template into the XDG Templates
+# folder so file managers can offer New -> Markdown document (S-08, the Linux
+# substitute for Explorer's New menu). The template is recorded in the state
+# directory; uninstall removes it only while it is still the empty file the
+# installer wrote, so an edited template stays the user's document.
+#
 # Examples:
 #   scripts/install-md-handler.sh --release
 #   scripts/install-md-handler.sh --dev --dry-run
@@ -15,6 +21,7 @@ DESKTOP_ID="lmdv.desktop"
 MIME_TYPES=(text/markdown text/x-markdown application/x-markdown)
 MARKER="X-LMDV-Managed=true"
 WRAPPER_MARKER="# lmdv-launcher v1"
+TEMPLATE_STATE_HEADER="# lmdv-managed template v1"
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -25,6 +32,7 @@ ICON_DIR="$DATA_HOME/icons/hicolor/scalable/apps"
 BIN_DIR="${LMDV_BIN_DIR:-$HOME/.local/bin}"
 STATE_DIR="$STATE_HOME/lmdv/install"
 PREV_DEFAULTS="$STATE_DIR/previous-defaults.tsv"
+TEMPLATE_STATE="$STATE_DIR/template.tsv"
 WRAPPER="$BIN_DIR/lmdv"
 DESKTOP_FILE="$APP_DIR/$DESKTOP_ID"
 MIME_FILE="$MIME_DIR/lmdv.xml"
@@ -36,6 +44,8 @@ REPO_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
 MODE="install"
 DRY_RUN=0
 DO_MIME=1
+DO_TEMPLATE=1
+TEMPLATE_DIR_OVERRIDE=""
 USE_WRAPPER=1
 FORCE=0
 PURGE=0
@@ -60,6 +70,10 @@ usage: install-md-handler.sh [options]
   --prefix DIR        where the `lmdv` launcher goes (default: ~/.local/bin)
   --no-wrapper        point the desktop entry straight at the binary
   --no-mime           install the desktop entry but do not claim .md files
+  --no-template       do not install the New -> Markdown document template
+                      (removes one this script installed earlier)
+  --template-dir DIR  put that template here instead of the XDG Templates
+                      folder (uninstall still uses the recorded template)
   --allow-missing     install even if no build exists yet
   --uninstall         remove everything this script installed, restore the
                       previous default handler
@@ -79,6 +93,8 @@ while (($#)); do
         --prefix)        BIN_DIR="${2:?--prefix needs a path}"; shift ;;
         --no-wrapper)    USE_WRAPPER=0 ;;
         --no-mime)       DO_MIME=0 ;;
+        --no-template)   DO_TEMPLATE=0 ;;
+        --template-dir)  TEMPLATE_DIR_OVERRIDE="${2:?--template-dir needs a path}"; shift ;;
         --allow-missing) ALLOW_MISSING=1 ;;
         --uninstall)     MODE="uninstall" ;;
         --purge)         PURGE=1 ;;
@@ -93,6 +109,11 @@ done
 REPO_DIR="$(realpath -m -- "$REPO_DIR")"
 BIN_DIR="$(realpath -m -- "$BIN_DIR")"
 WRAPPER="$BIN_DIR/lmdv"
+if [ -n "$TEMPLATE_DIR_OVERRIDE" ]; then
+    TEMPLATE_DIR_OVERRIDE="$(realpath -m -- "$TEMPLATE_DIR_OVERRIDE")"
+    [ "$TEMPLATE_DIR_OVERRIDE" != "$(realpath -m -- "$HOME")" ] \
+        || die "--template-dir must not be the home folder itself"
+fi
 
 # --- helpers -----------------------------------------------------------------
 
@@ -123,7 +144,7 @@ desktop_quote() {
     # backslashes have two competing escape rules. Refuse the lot: the default
     # Exec path is ~/.local/bin/lmdv, so this only affects --no-wrapper.
     case "$p" in
-        *'"'*|*'\'*|*'$'*|*'`'*|*'%'*|*$'\n'*) return 1 ;;
+        *'"'*|*[\\]*|*'$'*|*'`'*|*'%'*|*$'\n'*) return 1 ;;
     esac
     # Leave a simple path unquoted: xdg-mime's desktop-file reader does not
     # strip the quotes from Exec, so a quoted path makes `xdg-mime query
@@ -167,6 +188,200 @@ pick_binary() {
     [ -x "$rel" ] && { BINARY="$rel"; return 0; }
     [ -x "$dbg" ] && { BINARY="$dbg"; return 0; }
     return 1
+}
+
+# --- XDG templates folder ----------------------------------------------------
+
+# The name shown in "New -> ...". It follows the message locale (like the
+# Windows installer follows the display language), for the six app locales;
+# everything else gets the English name.
+template_name() {
+    local lang="" name="Markdown document"
+    if [ -n "${LANGUAGE:-}" ]; then
+        lang="${LANGUAGE%%:*}"
+    fi
+    if [ -z "$lang" ]; then
+        lang="${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}"
+    fi
+    lang="${lang%%.*}"   # strip .UTF-8
+    lang="${lang%%@*}"   # strip @modifier
+    lang="${lang%%_*}"   # strip _COUNTRY
+    case "$lang" in
+        it) name="Documento Markdown" ;;
+        de) name="Markdown-Dokument" ;;
+        fr) name="Document Markdown" ;;
+        es) name="Documento Markdown" ;;
+        zh) name="Markdown 文档" ;;
+    esac
+    printf '%s.md\n' "$name"
+}
+
+# Resolve the user's Templates folder and print it. The folder is localized
+# (Vorlagen, Modelli, ...), so never assume ~/Templates: prefer --template-dir,
+# then XDG_TEMPLATES_DIR, then xdg-user-dir, then ~/Templates. Returns 1 only
+# when the configured folder is the home folder itself (a broken KDE 6.7
+# setup that would put the template among the user's own files).
+templates_dir() {
+    local dir="" file="$CONFIG_HOME/user-dirs.dirs" home
+    home="$(realpath -m -- "$HOME")"
+
+    if [ -n "$TEMPLATE_DIR_OVERRIDE" ]; then
+        dir="$TEMPLATE_DIR_OVERRIDE"
+        printf '%s\n' "$dir"
+        return 0
+    fi
+
+    if [ -f "$file" ]; then
+        dir="$(sed -n 's/^[[:space:]]*XDG_TEMPLATES_DIR[[:space:]]*=[[:space:]]*//p' "$file" | tail -n 1)"
+        case "$dir" in
+            \"*\") dir="${dir#\"}"; dir="${dir%\"}" ;;
+        esac
+        case "$dir" in
+            "\$HOME")     dir="$HOME" ;;
+            "\${HOME}")   dir="$HOME" ;;
+            "\$HOME"/*)   dir="$HOME/${dir#\$HOME/}" ;;
+            "\${HOME}"/*) dir="$HOME/${dir#\$\{HOME\}/}" ;;
+        esac
+        if [ -n "$dir" ]; then
+            case "$dir" in
+                /*) ;;
+                *)
+                    warn "XDG_TEMPLATES_DIR is not an absolute path ($dir); skipping the new-document template (fix $file or pass --template-dir)"
+                    return 1
+                    ;;
+            esac
+            dir="$(realpath -m -- "$dir")"
+            if [ "$dir" = "$home" ]; then
+                warn "XDG_TEMPLATES_DIR is $HOME itself; skipping the new-document template (fix $file or pass --template-dir)"
+                return 1
+            fi
+            printf '%s\n' "$dir"
+            return 0
+        fi
+    fi
+
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        dir="$(xdg-user-dir TEMPLATES 2>/dev/null || true)"
+        if [ -n "$dir" ]; then
+            dir="$(realpath -m -- "$dir")"
+            # Without a user-dirs.dirs entry xdg-user-dir falls back to $HOME.
+            if [ "$dir" != "$home" ]; then
+                printf '%s\n' "$dir"
+                return 0
+            fi
+        fi
+    fi
+    printf '%s\n' "$home/Templates"
+}
+
+# The template path recorded by a previous install, if the state file is ours.
+# Only an absolute path is ever returned.
+recorded_template() {
+    [ -f "$TEMPLATE_STATE" ] || return 1
+    head -n 1 "$TEMPLATE_STATE" | grep -Fqx -- "$TEMPLATE_STATE_HEADER" || return 1
+    local path
+    path="$(sed -n '2p' "$TEMPLATE_STATE")"
+    case "$path" in
+        /*) printf '%s\n' "$path" ;;
+        *) return 1 ;;
+    esac
+}
+
+record_template() { # path
+    if ((DRY_RUN)); then
+        printf '[dry-run] write %s\n' "$TEMPLATE_STATE"
+        return 0
+    fi
+    mkdir -p -- "$(dirname -- "$TEMPLATE_STATE")" 2>/dev/null || return 1
+    printf '%s\n%s\n' "$TEMPLATE_STATE_HEADER" "$1" >"$TEMPLATE_STATE" 2>/dev/null || return 1
+}
+
+# Remove the recorded template only while it is still the empty file this
+# script wrote; an edited template is the user's document. Returns 0 either way.
+drop_recorded_template() {
+    local tpl
+    tpl="$(recorded_template || true)"
+    [ -n "$tpl" ] || return 0
+    if [ -f "$tpl" ] && [ ! -s "$tpl" ]; then
+        run rm -f -- "$tpl"
+        say "  removed $tpl"
+    elif [ -f "$tpl" ]; then
+        if ((FORCE)); then
+            run rm -f -- "$tpl"
+            say "  removed $tpl (forced)"
+        else
+            warn "not removing $tpl (edited since install; use --force to delete)"
+        fi
+    fi
+    if [ -f "$TEMPLATE_STATE" ]; then
+        run rm -f -- "$TEMPLATE_STATE"
+    fi
+    return 0
+}
+
+install_template() {
+    local dir file prev
+    if ! dir="$(templates_dir)"; then
+        return 0
+    fi
+    file="$dir/$(template_name)"
+    prev="$(recorded_template || true)"
+
+    # A renamed template (the locale changed) is replaced only while it is
+    # still the empty file we wrote.
+    if [ -n "$prev" ] && [ "$prev" != "$file" ] && [ -f "$prev" ]; then
+        if [ ! -s "$prev" ]; then
+            run rm -f -- "$prev"
+            say "  removed old template $prev"
+        elif ((FORCE)); then
+            warn "overwriting edited template: $prev"
+            run rm -f -- "$prev"
+        else
+            warn "leaving edited template $prev (empty it to let the installer replace it)"
+        fi
+    fi
+
+    if [ -e "$file" ] && [ ! -f "$file" ]; then
+        warn "not writing $file (not a regular file); pass --template-dir or --no-template"
+        return 0
+    fi
+
+    if [ -f "$file" ]; then
+        if [ -s "$file" ]; then
+            if ((FORCE)); then
+                warn "overwriting non-empty template: $file"
+            else
+                warn "leaving non-empty template $file (re-run with --force to replace it)"
+                return 0
+            fi
+        elif [ -z "$prev" ] || [ "$prev" != "$file" ]; then
+            # Not ours (state purged or a manual file): never claim it.
+            if ((FORCE)); then
+                warn "overwriting unrecorded template: $file"
+            else
+                warn "leaving existing template $file (not recorded; re-run with --force to replace it)"
+                return 0
+            fi
+        fi
+    fi
+
+    if ((DRY_RUN)); then
+        printf '[dry-run] write %s (empty)\n' "$file"
+        record_template "$file" || warn "would not be able to record the template in $TEMPLATE_STATE"
+        return 0
+    fi
+    if ! mkdir -p -- "$dir" 2>/dev/null; then
+        warn "could not create the templates folder $dir; main handler installed, template skipped"
+        return 0
+    fi
+    if ! : >"$file" 2>/dev/null || ! chmod 0644 -- "$file" 2>/dev/null; then
+        warn "could not write the new-document template $file; main handler installed"
+        return 0
+    fi
+    if ! record_template "$file"; then
+        warn "wrote $file but could not record it in $TEMPLATE_STATE; uninstall will leave it"
+    fi
+    say "  wrote $file (New -> Markdown document)"
 }
 
 # Remove `app` from every ;-list of a mimeapps.list, dropping empty lines.
@@ -394,6 +609,7 @@ if [ "$MODE" = "uninstall" ]; then
     if managed_file "$ICON_FILE" "lmdv-managed"; then
         run rm -f -- "$ICON_FILE"; say "  removed $ICON_FILE"
     fi
+    drop_recorded_template
 
     if ((DO_MIME)); then
         # Drop any stale lmdv entry from the added/default lists now that the
@@ -482,14 +698,33 @@ if [ -f "$REPO_DIR/assets/lmdv.svg" ]; then
         say "  wrote $ICON_FILE (from assets/lmdv.svg)"
     fi
 else
+    # Fallback only: the repo's assets/lmdv.svg is always preferred. Keep this
+    # identical to the current application mark (ink tile, paper page, ochre
+    # bookmark) so an installer copied without assets never ships the old icon.
     write_file "$ICON_FILE" <<'SVG'
 <!-- lmdv-managed -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <rect x="10" y="10" width="108" height="108" rx="22" fill="#1f6feb"/>
-  <path d="M36 28h38l18 18v54a6 6 0 0 1-6 6H36a6 6 0 0 1-6-6V34a6 6 0 0 1 6-6z"
-        fill="#f6f8fa"/>
-  <path d="M74 28l18 18H80a6 6 0 0 1-6-6z" fill="#c9d1d9"/>
-  <path d="M44 88V58h8l8 12 8-12h8v30h-8V70l-8 12-8-12v18z" fill="#1f6feb"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-labelledby="lmdv-title lmdv-desc">
+  <title id="lmdv-title">lmdv</title>
+  <desc id="lmdv-desc">A warm paper page with an ochre bookmark ribbon and two lines
+    of text, on a deep ink rounded square.</desc>
+
+  <g id="tile">
+    <rect id="tile-shape" x="44" y="44" width="424" height="424" rx="104" fill="#191b1f"/>
+  </g>
+
+  <g id="page">
+    <rect id="page-shape" x="129" y="86" width="254" height="340" rx="32" fill="#ece5d7"/>
+  </g>
+
+  <g id="bookmark">
+    <path id="ribbon" d="M226 86h60v159l-30-44-30 44z" fill="#c98f4a"/>
+  </g>
+
+  <g id="text">
+    <rect id="line-1" x="180" y="277" width="153" height="38" rx="19" fill="#191b1f"/>
+    <rect id="line-2" x="180" y="354" width="102" height="38" rx="19" fill="#6f6c66"/>
+  </g>
 </svg>
 SVG
     if ((DRY_RUN)); then say "  would write $ICON_FILE (generated)"; else say "  wrote $ICON_FILE (generated)"; fi
@@ -677,9 +912,19 @@ WRAPPER_EOF
     fi
 fi
 
+# 5. New-document template (S-08; the Linux substitute for Explorer's
+#    New -> Markdown document). Empty, so a new document starts blank; an
+#    edited template is left alone on re-install and uninstall.
+if ((DO_TEMPLATE)); then
+    install_template
+else
+    drop_recorded_template
+    say "  skipped the new-document template (--no-template)"
+fi
+
 refresh_caches
 
-# 5. Default handler, remembering what it was the first time.
+# 6. Default handler, remembering what it was the first time.
 if ((DO_MIME)); then
     if ((DRY_RUN)); then
         say "[dry-run] save previous handlers in $PREV_DEFAULTS"
@@ -704,12 +949,16 @@ if ((DO_MIME)); then
     done
 fi
 
-# 6. Verification checklist.
+# 7. Verification checklist.
 say
 say "Installed. Verify with:"
 printf '  %-24s %s\n' "desktop file:" "$DESKTOP_FILE"
 printf '  %-24s %s\n' "launcher:" "$EXEC_PATH"
 printf '  %-24s %s\n' "icon:" "$ICON_FILE"
+template_file="$(recorded_template || true)"
+if [ -n "$template_file" ]; then
+    printf '  %-24s %s\n' "template:" "$template_file"
+fi
 if command -v desktop-file-validate >/dev/null 2>&1 && [ -f "$DESKTOP_FILE" ]; then
     if desktop-file-validate "$DESKTOP_FILE"; then
         printf '  %-24s %s\n' "desktop-file-validate:" "clean"
@@ -723,6 +972,10 @@ for m in "${MIME_TYPES[@]}"; do
     fi
 done
 cat <<'CHECK'
+
+A right-click New -> Markdown document entry needs a file manager that reads the
+XDG Templates folder (GNOME Files, Nemo, Thunar, Caja; Dolphin with KDE
+Frameworks 6.7+). Older Dolphin/KF5 ignores it; there is no app-side substitute.
 
 Double-click a .md file, or run:
   printf '# hello\n' > "/tmp/lmdv test ünïcode.md"

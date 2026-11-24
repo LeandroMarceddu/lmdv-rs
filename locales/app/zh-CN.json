@@ -145,6 +145,7 @@
   "keys.findReplace": "查找 / 替换",
   "keys.moveLine": "移动当前行",
   "keys.dupLine": "复制当前行",
+  "keys.nextOccurrence": "选择下一个匹配项",
   "keys.slash": "行首的块菜单",
   "keys.reload": "从磁盘重新加载文件",
   "keys.newWindow": "新窗口",

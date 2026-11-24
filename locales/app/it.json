@@ -145,6 +145,7 @@
   "keys.findReplace": "Trova / sostituisci",
   "keys.moveLine": "Sposta la riga",
   "keys.dupLine": "Duplica la riga",
+  "keys.nextOccurrence": "Seleziona l'occorrenza successiva",
   "keys.slash": "Menu dei blocchi a inizio riga",
   "keys.reload": "Ricarica il file dal disco",
   "keys.newWindow": "Nuova finestra",

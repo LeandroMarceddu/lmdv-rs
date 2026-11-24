@@ -490,15 +490,30 @@ pub fn select_line(edit: &mut TextEdit) -> bool {
 
 /// Toggles an HTML comment around the selected lines, or the fenced language's
 /// own comment inside a code fence (E-30).
+///
+/// Two places are a deliberate no-op, with no guessing:
+///
+/// * a fence whose language has no comment syntax here (an unknown or
+///   data-only label): inserting `<!-- -->` into code would not comment it, it
+///   would become code, and a guessed marker could corrupt the block;
+/// * indented code: its lines carry no language, and the only marker Markdown
+///   knows (`<!-- -->`) would sit inside the indented block as literal code.
+///
+/// `false` means "nothing changed"; the caller keeps the caret and text.
 pub fn toggle_comment(edit: &mut TextEdit) -> bool {
     let text = edit.text.clone();
     let map = LineMap::new(&text);
     let (first, last) = map.selected(edit);
     let style = match fence_language_at(&map, first) {
         Some(language) => match comment_style(&language) {
+            // OI-060: an unknown fence language is a documented no-op.
             Some(style) => style,
             None => return false,
         },
+        None if indented_code_at(&map, first) => {
+            // OI-060: indented code has no language to comment with.
+            return false;
+        }
         None => CommentStyle::Block { open: "<!--", close: "-->" },
     };
     let changes = match style {
@@ -508,16 +523,119 @@ pub fn toggle_comment(edit: &mut TextEdit) -> bool {
     apply_with_selection(edit, changes)
 }
 
+/// Whether the selected line is indented code, so a Markdown comment would not
+/// comment it (E-30/OI-060).
+///
+/// A line indented by four or more columns is code when it starts a block: at
+/// the document's start, after a blank line, or directly under another
+/// indented line. A lazy paragraph continuation (`prose` then `    more`) and a
+/// nested list item's paragraph are not code. Inside a list or quote the
+/// enclosing container's content indent is the base, so its own four columns
+/// are required. This is a conservative reading of CommonMark's indented-code
+/// rule: when in doubt the comment command does nothing rather than corrupt the
+/// block.
+fn indented_code_at(map: &LineMap<'_>, line: usize) -> bool {
+    let indent = indent_columns(map.line_text(line));
+    if indent < 4 {
+        return false;
+    }
+    // The nearest non-blank line indented less than this one is the enclosing
+    // container: a list item or quote sets the content indent, prose sets
+    // itself (so a lazy continuation is never code).
+    let mut base = 0usize;
+    for previous in (0..line).rev() {
+        let text = map.line_text(previous);
+        if text.trim().is_empty() {
+            continue;
+        }
+        let previous_indent = indent_columns(text);
+        if previous_indent < indent {
+            base = match container_content_indent(text) {
+                Some(content) => content,
+                None => previous_indent,
+            };
+            break;
+        }
+    }
+    if indent < base.saturating_add(4) {
+        return false;
+    }
+    // Code starts a block: at the document's start, after a blank line, under
+    // another line of the same indented run, or after a line that ends a block
+    // (a heading, a rule, a quote or a fence opener).
+    match line.checked_sub(1) {
+        None => true,
+        Some(previous) => {
+            let above = map.line_text(previous);
+            above.trim().is_empty() || indent_columns(above) >= 4 || block_boundary(above)
+        }
+    }
+}
+
+/// Whether `line` closes the block before it: an ATX heading, a thematic break,
+/// a quote or a fence opener.
+fn block_boundary(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let hashes = trimmed.bytes().take_while(|&byte| byte == b'#').count();
+    let heading = hashes > 0
+        && hashes <= 6
+        && (hashes == trimmed.len() || matches!(trimmed.as_bytes().get(hashes), Some(b' ' | b'\t')));
+    if heading || trimmed.starts_with('>') || fence_open(trimmed).is_some() {
+        return true;
+    }
+    let run = trimmed.bytes().take_while(|byte| matches!(byte, b'-' | b'*' | b'_')).count();
+    run >= 3 && trimmed.bytes().all(|byte| matches!(byte, b'-' | b'*' | b'_') || byte == b' ' || byte == b'\t')
+}
+
+/// The content indent a list item line establishes for its children.
+///
+/// A quote is not a container here: its continuation lines carry `>` again, so
+/// an indented line after one is a new block (indented code).
+fn container_content_indent(line: &str) -> Option<usize> {
+    let indent = indent_columns(line);
+    let byte_indent = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let trimmed = line.trim_start();
+    let end = byte_indent + trimmed.len();
+    list_prefix(line, byte_indent, end).map(|(content, _)| indent + (content - byte_indent))
+}
+
+/// Visual columns of leading whitespace, with a tab taking four.
+fn indent_columns(line: &str) -> usize {
+    let mut columns = 0usize;
+    for ch in line.chars() {
+        match ch {
+            ' ' => columns += 1,
+            '\t' => columns += 4,
+            _ => break,
+        }
+    }
+    columns
+}
+
 /// Moves the caret to a line from CodeMirror's go-to-line grammar (E-31):
 /// `40`, `+5`, `-2`, `50%`, `12:4`. Returns the zero-based line reached.
 pub fn goto_line(edit: &mut TextEdit, spec: &str) -> Option<usize> {
     let text = edit.text.clone();
     let map = LineMap::new(&text);
+    let current = map.index_of(edit.focus);
+    let (line, caret) = goto_target_offset(&text, spec, current)?;
+    edit.set_caret(caret);
+    edit.break_history_group();
+    Some(line)
+}
+
+/// [`goto_line`]'s grammar on plain text, for the block editor (E-31).
+///
+/// `current` is the zero-based line of the caret in `text`. Returns the reached
+/// zero-based line and the byte offset of its `line:col` caret (the line start
+/// without a column). The same `+N`, `-N`, `N%` and `line:col` forms as the
+/// single field; a caret-only move, with no history.
+pub fn goto_target_offset(text: &str, spec: &str, current: usize) -> Option<(usize, usize)> {
+    let map = LineMap::new(text);
     let spec = spec.trim();
     if spec.is_empty() {
         return None;
     }
-    let current = map.index_of(edit.focus);
     let (line, column) = parse_goto(spec, map.count(), current)?;
     let line = line.min(map.count().saturating_sub(1));
     let start = map.start(line);
@@ -531,9 +649,72 @@ pub fn goto_line(edit: &mut TextEdit, spec: &str) -> Option<usize> {
             caret = start + offset + ch.len_utf8();
         }
     }
-    edit.set_caret(caret);
+    Some((line, caret))
+}
+
+/// `Ctrl+D` (E-29): select the word at the caret, or the next occurrence of the
+/// selected text, wrapping at the end of the document.
+///
+/// The pinned Rune field has one selection, so this is the next occurrence as a
+/// single selection: the first press selects the word under the caret, each
+/// press after it moves the selection to the following occurrence. Adding a
+/// second cursor (`Ctrl+Alt+↑/↓`) needs Rune's multi-cursor model and is
+/// recorded as a gap rather than faked here.
+pub fn select_next_occurrence(edit: &mut TextEdit) -> bool {
+    let text = edit.text.clone();
+    let (from, to) = edit.range();
+    let (from, to) = (from.min(to), from.max(to));
+    let (needle, origin) = if from == to {
+        // The first press selects the word under the caret.
+        match word_at(&text, from) {
+            Some((start, end)) => {
+                edit.set_selection(start, end);
+                edit.break_history_group();
+                return true;
+            }
+            None => return false,
+        }
+    } else {
+        let selected = text.get(from..to).unwrap_or("");
+        if selected.trim().is_empty() || selected.contains('\n') {
+            return false;
+        }
+        (selected.to_owned(), from)
+    };
+    let after = origin.saturating_add(needle.len());
+    let Some(found) =
+        next_occurrence(&text, &needle, after, text.len()).or_else(|| next_occurrence(&text, &needle, 0, origin))
+    else {
+        return false;
+    };
+    if found.start == from && found.end == to {
+        return false;
+    }
+    edit.set_selection(found.start, found.end);
     edit.break_history_group();
-    Some(line)
+    true
+}
+
+/// The first whole-word occurrence of `needle` at or after `from`, before `to`.
+fn next_occurrence(text: &str, needle: &str, from: usize, to: usize) -> Option<Range<usize>> {
+    if needle.is_empty() {
+        return None;
+    }
+    let to = to.min(text.len());
+    let mut at = from.min(to);
+    while at <= to {
+        let offset = at + text.get(at..to)?.find(needle)?;
+        let end = offset + needle.len();
+        let first_word = needle.chars().next().is_some_and(is_word);
+        let last_word = needle.chars().next_back().is_some_and(is_word);
+        let starts_whole = !text[..offset].chars().next_back().is_some_and(is_word);
+        let ends_whole = !text[end..].chars().next().is_some_and(is_word);
+        if (!first_word || starts_whole) && (!last_word || ends_whole) {
+            return Some(offset..end);
+        }
+        at = end.max(offset + 1);
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1299,6 +1480,91 @@ mod tests {
         assert_eq!(goto_line(&mut text, "nope"), None);
         assert_eq!(goto_line(&mut text, "101%"), None);
         assert_eq!(goto_line(&mut text, "999"), Some(2));
+    }
+
+    #[test]
+    fn unknown_fences_and_indented_code_are_documented_no_ops() {
+        // OI-060: an unknown fence language has no comment syntax here; the
+        // command leaves the code untouched rather than inserting `<!-- -->`
+        // into it as literal code.
+        let mut unknown = TextEdit::new("```wat\nx\n```\n");
+        unknown.set_caret(8);
+        assert!(!toggle_comment(&mut unknown));
+        assert_eq!(unknown.text, "```wat\nx\n```\n");
+
+        // Indented code has no language either: a Markdown comment would sit
+        // inside the indented block as code.
+        let mut code = TextEdit::new("prose\n\n    let x = 1;\n    let y = 2;\n");
+        code.set_caret(13);
+        assert!(!toggle_comment(&mut code));
+        assert_eq!(code.text, "prose\n\n    let x = 1;\n    let y = 2;\n");
+
+        // A lazy paragraph continuation is not code, so its line still comments.
+        let mut lazy = TextEdit::new("prose\n    more prose\n");
+        lazy.set_caret(8);
+        assert!(toggle_comment(&mut lazy));
+        assert_eq!(lazy.text, "prose\n    <!--more prose-->\n");
+
+        // A nested list item's paragraph is not indented code either.
+        let mut nested = TextEdit::new("- item\n\n    paragraph in the item\n");
+        nested.set_caret(10);
+        assert!(toggle_comment(&mut nested));
+        assert_eq!(nested.text, "- item\n\n    <!--paragraph in the item-->\n");
+
+        // Four columns deeper under a list item *is* code.
+        let mut in_list = TextEdit::new("- item\n\n        code in the item\n");
+        in_list.set_caret(10);
+        assert!(!toggle_comment(&mut in_list));
+        assert_eq!(in_list.text, "- item\n\n        code in the item\n");
+
+        // A heading, a rule or a quote ends a block, so an indented line after
+        // one is code even without a blank line.
+        for text in ["# Heading\n    code\n", "---\n    code\n", "> quote\n    code\n"] {
+            let mut edit = TextEdit::new(text);
+            edit.set_caret(text.find("code").unwrap());
+            assert!(!toggle_comment(&mut edit), "{text:?}");
+            assert_eq!(edit.text, text);
+        }
+    }
+
+    #[test]
+    fn goto_target_offset_speaks_the_same_grammar_as_the_single_field() {
+        let text = "one\ntwo\nthree";
+        assert_eq!(goto_target_offset(text, "2", 0), Some((1, 4)));
+        assert_eq!(goto_target_offset(text, "+1", 0), Some((1, 4)));
+        assert_eq!(goto_target_offset(text, "-1", 2), Some((1, 4)));
+        assert_eq!(goto_target_offset(text, "50%", 0), Some((1, 4)));
+        assert_eq!(goto_target_offset(text, "3:2", 0), Some((2, 9)));
+        assert_eq!(goto_target_offset(text, "1:99", 0), Some((0, 3)), "a column past the line clamps to its end");
+        assert_eq!(goto_target_offset(text, "12:1", 0), Some((2, 8)), "a line past the end clamps");
+        assert_eq!(goto_target_offset(text, "nope", 0), None);
+        assert_eq!(goto_target_offset(text, "", 0), None);
+    }
+
+    #[test]
+    fn ctrl_d_selects_the_word_then_its_next_occurrence() {
+        let mut text = edit("one budget two budget three", 6);
+        assert!(select_next_occurrence(&mut text));
+        assert_eq!(text.range(), (4, 10), "the caret's word is selected first");
+        assert!(select_next_occurrence(&mut text));
+        assert_eq!(text.range(), (15, 21), "the next whole occurrence");
+        assert!(select_next_occurrence(&mut text));
+        assert_eq!(text.range(), (4, 10), "it wraps at the end");
+        let mut blank = edit("   ", 2);
+        assert!(!select_next_occurrence(&mut blank), "no word under the caret");
+
+        // A selection goes to the next occurrence of exactly that text.
+        let mut selected = TextEdit::new("a one b one c");
+        selected.set_selection(2, 5);
+        assert!(select_next_occurrence(&mut selected));
+        assert_eq!(selected.range(), (8, 11));
+
+        // Inside a longer word the whole-word pass skips it.
+        let mut longer = edit("budget budgets budget", 2);
+        assert!(select_next_occurrence(&mut longer));
+        assert_eq!(longer.range(), (0, 6));
+        assert!(select_next_occurrence(&mut longer));
+        assert_eq!(longer.range(), (15, 21), "`budgets` is not the next whole word");
     }
 
     #[test]

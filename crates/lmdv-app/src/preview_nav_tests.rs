@@ -101,6 +101,54 @@ fn focused_key(runtime: &Runtime<WindowState>) -> Option<String> {
 }
 
 #[test]
+fn a_press_on_a_blocks_padding_lands_on_its_preview_line() {
+    use crate::editor::scroll_sync::{PreviewBlock, PreviewGeometry, line_from_preview_y};
+    use lmdv_render::BlockRef;
+
+    assert_eq!(line_from_preview_y(100.0, 100.0, 0, 4, 150.0), 2, "the middle of four lines");
+    assert_eq!(line_from_preview_y(100.0, 100.0, 0, 4, 90.0), 0, "above the block clamps");
+    assert_eq!(line_from_preview_y(100.0, 0.0, 0, 4, 150.0), 0, "no measurement: the first line");
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Padding", "one\ntwo\nthree\nfour\n");
+    enter_editor(&mut state);
+    let block = BlockRef {
+        key: "b0".to_owned(),
+        line: 0,
+        end_line: 4,
+        code: false,
+        text: "one\ntwo\nthree\nfour\n".to_owned(),
+        texts: Vec::new(),
+    };
+    *state.editor.preview.borrow_mut() = PreviewGeometry {
+        blocks: vec![PreviewBlock {
+            index: 0,
+            key: "b0".to_owned(),
+            top: 100.0,
+            height: 100.0,
+            next_top: 200.0,
+            heading: None,
+            text_boxes: vec![[0.0, 100.0, 60.0, 20.0]],
+        }],
+        viewport_top: 100.0,
+        viewport: 400.0,
+        ..PreviewGeometry::default()
+    };
+    state.editor.preview_point.set(Some([30.0, 150.0]));
+    state.editor.preview_block.set(Some(0));
+    let mut tx = Tx::default();
+    assert!(state.place_caret_on_preview_padding(&block, &mut tx));
+    assert_eq!(single_selection(&state), (8, 8), "the middle source line, by the block's height");
+
+    // A press on a link or picture is inside a text box and keeps its click.
+    state.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()).expect("editor").set_selection(0..0);
+    state.editor.preview_point.set(Some([30.0, 110.0]));
+    assert!(!state.place_caret_on_preview_padding(&block, &mut tx), "text with no selection keeps its click");
+    assert_eq!(single_selection(&state), (0, 0));
+}
+
+#[test]
 fn a_double_click_maps_a_paragraph_word_to_its_own_block_line() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
@@ -262,6 +310,43 @@ fn the_block_menu_enters_edit_at_the_clicked_line() {
     assert_eq!(runtime.state.active_tab().map(|tab| tab.view.mode), Some(Mode::Editor));
     assert_eq!(single_selection(&runtime.state), (12, 12), "the block's 0-based line start");
     assert_eq!(focused_key(&runtime), Some("editor-source".to_owned()));
+}
+
+#[test]
+fn the_viewer_block_menu_finds_in_document_and_the_editor_menu_does_not() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Find", "The quiet page\n\nSecond paragraph\n");
+    let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(false, 2.0));
+    runtime.frame(0.0);
+
+    let paragraph = element_with_text(&runtime, "The quiet page");
+    let (x, y) = first_word_point(&paragraph);
+    secondary_click(&mut runtime, x, y);
+    let elements = runtime.elements();
+    assert!(
+        elements.iter().any(|element| element.text.as_deref() == Some(lmdv_i18n::t!("ctx.findInDoc"))),
+        "R-17: the reading menu offers Find in document"
+    );
+    let (x, y) = runtime.find("block-menu-item1").expect("the Find in document row");
+    click(&mut runtime, x, y);
+    let tab = runtime.state.active_tab().expect("the tab");
+    assert!(tab.view.reader_find.open, "the reading find bar opened");
+    assert!(runtime.state.block_menu().is_none(), "the menu closed behind the bar");
+
+    // The editor's preview keeps its menu to source actions.
+    enter_editor(&mut runtime.state);
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+    let paragraph = element_with_text(&runtime, "The quiet page");
+    let (x, y) = first_word_point(&paragraph);
+    secondary_click(&mut runtime, x, y);
+    assert!(runtime.state.block_menu().is_some());
+    let texts: Vec<String> = runtime.elements().iter().filter_map(|element| element.text.clone()).collect();
+    assert!(
+        !texts.iter().any(|text| text == lmdv_i18n::t!("ctx.findInDoc")),
+        "no reading-find row while editing: {texts:?}"
+    );
 }
 
 #[test]

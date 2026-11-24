@@ -17,7 +17,7 @@ use rune_kit::{
 };
 
 use crate::commands::lookup_command;
-use crate::edit_ui::{FindField, FormatMenu, FormatMenuRow, GotoLine, SlashMenu};
+use crate::edit_ui::{FindField, FormatMenu, FormatMenuRow, GotoLine, SOURCE_FIELD_KEY, SOURCE_SCROLL_KEY, SlashMenu};
 use crate::editor::{NARROW_SPLIT_WIDTH, SPLIT_DEFAULT};
 use crate::images::WindowImages;
 use crate::math::WindowMath;
@@ -183,6 +183,14 @@ fn block_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
                 state.edit_from_here(&block, tx);
             },
         ));
+        // R-17: the reading view can start a find from the block under the
+        // pointer; in edit mode Ctrl+F belongs to the source pane.
+        if state.active_tab().is_some_and(|tab| tab.view.mode == Mode::Viewer) {
+            menu =
+                menu.item(MenuItem::new(lmdv_i18n::t!("ctx.findInDoc")).on_select_tx(
+                    move |state: &mut WindowState, tx: &mut Tx| state.find_in_document_from_block_menu(tx),
+                ));
+        }
     }
     let menu = menu
         .item(MenuItem::new(lmdv_i18n::t!("msg.cancel")).on_select(|state: &mut WindowState| state.close_block_menu()))
@@ -1223,6 +1231,15 @@ fn source_editor(
             .on_edit(|state: &mut WindowState| state.active_editor_edit())
             .on_input_change(|state: &mut WindowState, _| state.editor_changed())
             .on_input_key(|state: &mut WindowState, event, tx| state.editor_key(event, tx))
+            // E-36: a picture on the clipboard saves into `assets/`; text
+            // falls through to the field's own paste.
+            .on_input_paste(|state: &mut WindowState, content, tx| state.editor_paste_content(content, tx))
+            // E-36: an image dropped on the source copies into `assets/`. The
+            // window root keeps Markdown drops; this field only takes images.
+            .accepts_extensions(&lmdv_io::assets::IMAGE_EXTENSIONS)
+            .on_drop_files(|state: &mut WindowState, files, tx| {
+                state.editor_drop_images(files, tx);
+            })
             .on_submit(|state: &mut WindowState, _| state.editor_insert_newline())
     };
 
@@ -1312,7 +1329,26 @@ fn source_editor(
         pane = pane.child(goto_line_bar(goto, kit));
     }
     if let Some(menu) = state.slash_menu() {
-        pane = pane.child(slash_menu_view(kit, menu));
+        // E-28: place the panel at the caret's line when the focused field has
+        // reported one. The read also re-runs this view when the caret moves,
+        // so the panel follows typing. The first frame (no measured caret yet)
+        // keeps the panel under the bar, as before.
+        let field_key = if block_mode {
+            editor.active_block().map(crate::block_ui::block_field_key)
+        } else {
+            Some(SOURCE_FIELD_KEY.to_owned())
+        };
+        let caret_rect = field_key.as_deref().and_then(|key| cx.caret(key));
+        state.editor.slash_anchor.set(caret_rect);
+        match caret_rect {
+            Some(caret) => {
+                const SLASH_ANCHOR: &str = "slash-menu-anchor";
+                layer.push(el().key(SLASH_ANCHOR).absolute(caret[0], caret[1] + caret[3]).size(0.0, 0.0));
+                let panel = slash_menu_view(kit, menu).w(280.0);
+                layer.push(rune_kit::popover::anchored(kit, panel, SLASH_ANCHOR, Placement::BottomStart, 2.0));
+            }
+            None => pane = pane.child(slash_menu_view(kit, menu)),
+        }
     }
     let body = if block_mode {
         // One virtualized field per blank-line block (ADR-016): the mounted
@@ -1341,6 +1377,10 @@ fn source_editor(
         col().key("editor-body").w_full().px(20.0).py(crate::editor::scroll_sync::EDITOR_PAD_TOP).child(field)
     };
     let scroll = state.editor.scroll.clone();
+    // E-34: blank space after the last line, so the source can scroll past its
+    // end and the preview can follow to the document's end.
+    let viewport_height = cx.layout_size(SOURCE_SCROLL_KEY).map_or(0.0, |size| size[1]);
+    let tail = crate::editor::scroll_sync::tail_space(viewport_height);
     // Only this window draws the source offset; waking it is enough.
     let waker = state.window_waker();
     pane.child(el().w_full().h(1.0).fill(c.border_muted)).child(
@@ -1357,7 +1397,8 @@ fn source_editor(
                 scroll.set(reader::ScrollSnapshot::from_pos(at));
                 waker();
             })
-            .child(body),
+            .child(body)
+            .child(el().key("editor-tail").w_full().h(tail).a11y_hidden()),
     )
 }
 
@@ -1392,6 +1433,12 @@ fn block_field_row(
         .on_input_change(move |state: &mut WindowState, tx| state.block_changed(index, tx))
         .on_input_key(move |state: &mut WindowState, event, tx| {
             state.block_key(index, event, tx) || state.editor_key(event, tx)
+        })
+        // E-36: the same picture paste and image drop as the single field.
+        .on_input_paste(|state: &mut WindowState, content, tx| state.editor_paste_content(content, tx))
+        .accepts_extensions(&lmdv_io::assets::IMAGE_EXTENSIONS)
+        .on_drop_files(|state: &mut WindowState, files, tx| {
+            state.editor_drop_images(files, tx);
         })
         // A plain Return is consumed by `block_key`; this is the safety net
         // if a platform path reaches submit instead, so it never presses the
@@ -2128,6 +2175,9 @@ fn reader_article(
     kit: &Kit,
 ) -> El {
     let look = state.current_appearance(cx.system_dark());
+    // E-06: a diagram is reused by its source while the theme is unchanged; a
+    // theme switch drops every cached card before this frame builds.
+    state.editor.mermaid.set_theme(look.theme.fingerprint());
     let width = cx.layout_size(reader::ARTICLE_SCROLL_KEY).map_or(reader::READER_MAX_WIDTH, |size| size[0]);
     let column_width = crate::settings::column_max_width(state.shared().prefs().reader.width);
     let scale = cx.env().scale;
@@ -2188,6 +2238,7 @@ fn reader_article(
         .scroll_signal(state.scroll_signal_cell())
         .math(&math)
         .images(&images)
+        .mermaid(state.mermaid_cache())
         .wires(RenderWires {
             link: Some(state.link_wire()),
             // M-07: task boxes are live only in the reading view. The editor's
@@ -2204,6 +2255,9 @@ fn reader_article(
             // V-01: every drawn image and diagram opens the full-window preview.
             // The editor's preview keeps its own click (E-35), as task boxes do.
             media: (tab.view.mode == Mode::Viewer).then(|| state.media_wire(kit)),
+            // L-12: a viewer's `<area>` hit boxes open their destination; the
+            // editor's preview keeps its own clicks, as task boxes do.
+            area: (tab.view.mode == Mode::Viewer).then(|| state.area_wire()),
         })
         .details(Some(&tab.view as &dyn DetailsState))
         .scale(scale)
@@ -3226,6 +3280,44 @@ mod tests {
 
     fn has_key(elements: &[ElementInfo], key: &str) -> bool {
         elements.iter().any(|element| element.key.as_deref() == Some(key))
+    }
+
+    #[test]
+    fn an_image_dropped_on_the_source_copies_into_assets_and_inserts_the_link() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("drop-target.md");
+        std::fs::write(&path, "Body\n").unwrap();
+        let shared = test_support::shared(&temp);
+        ready_file(&shared, &path, "Body\n");
+        let mut state = WindowState::new(shared.clone());
+        state.open_path(path.clone());
+        wait_for_reader(&mut state);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        runtime.frame(0.0);
+        runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+            assert!(state.enter_editor(None, tx));
+        });
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let (x, y) = runtime.find("editor-source").expect("the source field is drawn");
+
+        let source = temp.path().join("shot.png");
+        std::fs::write(&source, b"\x89PNG\r\n\x1a\n").unwrap();
+        runtime.drag_files(vec![source.clone()], Some((x, y)));
+        runtime.frame(0.016);
+        runtime.drop_files(vec![source], Some((x, y)));
+        runtime.frame(0.033);
+        runtime.frame(0.050);
+
+        let text = runtime
+            .state
+            .active_tab()
+            .and_then(Tab::document)
+            .map(|doc| doc.text().text().to_owned())
+            .expect("the document");
+        assert!(text.contains("![](assets/shot.png)"), "E-36's link is inserted: {text:?}");
+        assert!(temp.path().join("assets/shot.png").is_file(), "the picture is copied beside the document");
     }
 
     #[test]

@@ -145,6 +145,7 @@
   "keys.findReplace": "Find / replace",
   "keys.moveLine": "Move the line",
   "keys.dupLine": "Duplicate the line",
+  "keys.nextOccurrence": "Select the next occurrence",
   "keys.slash": "Block menu at a line start",
   "keys.reload": "Reload the file from disk",
   "keys.newWindow": "New window",

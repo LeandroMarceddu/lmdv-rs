@@ -412,6 +412,21 @@ No root, no `xdg-mime`/`gio` dependency, no write outside `$XDG_DATA_HOME` and
 `$XDG_CONFIG_HOME`. Non-UTF-8 program paths and paths containing `"`, `\`, `$`,
 a backtick, `%` or a newline are refused before anything is written.
 
+### 3.9 New → Markdown document (S-08)
+
+`scripts/install-md-handler.sh` writes one empty, install-time-localized template
+into the XDG Templates folder (`XDG_TEMPLATES_DIR` from `user-dirs.dirs`;
+`xdg-user-dir TEMPLATES`; usually `~/Templates`). The absolute path is recorded in
+`$XDG_STATE_HOME/lmdv/install/template.tsv`; re-running replaces only an empty
+template, and uninstall removes only an empty template, leaving an edited one.
+`--no-template` and `--template-dir` opt out/redirect.
+
+File managers that read the folder show the entry: GNOME Files, Nemo, Caja and
+Thunar; Dolphin from KDE Frameworks 6.7. Older Dolphin reads only `.desktop`
+templates in `~/.local/share/templates`, which the installer does not write. The
+installer refuses a misconfigured `XDG_TEMPLATES_DIR="$HOME/"` instead of writing
+among the user's files.
+
 ---
 
 ## 4. Dev/intermediate builds: the launcher

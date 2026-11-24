@@ -1399,6 +1399,44 @@ mod tests {
     }
 
     #[test]
+    fn an_image_map_area_opens_its_destination() {
+        let temp = TempDir::new().unwrap();
+        std::fs::write(temp.path().join("shot.png"), PNG).unwrap();
+        let next = write(&temp, "next.md");
+        let map = temp.path().join("map.md");
+        std::fs::write(
+            &map,
+            "<div><img src=\"shot.png\" alt=\"Map\" usemap=\"#m\">\
+             <map name=\"m\"><area href=\"next.md\" alt=\"Next\" shape=\"rect\" coords=\"0,0,1,1\"></map></div>\n",
+        )
+        .unwrap();
+        let mut state = window(&temp);
+        open_file(&mut state, map);
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+        runtime.poll = Some(|state: &mut WindowState, now, tx: &mut Tx| state.poll(now, tx));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let (x, y) = runtime.find("area-0").expect("L-12: the area's hit box is drawn");
+        let hit = runtime.element_at(x, y).expect("the area is under the pointer");
+        assert_eq!(hit.key(), Some("area-0"), "the transparent area box takes the press: {hit:?}");
+        runtime.pointer_move(x, y);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(1.0 / 60.0);
+        runtime.frame(1.0 / 60.0);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !shows(&runtime.state, &next) {
+            assert!(Instant::now() < deadline, "the area's link never opened a tab");
+            runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+                state.poll(0.0, tx);
+            });
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(shows(&runtime.state, &next), "the area link opened its document");
+    }
+
+    #[test]
     fn markdown_extensions_are_recognized_case_insensitively() {
         assert!(is_markdown(Path::new("a.md")));
         assert!(is_markdown(Path::new("a.MARKDOWN")));

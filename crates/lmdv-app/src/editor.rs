@@ -27,7 +27,7 @@ use crate::commands::MARKDOWN_EXTENSIONS;
 use crate::jobs::{JobMsg, SpellMailbox, SpellMsg, WorkerMailbox};
 use crate::reader::ScrollSnapshot;
 use crate::shared::{SpellDiscovery, UiMsg};
-use crate::window::{Mode, Tab, WindowState, title_for_path};
+use crate::window::{Mode, NOTICE_SECONDS, NoticeAction, NoticeKind, Tab, WindowState, title_for_path};
 use crate::windows::{CloseDoc, close_title};
 
 pub(crate) mod scroll_sync;
@@ -241,6 +241,99 @@ pub enum ReloadIntent {
 
 /// Editor-side window state. `scratch` keeps the `on_edit` accessor total when
 /// no tab is in edit mode.
+/// How many rendered diagrams one window keeps (E-06).
+pub const MERMAID_CACHE_ENTRIES: usize = 24;
+
+/// Rendered Mermaid cards, keyed by source and cleared when the theme changes
+/// (E-06).
+///
+/// The cards live in Rune elements, so they are described here as cheap clones
+/// of the same tree the renderer built. `VecDeque` gives a bounded LRU: a hit
+/// moves the card to the back, a miss pushes it there and the front falls off
+/// past [`MERMAID_CACHE_ENTRIES`].
+#[derive(Default)]
+pub struct MermaidCache {
+    inner: RefCell<MermaidEntries>,
+    hits: Cell<usize>,
+    writes: Cell<usize>,
+}
+
+#[derive(Default)]
+struct MermaidEntries {
+    theme: Option<u64>,
+    entries: VecDeque<(String, rune::El)>,
+}
+
+impl MermaidCache {
+    /// Starts a frame for `theme`; a new theme drops every card, so a colour
+    /// change never serves a stale diagram.
+    pub fn set_theme(&self, theme: u64) {
+        let mut inner = self.inner.borrow_mut();
+        if inner.theme != Some(theme) {
+            inner.theme = Some(theme);
+            inner.entries.clear();
+        }
+    }
+
+    /// How many cards are held (tests).
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.inner.borrow().entries.len()
+    }
+
+    /// Whether no cards are held (tests).
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The last card stored for `source`; a hit moves it to the back.
+    pub fn get(&self, source: &str) -> Option<rune::El> {
+        let mut inner = self.inner.borrow_mut();
+        let at = inner.entries.iter().position(|(key, _)| key == source)?;
+        let entry = inner.entries.remove(at)?;
+        let card = entry.1.clone();
+        inner.entries.push_back(entry);
+        self.hits.set(self.hits.get().saturating_add(1));
+        Some(card)
+    }
+
+    /// Stores `diagram` for `source`, replacing and reordering a duplicate.
+    pub fn put(&self, source: &str, diagram: rune::El) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(at) = inner.entries.iter().position(|(key, _)| key == source) {
+            inner.entries.remove(at);
+        }
+        inner.entries.push_back((source.to_owned(), diagram));
+        while inner.entries.len() > MERMAID_CACHE_ENTRIES {
+            inner.entries.pop_front();
+        }
+        self.writes.set(self.writes.get().saturating_add(1));
+    }
+
+    /// How many lookups found a card (E-06's reuse count, tests).
+    #[cfg(test)]
+    pub fn hits(&self) -> usize {
+        self.hits.get()
+    }
+
+    /// How many cards were rendered and stored (one per source and theme, tests).
+    #[cfg(test)]
+    pub fn writes(&self) -> usize {
+        self.writes.get()
+    }
+}
+
+impl lmdv_render::MermaidCache for MermaidCache {
+    fn get(&self, source: &str) -> Option<rune::El> {
+        MermaidCache::get(self, source)
+    }
+
+    fn put(&self, source: &str, diagram: rune::El) {
+        MermaidCache::put(self, source, diagram);
+    }
+}
+
 pub struct EditorState {
     pub scratch: TextEdit,
     /// Source pane share of the split (`0.2..=0.8`).
@@ -327,6 +420,16 @@ pub struct EditorState {
     /// E-15(c): the tab whose source viewport must reveal the line a `--line`
     /// or a search hit named, once that tab is in front.
     pub line_reveal: Option<TabId>,
+    /// E-28: the `/` menu's caret anchor, in window points, as the view read it
+    /// from the focused field's last drawn caret. `None` keeps the menu in the
+    /// pane (a frame before the caret was measured).
+    pub slash_anchor: Cell<Option<[f32; 4]>>,
+    /// E-06: the preview's rendered diagrams, keyed by source and theme.
+    pub mermaid: MermaidCache,
+    /// E-35: where the pointer last was over a preview block, window points.
+    pub preview_point: Cell<Option<[f32; 2]>>,
+    /// E-35: the block index under that pointer, for the padding fallback.
+    pub preview_block: Cell<Option<usize>>,
 }
 
 impl Default for EditorState {
@@ -368,6 +471,10 @@ impl Default for EditorState {
             compare_reloads: BTreeSet::new(),
             reopen_checks: BTreeSet::new(),
             line_reveal: None,
+            slash_anchor: Cell::new(None),
+            mermaid: MermaidCache::default(),
+            preview_point: Cell::new(None),
+            preview_block: Cell::new(None),
         }
     }
 }
@@ -376,6 +483,11 @@ impl WindowState {
     /// Whether the active document can enter edit mode.
     pub fn editor_available(&self) -> bool {
         self.active_tab().is_some_and(|tab| tab.document().is_some_and(|doc| is_ready(doc)))
+    }
+
+    /// The window's rendered-diagram cache (E-06).
+    pub(crate) fn mermaid_cache(&self) -> &MermaidCache {
+        &self.editor.mermaid
     }
 
     /// The split's drag state, for the divider.
@@ -524,6 +636,11 @@ impl WindowState {
             Some(index) => self.focus_block(index, tx),
             None => tx.focus("editor-source", false),
         }
+        if !from_draft {
+            // E-03: the source starts at the reading position; reveal it once
+            // the field's first frame has measured the rows.
+            self.editor.line_reveal = Some(tab_id);
+        }
         // The field's first scroll settling must not move the preview off the
         // reading position (E-03/E-07).
         self.suppress_scroll_sync();
@@ -552,14 +669,31 @@ impl WindowState {
         self.editor.sync_suppressed_until = None;
     }
 
-    /// The caret a first edit should start at: the source line of the heading
-    /// above the reader viewport (E-03's basic form).
+    /// The caret a first edit should start at (E-03).
+    ///
+    /// An explicit `--line` (a launch, a search hit, a reopened position) wins:
+    /// the caret goes to that file line. Otherwise the editor starts at the
+    /// first preview block at or above the reading top — the block being read,
+    /// from the reader's own measured block (`reading_block`) — and only a
+    /// document without that measurement falls back to the heading above the
+    /// viewport.
     fn reading_caret(&self, doc: &Document) -> Option<usize> {
-        let heading = self.reading.viewport_anchor.get()?.heading?;
-        let line = self.active_tab()?.view.reader.as_ref()?.headings.get(heading)?.line;
+        let tab = self.active_tab()?;
+        let line = tab.view.line.map(|line| line.saturating_sub(1)).or_else(|| {
+            let model = tab.view.reader.as_ref()?;
+            self.reading
+                .reader_block
+                .get()
+                .and_then(|index| model.block_spans.get(index))
+                .map(|span| span.line)
+                .or_else(|| {
+                    let heading = self.reading.viewport_anchor.get()?.heading?;
+                    model.headings.get(heading).map(|heading| heading.line)
+                })
+        })?;
         let buffer = doc.text();
-        let byte = buffer.line_start(line);
-        Some(byte.min(buffer.text().len()))
+        let line = line.min(buffer.line_count().saturating_sub(1));
+        Some(buffer.line_start(line).min(buffer.text().len()))
     }
 
     /// Leaves edit mode, flushing the draft and releasing the lease.
@@ -704,6 +838,88 @@ impl WindowState {
         let Some(editor) = tab.view.editor.as_mut() else { return };
         editor.insert("\n");
         self.editor_changed();
+    }
+
+    /// A paste with a picture on the clipboard, in edit mode (E-36).
+    ///
+    /// The PNG is saved as `assets/pasted-<ms>.png` beside the document and its
+    /// Markdown link is inserted at the caret. A paste with only text returns
+    /// `false`, so Rune's own field paste runs unchanged. A pasted document has
+    /// no folder yet: it asks for Save as first, like a relative link does.
+    pub(crate) fn editor_paste_content(&mut self, content: &rune::ClipboardContent, tx: &mut Tx) -> bool {
+        let Some(image) = content.image() else { return false };
+        let Some(doc) = self.active_tab().and_then(Tab::document).cloned() else { return true };
+        let Some(root) = self.document_root(&doc) else {
+            self.pasted_image_notice();
+            return true;
+        };
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+            .unwrap_or(0);
+        match lmdv_io::assets::save_pasted_image(&root, image.png(), now_ms) {
+            Ok(saved) => {
+                self.insert_image_markdown(&saved);
+            }
+            Err(error) => {
+                let text = lmdv_i18n::t!("msg.imagePasteFailed", "err" => error.to_string());
+                self.show_notice(text, NoticeKind::Error, None, NOTICE_SECONDS);
+            }
+        }
+        tx.wake_at(self.ui.last_now + PREVIEW_DEBOUNCE);
+        true
+    }
+
+    /// A file drop with images over the source, in edit mode (E-36).
+    ///
+    /// Every supported image is copied into the document's `assets/` folder as
+    /// `<stem>.<ext>` (`-1`, `-2` … when taken) and its link is inserted at the
+    /// caret in drop order. `false` leaves a non-image drop to the window root's
+    /// Markdown handling.
+    pub(crate) fn editor_drop_images(&mut self, files: &[PathBuf], tx: &mut Tx) -> bool {
+        let images: Vec<PathBuf> =
+            files.iter().filter(|path| lmdv_io::assets::is_supported_image(path)).cloned().collect();
+        if images.is_empty() {
+            return false;
+        }
+        let Some(doc) = self.active_tab().and_then(Tab::document).cloned() else { return true };
+        let Some(root) = self.document_root(&doc) else {
+            self.pasted_image_notice();
+            return true;
+        };
+        for file in images {
+            match lmdv_io::assets::save_dropped_image(&root, &file) {
+                Ok(saved) => {
+                    self.insert_image_markdown(&saved);
+                }
+                Err(error) => {
+                    let text = lmdv_i18n::t!("msg.imageDropFailed", "err" => error.to_string());
+                    self.show_notice(text, NoticeKind::Error, None, NOTICE_SECONDS);
+                }
+            }
+        }
+        tx.wake_at(self.ui.last_now + PREVIEW_DEBOUNCE);
+        true
+    }
+
+    /// Inserts a saved picture's `![](assets/…)` at the caret and focuses the
+    /// source again (E-36).
+    fn insert_image_markdown(&mut self, saved: &lmdv_io::assets::SavedAsset) -> bool {
+        let markdown = lmdv_io::assets::image_markdown(saved);
+        let Some(editor) = self.active_tab().and_then(|tab| tab.view.editor.as_ref()) else { return false };
+        if editor.block_mode_active() && editor.active_block().is_none() {
+            return false;
+        }
+        self.active_editor_edit().insert(&markdown);
+        self.editor_changed();
+        true
+    }
+
+    /// L-09's prompt, reused for a picture dropped or pasted into text that has
+    /// no file yet: the relative `assets/` link needs a folder first.
+    fn pasted_image_notice(&mut self) {
+        let action = self.active_document_id().map(NoticeAction::SaveAs);
+        self.show_notice(lmdv_i18n::t!("msg.pastedLink").to_owned(), NoticeKind::Info, action, NOTICE_SECONDS);
     }
 
     /// Editor-local chords win over the editor (6.2).

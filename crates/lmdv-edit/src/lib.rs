@@ -36,8 +36,9 @@ pub use block::{
 };
 pub use find::{FindOptions, find, find_error};
 pub use format::{
-    BlockKind, LinePrefix, delete_line, duplicate_line, goto_line, insert_block, insert_link, move_line_down,
-    move_line_up, select_line, set_heading, toggle_comment, toggle_line_prefix, toggle_wrap,
+    BlockKind, LinePrefix, delete_line, duplicate_line, goto_line, goto_target_offset, insert_block, insert_link,
+    move_line_down, move_line_up, select_line, select_next_occurrence, set_heading, toggle_comment, toggle_line_prefix,
+    toggle_wrap,
 };
 pub use session::{EditorSession, EditorSnapshot};
 pub use spell::{

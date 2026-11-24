@@ -399,6 +399,9 @@ impl WindowState {
             let anchor = self.active_tab().map(|tab| tab.view.anchor.clone()).unwrap_or_default();
             self.begin_restore(&anchor);
             self.load_outline_filter();
+            // T-26: the moved tab takes its own notice with it; the neighbour
+            // coming forward shows what it had.
+            self.load_active_notice();
         }
         self.sync_outline();
         self.sync_editor_titles();
@@ -501,6 +504,8 @@ impl WindowState {
         if !replacing_start {
             self.capture_active_position();
             self.save_outline_filter();
+            // T-26: the target's front tab keeps its own sticky notice.
+            self.stash_active_notice();
         }
         if replacing_start {
             self.tabs[index] = tab;
@@ -508,6 +513,7 @@ impl WindowState {
             self.tabs.insert(index, tab);
         }
         self.active = index;
+        self.load_active_notice();
         self.editor.goto_line = None;
         self.ui.block_menu = None;
         self.share.menu_open = false;
@@ -614,6 +620,8 @@ impl WindowState {
             let anchor = self.tabs[self.active].view.anchor.clone();
             self.begin_restore(&anchor);
             self.load_outline_filter();
+            // T-26: the returned tab brings its own notice back.
+            self.load_active_notice();
         }
         self.sync_outline();
         self.sync_editor_titles();

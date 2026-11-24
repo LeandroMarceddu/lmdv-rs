@@ -59,7 +59,25 @@ pub const SCENES: &[(&str, Scene)] = &[
     ("lightbox", crate::lightbox::scene_lightbox),
     ("palette", crate::palette_ui::scene_palette),
     ("settings", crate::settings_ui::scene_settings),
+    ("tab-notice", scene_tab_notice),
+    ("version", scene_version),
 ];
+
+/// T-26: two documents, the second in front, while the first keeps its own
+/// sticky notice; the scene ends back on the first tab, so `--tree` shows the
+/// notice that was waiting there rather than one raised for the front tab.
+fn scene_tab_notice(state: &mut WindowState) {
+    let first = state.open_synthetic("Notices", "# Notices\n\nThe first tab keeps its own notice.\n");
+    state.sticky_notice("Not found: deleted.md", crate::window::NoticeKind::Error);
+    state.open_synthetic("Second", "# Second\n\nAnother tab.\n");
+    state.activate_tab(first);
+}
+
+/// H-13: the start page's footer and the full Help dialog are both on screen,
+/// so `--tree` reads the one `CARGO_PKG_VERSION` they share.
+fn scene_version(state: &mut WindowState) {
+    state.open_help(crate::window::HelpView::Full);
+}
 
 /// Runs lmdv for a parsed launch.
 pub fn run(launch: Launch) {

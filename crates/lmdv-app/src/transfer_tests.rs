@@ -423,6 +423,27 @@ fn a_background_tab_move_keeps_the_front_tab() {
 }
 
 #[test]
+fn a_moved_tab_takes_its_own_sticky_notice_with_it() {
+    let temp = TempDir::new().unwrap();
+    let (shared, mut source, mut target) = two_windows(&temp);
+    let path = temp.path().join("noticed.md");
+    let document = ready_file(&shared, &path, "# Noticed\n");
+    let tab = source.attach_document(document.clone());
+    source.sticky_notice("Not found: gone.md", crate::window::NoticeKind::Error);
+
+    source.move_tab_to_window(tab, target.id()).expect("queued");
+    assert!(source.ui.notice.is_none(), "the notice left with its tab, not stayed on the source");
+    poll_both(&mut source, &mut target);
+
+    assert!(source.tab(tab).is_none());
+    let moved = target.active_tab().map(|tab| tab.id).expect("the adopted tab");
+    let notice = target.ui.notice.as_ref().expect("T-26: the moved tab brings its notice");
+    assert_eq!(notice.text, "Not found: gone.md");
+    assert!(notice.is_sticky());
+    assert!(target.tab(moved).is_some_and(|tab| tab.view.notice.is_some()), "and keeps its own copy");
+}
+
+#[test]
 fn a_vanished_target_leaves_the_tab_where_it_was() {
     let temp = TempDir::new().unwrap();
     let (shared, mut source, target) = two_windows(&temp);

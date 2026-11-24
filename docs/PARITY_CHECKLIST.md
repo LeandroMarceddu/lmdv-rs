@@ -40,24 +40,24 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
-| Reading and viewer | 30 | 23 | 3 | 3 | 1 | 0 |
-| Tabs and windows | 35 | 22 | 8 | 3 | 2 | 0 |
-| Editor | 40 | 28 | 2 | 7 | 2 | 1 |
+| Reading and viewer | 30 | 26 | 3 | 0 | 1 | 0 |
+| Tabs and windows | 35 | 23 | 8 | 2 | 2 | 0 |
+| Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
-| Share, print and export | 16 | 9 | 1 | 5 | 1 | 0 |
+| Share, print and export | 16 | 10 | 2 | 4 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
-| Outline, section line and history | 15 | 11 | 2 | 2 | 0 | 0 |
+| Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
 | Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
 | Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
-| System, CLI and file integration | 27 | 14 | 5 | 0 | 1 | 7 |
+| System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
 | Window chrome | 10 | 2 | 3 | 1 | 0 | 4 |
 | Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
-| Help, start page, notices, rating | 13 | 8 | 0 | 4 | 0 | 1 |
-| Accessibility | 15 | 11 | 0 | 4 | 0 | 0 |
+| Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
+| Accessibility | 15 | 12 | 0 | 3 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **223** | **52** | **40** | **9** | **18** |
+| **All** | **342** | **242** | **54** | **23** | **5** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -71,13 +71,13 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **R-08** . / , heading steps (P0 · F-HEADINGS) — done
 - [x] **R-09** g g / G (P0 · F-LONG) — done
 - [x] **R-10** n / N find stepping (P1 · F-FIND) — done
-- [~] **R-11** ? keys overlay (P1 · F-BASIC) — partial
+- [x] **R-11** ? keys overlay (P1 · F-BASIC) — done
 - [x] **R-12** Per-file reading position (P0 · F-LONG) — done
 - [x] **R-13** Position survives edits above (P0 · F-LONG) — done
 - [x] **R-14** Top means forgotten (P1 · F-LONG) — done
 - [x] **R-15** Missing anchor falls back to top (P1 · F-HEADINGS) — done
 - [x] **R-16** Find bar open (P0 · F-FIND) — done
-- [~] **R-17** Find prefill from selection (P1 · F-FIND) — partial
+- [x] **R-17** Find prefill from selection (P1 · F-FIND) — done
 - [x] **R-18** Find matching semantics (P0 · F-FIND) — done
 - [x] **R-19** Find scrolling (P1 · F-TABLE) — substitute
 - [x] **R-20** F5 / Ctrl+R (P0 · F-RELOAD) — done
@@ -86,7 +86,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **R-23** Rename while open (P0 · F-RELOAD) — done
 - [x] **R-24** Delete/move-away while open (P0 · F-RELOAD) — done
 - [x] **R-25** Ctrl+A scope (P1 · F-BASIC) — done
-- [~] **R-26** Selection copy (P1 · F-SELECT) — partial
+- [x] **R-26** Selection copy (P1 · F-SELECT) — done
 - [x] **R-27** Double-click while reading (P0 · F-BASIC) — done
 - [ ] **R-28** Drag to scroll (P1 · F-LONG) — missing
 - [x] **R-29** Empty/error state persistence (P1 · F-ERRORS) — done
@@ -119,7 +119,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-23** Close others / right (P1 · F-TABS) — done
 - [x] **T-24** Window close question (P0 · F-TABS) — done
 - [x] **T-25** Close request routing (P1 · F-TABS) — done
-- [~] **T-26** Tab state retention (P0 · F-TABS) — partial
+- [x] **T-26** Tab state retention (P0 · F-TABS) — done
 - [x] **T-27** Rendered-view cache (P1 · F-TABS) — substitute
 - [x] **T-28** State carried across reload (P1 · F-I18N) — substitute
 - [x] **T-29** Close-key precedence (P1 · F-PREVIEW) — done
@@ -134,10 +134,10 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 - [x] **E-01** Toggle edit mode (P0 · F-EDIT) — done
 - [x] **E-02** Split layout (P0 · F-NARROW) — done
-- [~] **E-03** Editor entry position (P1 · F-EDIT) — partial
+- [x] **E-03** Editor entry position (P1 · F-EDIT) — done
 - [x] **E-04** Edit from here (P1 · F-EDIT) — done
 - [x] **E-05** Live preview (P0 · F-BROKEN) — done
-- [~] **E-06** Mermaid reuse while typing (P1 · F-MERMAID) — partial
+- [x] **E-06** Mermaid reuse while typing (P1 · F-MERMAID) — done
 - [x] **E-07** Preview follow / scroll sync (P0 · F-EDIT) — done
 - [x] **E-08** Save semantics (P0 · F-EDIT) — done
 - [x] **E-09** Line endings (P0 · F-EOL) — done
@@ -159,15 +159,15 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **E-25** Headings (P0 · F-EDIT) — done
 - [x] **E-26** List/quote toggles (P0 · F-EDIT) — done
 - [x] **E-27** Block inserts (P1 · F-EDIT) — done
-- [~] **E-28** Slash menu (P1 · F-EDIT) — partial
+- [x] **E-28** Slash menu (P1 · F-EDIT) — done
 - [~] **E-29** Line commands (P1 · F-EDIT) — partial
-- [~] **E-30** Comment line (P1 · F-EDIT) — partial
-- [~] **E-31** Go to line (P1 · F-EDIT) — partial
+- [x] **E-30** Comment line (P1 · F-EDIT) — done
+- [x] **E-31** Go to line (P1 · F-EDIT) — done
 - [x] **E-32** Spellcheck (P1 · F-EDIT) — substitute
 - [x] **E-33** Tab / leaving editor (P0 · F-EDIT) — done
-- [ ] **E-34** Scroll past end (P2 · F-EDIT) — missing
-- [~] **E-35** Preview double-click → caret (P1 · F-EDIT) — partial
-- [ ] **E-36** Images into editor (P1 · F-IMAGE) — missing
+- [x] **E-34** Scroll past end (P2 · F-EDIT) — done
+- [x] **E-35** Preview double-click → caret (P1 · F-EDIT) — done
+- [x] **E-36** Images into editor (P1 · F-IMAGE) — done
 - [x] **E-37** Editor font scaling (P2 · F-PREFS) — done
 - [x] **E-38** Editor load failure (P1 · F-BROKEN) — n/a
 - [x] **E-39** Pasted text in edit mode (P0 · F-PASTE) — done
@@ -235,7 +235,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 - [x] **X-01** Share menu (P0 · F-EXPORT) — done
 - [~] **X-02** Copy whole document as rich text (P0 · F-EXPORT) — partial
-- [ ] **X-03** Copy selection as rich text (P1 · F-SELECT) — missing
+- [x] **X-03** Copy selection as rich text (P1 · F-SELECT) — done
 - [x] **X-04** Print (P0 · F-EXPORT) — substitute
 - [x] **X-05** Save as PDF (P0 · F-EXPORT) — done
 - [x] **X-06** Page break per H1 (P1 · F-EXPORT) — done
@@ -247,7 +247,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **X-12** Wide-table print fitting (P1 · F-EXPORT) — done
 - [x] **X-13** Feedback (P2 · F-EXPORT) — done
 - [x] **X-14** Print header text (P1 · F-EXPORT) — done
-- [~] **X-15** Export target rules (P1 · F-EXPORT) — partial
+- [x] **X-15** Export target rules (P1 · F-EXPORT) — substitute
 - [x] **X-16** Table copy button (P1 · F-TABLE) — done
 
 ## F — File browser and folder search (22)
@@ -281,7 +281,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **O-02** Outline jump (P0 · F-HEADINGS) — done
 - [x] **O-03** Scroll-spy (P0 · F-HEADINGS) — done
 - [x] **O-04** Pin behavior (P1 · F-HEADINGS) — done
-- [~] **O-05** Outline filter (P1 · F-HEADINGS) — partial
+- [x] **O-05** Outline filter (P1 · F-HEADINGS) — done
 - [x] **O-06** Outline visibility (P0 · F-EDIT) — done
 - [x] **O-07** Section line conditions (P1 · F-SECTION) — done
 - [x] **O-08** Section path (P1 · F-HEADINGS) — done
@@ -336,7 +336,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **S-05** --new-window (P0 · Two `--new-window a.md` produce two windows.) — done
 - [x] **S-06** Single instance (P0 · Second launch exits; first handles file.) — done
 - [x] **S-07** File associations (P0 · Double-click `.md` opens app; `lmdv` on PATH.) — substitute
-- [ ] **S-08** New Markdown document (P1 · Right-click New shows localized entry creating empty .md.) — missing
+- [x] **S-08** New Markdown document (P1 · Right-click New shows localized entry creating empty .md.) — substitute
 - [x] **S-09** Recent items / jump list (P2 · Opened file appears in Explorer Recent.) — n/a
 - [x] **S-10** Portable mode (P1 · Copy exe+marker to USB: settings in `data`, installed copy unaffected.) — done
 - [x] **S-11** Store build detection (P2 · GitHub build has no rate card.) — n/a
@@ -384,18 +384,18 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 ## H — Help, start page, notices, rating (13)
 
 - [x] **H-01** Start page (P0 · Empty window shows all elements; long recents scroll.) — done
-- [~] **H-02** Recent files (P1 · Recents show time; delete file, reopen home: gone.) — partial
+- [x] **H-02** Recent files (P1 · Recents show time; delete file, reopen home: gone.) — done
 - [x] **H-03** Start-page tips (P2 · Text matches.) — done
 - [x] **H-04** Help dialog (P0 · F1 shows localized help with version.) — done
 - [x] **H-05** Keys overlay (P1 · Overlay keys localized in German.) — done
 - [x] **H-06** Notice bar (P0 · Warning with Reload; dismiss; layout no overlap.) — done
 - [x] **H-07** Screen-reader notices (P1 · Screen reader announces save/error.) — done
-- [~] **H-08** Micro-feedback (P2 · All confirmations visible.) — partial
-- [~] **H-09** Error card (P1 · Permission-denied file: error card, app alive.) — partial
+- [x] **H-08** Micro-feedback (P2 · All confirmations visible.) — done
+- [x] **H-09** Error card (P1 · Permission-denied file: error card, app alive.) — done
 - [x] **H-10** Rate prompt (P2 · Simulate dates: card once, one window, Later returns after 30 d.) — n/a
 - [x] **H-11** Quick reference from home (P2 · Empty window `?` opens overlay.) — done
 - [x] **H-12** Drop hint (P2 · Overlay visible during drag.) — done
-- [~] **H-13** Version display (P2 · Both show same version.) — partial
+- [x] **H-13** Version display (P2 · Both show same version.) — done
 
 ## A — Accessibility (15)
 
@@ -411,7 +411,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **A-10** Live regions (P1 · Screen reader gets updates without focus move.) — done
 - [x] **A-11** Task checkbox names (P1 · Checkbox announced “Install installer QA”.) — done
 - [x] **A-12** Zoomable media (P1 · Tab to image, Enter opens preview.) — done
-- [~] **A-13** Table preview semantics (P1 · Table region instructions read once.) — partial
+- [x] **A-13** Table preview semantics (P1 · Table region instructions read once.) — done
 - [x] **A-14** Reading keys gated (P0 · Typing in find bar does not scroll document.) — done
 - [x] **A-15** Reduced motion (P1 · OS animation effects off: no glide/fade.) — done
 

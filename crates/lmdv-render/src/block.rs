@@ -17,6 +17,16 @@ use crate::inline::InlineOptions;
 use crate::theme::DocTheme;
 use crate::{DOC_KEY, HighlightKind, MediaKind, MediaRef, PreviewBlock, PreviewText, RenderOptions, TaskRef, parts};
 
+/// One drawn picture's box, for an image map's coordinates (L-12).
+pub(crate) struct DrawnImage {
+    /// The drawn width in points.
+    pub(crate) width: f32,
+    /// The drawn height in points.
+    pub(crate) height: f32,
+    /// The natural size in pixels, the space an `<area>`'s coords are in.
+    pub(crate) natural: [f32; 2],
+}
+
 /// The renderer, a pure view over one document.
 pub(crate) struct Renderer<'a> {
     pub(crate) doc: &'a lmdv_md::MdDoc,
@@ -39,6 +49,9 @@ pub(crate) struct Renderer<'a> {
     /// The block being drawn's inline text and key scope, for [`crate::BlockWire`].
     /// Only filled while a block wire is set.
     pub(crate) preview: RefCell<PreviewBlock>,
+    /// The HTML image maps of the block being drawn (L-12): the block index
+    /// they were collected for, and every `<map>` node in that block.
+    pub(crate) html_maps: RefCell<(usize, Vec<lmdv_md::HtmlNode>)>,
 }
 
 impl<'a> Renderer<'a> {
@@ -128,17 +141,31 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    /// Remembers one drawn inline text for the block wire (no-op without one).
-    pub(crate) fn note_text(&self, key: Option<&str>, drawn: &str) {
-        if self.opts.wires.block.is_none() {
-            return;
-        }
+    /// Remembers one drawn inline text for the block wire and returns the key
+    /// its element must carry (no-op without one).
+    ///
+    /// A heading keeps its `h{n}` key; a paragraph's generic `text` and every
+    /// keyless text take a block-scoped identity, so the app can look the
+    /// element's box up and two identical texts never share one (E-35).
+    pub(crate) fn note_text(&self, key: Option<&str>, drawn: &str) -> Option<String> {
+        self.opts.wires.block.as_ref()?;
         let mut preview = self.preview.borrow_mut();
+        let index = preview.texts.len();
+        let block = self
+            .doc
+            .block_key(self.current_block.get())
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("b{}", self.current_block.get()));
+        let identity = match key {
+            Some(key) if key != "text" => key.to_owned(),
+            _ => format!("{block}-text-{index}"),
+        };
         let start = preview.text.len();
         let path = preview.scope.clone();
         preview.text.push_str(drawn);
         preview.text.push('\n');
-        preview.texts.push(PreviewText { key: key.map(str::to_owned), range: start..start + drawn.len(), path });
+        preview.texts.push(PreviewText { key: Some(identity.clone()), index, range: start..start + drawn.len(), path });
+        Some(identity)
     }
 
     /// Adds a renderer-created key to the scope a noted text carries.
@@ -191,6 +218,7 @@ impl<'a> Renderer<'a> {
             && self.opts.wires.block.is_none()
             && self.opts.wires.table.is_none()
             && self.opts.wires.media.is_none()
+            && self.opts.wires.area.is_none()
             && self.opts.details.is_none()
     }
 
@@ -335,7 +363,7 @@ impl<'a> Renderer<'a> {
     ) -> El {
         // A code block's text is the whole block's body; noted for the block
         // wire so a double-click inside one maps back to its source word.
-        self.note_text(None, code);
+        let identity = self.note_text(None, code);
         let highlighted = rune_kit::syntax::highlight(lang, code);
         let spans: Vec<Span> = self.theme.syntax.spans(&highlighted, 0);
         let mut head = row().w_full().items_center().pb(6.0);
@@ -352,6 +380,9 @@ impl<'a> Renderer<'a> {
             head = head.child(self.action_chip(&self.theme.labels.copy, crate::copy_code_link(&index.to_string())));
         }
         let mut body = rich(code.to_owned(), spans).font(self.theme.code).color(self.theme.text).w_full();
+        if let Some(identity) = identity {
+            body = body.key(identity);
+        }
         if let Some(source) = source {
             body = self.highlight_code(body, code, source);
         }
@@ -427,9 +458,23 @@ impl<'a> Renderer<'a> {
 
     /// A diagram through `rune-mermaid`; an unsupported one falls back to its
     /// source with a notice (M-14, ADR-014).
+    ///
+    /// E-06: a card the app's cache already holds for `source` is reused as-is;
+    /// only a miss renders the diagram and stores the card.
     fn mermaid(&self, source: &str) -> El {
         let holder = col().key("mermaid").w_full();
-        match rune_kit::mermaid::render(source, self.opts.style) {
+        let render = || rune_kit::mermaid::render(source, self.opts.style);
+        let diagram = match self.opts.mermaid {
+            Some(cache) => cache.get(source).or_else(|| {
+                let diagram = render();
+                if let Some(card) = diagram.as_ref() {
+                    cache.put(source, card.clone());
+                }
+                diagram
+            }),
+            None => render(),
+        };
+        match diagram {
             Some(diagram) => {
                 let holder =
                     holder.role("image").label(self.theme.labels.mermaid.clone()).child(diagram.key("diagram"));
@@ -495,32 +540,9 @@ impl<'a> Renderer<'a> {
             // in the other scheme, as the original's CSS does.
             return col().key("image").w_full().h(0.0);
         }
-        let max_width = self.opts.width.min(self.theme.image_max_width).max(16.0);
         let mut frame = col().key("image").w_full().items_start();
-        match self.opts.images.resolve(src, alt, title) {
-            Some(picture) => {
-                let [pixels_w, pixels_h] = picture.size().unwrap_or([640, 360]);
-                let ratio = pixels_w as f32 / pixels_h.max(1) as f32;
-                let width = (pixels_w as f32).min(max_width);
-                let height = (width / ratio.max(0.001)).max(1.0);
-                let mut drawn = el()
-                    .role("image")
-                    .label(if alt.is_empty() { self.theme.labels.image.clone() } else { alt.to_owned() })
-                    .w(width)
-                    .h(height)
-                    .pixels(picture.pixels())
-                    .radius(4.0);
-                if !title.is_empty() {
-                    drawn = drawn.help(title.to_owned());
-                }
-                // V-01: a decoded picture is zoomable. A missing or broken one
-                // never reaches the wire (its placeholder stays inert).
-                if let Some(wire) = &self.opts.wires.media {
-                    let reference = self.media_ref(MediaKind::Image, src, alt, pixels_w as f32, pixels_h as f32);
-                    drawn = wire(drawn, &reference);
-                }
-                frame = frame.child(drawn);
-            }
+        match self.drawn_image(src, alt, title) {
+            Some((drawn, _)) => frame = frame.child(drawn),
             None => {
                 frame = frame.child(
                     row()
@@ -542,9 +564,41 @@ impl<'a> Renderer<'a> {
         frame
     }
 
+    /// The drawn picture and its box: the element the article shows, its drawn
+    /// size in points and its natural (intrinsic) pixel size.
+    ///
+    /// L-12 needs the natural size to scale an image map's `coords`; the block
+    /// image and the HTML image map share this one resolution so both draw the
+    /// same picture at the same box.
+    pub(crate) fn drawn_image(&self, src: &str, alt: &str, title: &str) -> Option<(El, DrawnImage)> {
+        let max_width = self.opts.width.min(self.theme.image_max_width).max(16.0);
+        let picture = self.opts.images.resolve(src, alt, title)?;
+        let [pixels_w, pixels_h] = picture.size().unwrap_or([640, 360]);
+        let ratio = pixels_w as f32 / pixels_h.max(1) as f32;
+        let width = (pixels_w as f32).min(max_width);
+        let height = (width / ratio.max(0.001)).max(1.0);
+        let mut drawn = el()
+            .role("image")
+            .label(if alt.is_empty() { self.theme.labels.image.clone() } else { alt.to_owned() })
+            .w(width)
+            .h(height)
+            .pixels(picture.pixels())
+            .radius(4.0);
+        if !title.is_empty() {
+            drawn = drawn.help(title.to_owned());
+        }
+        // V-01: a decoded picture is zoomable. A missing or broken one never
+        // reaches the wire (its placeholder stays inert).
+        if let Some(wire) = &self.opts.wires.media {
+            let reference = self.media_ref(MediaKind::Image, src, alt, pixels_w as f32, pixels_h as f32);
+            drawn = wire(drawn, &reference);
+        }
+        Some((drawn, DrawnImage { width, height, natural: [pixels_w as f32, pixels_h.max(1) as f32] }))
+    }
+
     /// A block image's chosen source, alt and title: a `<picture>` source that
     /// matches the scheme, else a `srcset` candidate, else the markdown source.
-    fn image_source<'b>(&self, image: &'b ImageBlock) -> (&'b str, &'b str, &'b str) {
+    pub(crate) fn image_source<'b>(&self, image: &'b ImageBlock) -> (&'b str, &'b str, &'b str) {
         let title = image.title.as_deref().unwrap_or_default();
         if !self.image_visible(image.src.as_str()) {
             return (image.src.as_str(), image.alt.as_str(), title);

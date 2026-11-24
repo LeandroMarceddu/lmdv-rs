@@ -1429,6 +1429,169 @@ fn entering_edit_mode_puts_the_caret_at_the_section_being_read() {
 }
 
 #[test]
+fn entering_edit_mode_uses_the_preview_block_at_the_reading_top() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Blocks", "# Top\n\nText one\n\n## Second\n\nMore\n");
+    let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("model");
+    // The reader measured the paragraph after the first heading at the top and
+    // the next heading is above the viewport too: E-03 wants the block, not the
+    // heading.
+    let paragraph = 1;
+    let line = model.block_spans[paragraph].line;
+    state.reading.reader_block.set(Some(paragraph));
+    state.reading.viewport_anchor.set(Some(crate::reader::ViewportAnchor {
+        heading: Some(2),
+        offset: 10.0,
+        top: false,
+    }));
+    enter_editor(&mut state);
+    let expected =
+        state.active_tab().and_then(Tab::document).map(|doc| doc.text().line_start(line)).expect("line start");
+    let caret = state.active_tab().and_then(|tab| tab.view.editor.as_ref()).map(|editor| editor.selection().start);
+    assert_eq!(caret, Some(expected), "the caret lands on the block at the reading top");
+}
+
+#[test]
+fn an_explicit_line_wins_when_edit_mode_starts() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Target", "one\ntwo\nthree\n");
+    state.reading.reader_block.set(Some(0));
+    state.set_pending_line(3);
+    enter_editor(&mut state);
+    let caret = state.active_tab().and_then(|tab| tab.view.editor.as_ref()).map(|editor| editor.selection().start);
+    assert_eq!(caret, Some(8), "the `--line` target, not the first block");
+}
+
+#[test]
+fn an_unchanged_diagram_is_reused_across_a_preview_refresh() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("diagram.md");
+    std::fs::write(&path, "# Before\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    poll_until(&mut state, "the reader model", |state| {
+        state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_some()
+    });
+    enter_editor(&mut state);
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+    assert_eq!(runtime.state.editor.mermaid.writes(), 1, "the first preview renders the diagram once");
+    let before = runtime.state.active_tab().and_then(|tab| tab.view.reader_revision).expect("the first model");
+
+    // Edit prose before the diagram: the source changes, the diagram does not.
+    runtime.update(|state: &mut WindowState, _: &mut Tx| {
+        state.active_editor_edit().set_caret(0);
+        state.active_editor_edit().insert("New ");
+        state.editor_changed();
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut clock = 0.0;
+    while runtime.state.active_tab().and_then(|tab| tab.view.reader_revision) == Some(before) {
+        assert!(std::time::Instant::now() < deadline, "the preview parse never landed");
+        clock += 0.05;
+        runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+            state.poll(clock, tx);
+        });
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+    assert!(runtime.state.editor.mermaid.hits() >= 1, "the refreshed preview reused the card");
+    assert_eq!(runtime.state.editor.mermaid.writes(), 1, "the unchanged diagram was never rendered again");
+    assert_eq!(runtime.state.editor.mermaid.len(), 1);
+}
+
+#[test]
+fn the_diagram_cache_drops_its_cards_when_the_theme_changes() {
+    let cache = crate::editor::MermaidCache::default();
+    cache.set_theme(7);
+    cache.put("flowchart LR\n  A --> B", rune::el());
+    assert_eq!(cache.len(), 1);
+    cache.set_theme(7);
+    assert_eq!(cache.len(), 1, "the same theme keeps its cards");
+    cache.set_theme(8);
+    assert!(cache.is_empty(), "a new theme never serves a stale diagram");
+    assert_eq!(cache.writes(), 1);
+}
+
+#[test]
+fn the_source_keeps_space_past_its_last_line() {
+    use crate::editor::scroll_sync::tail_space;
+    assert_eq!(tail_space(0.0), 160.0, "an unmeasured viewport gets the minimum");
+    assert!((tail_space(800.0) - 480.0).abs() < 1e-3, "60% of a measured viewport");
+    assert_eq!(tail_space(100.0), 160.0, "never less than the minimum");
+    assert_eq!(tail_space(f32::NAN), 160.0);
+}
+
+#[test]
+fn a_pasted_picture_saves_into_assets_and_inserts_its_link() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("picture.md");
+    std::fs::write(&path, "Body\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    let mut tx = Tx::default();
+    let content = rune::ClipboardContent::new("").with_image(clipboard_png());
+    assert!(state.editor_paste_content(&content, &mut tx), "a picture paste is consumed");
+
+    let text = state.active_tab().and_then(Tab::document).map(|doc| doc.text().text().to_owned()).expect("text");
+    assert!(text.starts_with("![](assets/pasted-"), "{text:?}");
+    assert!(text.contains(".png)"), "the link is closed: {text:?}");
+    let destination = text.trim_start_matches("![](").split(')').next().expect("the destination").to_owned();
+    let file = temp.path().join(&destination);
+    assert!(file.is_file(), "{} was written", file.display());
+    assert_eq!(std::fs::read(&file).unwrap(), clipboard_png().png(), "the PNG bytes are the picture");
+}
+
+#[test]
+fn a_dropped_image_copies_into_assets_with_its_stem() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("drop.md");
+    std::fs::write(&path, "\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    let source = temp.path().join("Photo.JPG");
+    std::fs::write(&source, b"jpeg bytes").unwrap();
+    let mut tx = Tx::default();
+    assert!(state.editor_drop_images(std::slice::from_ref(&source), &mut tx));
+    let text = state.active_tab().and_then(Tab::document).map(|doc| doc.text().text().to_owned()).expect("text");
+    assert!(text.contains("![](assets/Photo.jpg)"), "{text:?}");
+    assert_eq!(std::fs::read(temp.path().join("assets/Photo.jpg")).unwrap(), b"jpeg bytes");
+}
+
+#[test]
+fn a_picture_pasted_into_unsaved_text_asks_to_save_as_first() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Pasted", "notes\n");
+    enter_editor(&mut state);
+    let before = state.active_tab().and_then(Tab::document).map(|doc| doc.text().text().to_owned()).unwrap();
+    let mut tx = Tx::default();
+    let content = rune::ClipboardContent::new("").with_image(clipboard_png());
+    assert!(state.editor_paste_content(&content, &mut tx));
+    let after = state.active_tab().and_then(Tab::document).map(|doc| doc.text().text().to_owned()).unwrap();
+    assert_eq!(after, before, "no relative link is inserted without a folder");
+    let notice = state.ui.notice.as_ref().expect("a notice asks for Save as");
+    assert_eq!(notice.text, lmdv_i18n::t!("msg.pastedLink"));
+    assert_eq!(notice.action, Some(crate::window::NoticeAction::SaveAs(state.active_document_id().unwrap())));
+    assert!(!temp.path().join("assets").exists());
+}
+
+/// A minimal PNG header, the shape [`rune::ClipboardImage::from_png`] accepts.
+fn clipboard_png() -> rune::ClipboardImage {
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&[0, 0, 0, 13]);
+    bytes.extend_from_slice(b"IHDR");
+    bytes.extend_from_slice(&[0, 0, 0, 2, 0, 0, 0, 3]);
+    rune::ClipboardImage::from_png(bytes).expect("a PNG header")
+}
+
+#[test]
 fn the_one_second_draft_timer_writes_while_dirty() {
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("timer-draft.md");
@@ -2194,7 +2357,7 @@ fn scrolling_markdown(paragraphs: usize) -> String {
 }
 
 fn preview_block(index: usize, key: &str, top: f32, height: f32, next_top: f32) -> PreviewBlock {
-    PreviewBlock { index, key: key.to_owned(), top, height, next_top, heading: None }
+    PreviewBlock { index, key: key.to_owned(), top, height, next_top, heading: None, text_boxes: Vec::new() }
 }
 
 fn geometry(blocks: Vec<PreviewBlock>, viewport: f32, max: f32) -> PreviewGeometry {
@@ -2204,6 +2367,7 @@ fn geometry(blocks: Vec<PreviewBlock>, viewport: f32, max: f32) -> PreviewGeomet
         front_matter: None,
         reserve: 0.0,
         content_bottom: 1200.0,
+        viewport_top: 0.0,
         viewport,
         max,
     }

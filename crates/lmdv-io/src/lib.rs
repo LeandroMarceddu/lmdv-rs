@@ -7,6 +7,7 @@
 //!
 //! * [`launch`] — the original `lmdv [--new-window] [file] [--line N]` parser.
 //! * [`path_policy`] — canonicalization and embedded-asset confinement.
+//! * [`assets`] — an image pasted or dropped beside the document (E-36).
 //! * [`atomic`] — temp + sync + rename + directory fsync.
 //! * [`read`] / [`write`] — UTF-8/EOL/BOM loading and conflict-checked saves.
 //! * [`dirs`] — XDG, `LMDV_HOME` and portable directory resolution.
@@ -18,6 +19,7 @@
 //!   registry registration with the Default apps hand-off, and the Linux XDG
 //!   desktop entry plus `mimeapps.list` defaults.
 
+pub mod assets;
 pub mod assoc;
 pub mod atomic;
 pub mod dirs;

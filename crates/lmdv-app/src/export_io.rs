@@ -9,12 +9,19 @@
 //!
 //! Picture bytes are read only after [`lmdv_io::PathPolicy`] validated them
 //! against the document folder; the destination's parent must exist and is
-//! canonicalized (X-15). Network and `data:` sources never reach the filesystem.
+//! canonicalized. That is **one rule for HTML, DOCX and PDF**, including the
+//! reference's PDF-only “create the parent folders” behavior: a save dialog
+//! never produces a missing parent, and a headless export must not create
+//! folders as a side effect. The stricter rule is deliberate (X-15).
+//! Network and `data:` sources never reach the filesystem.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use lmdv_export::{AssetResolver, DocxOptions, ExportDoc, ExportedAsset, PdfOptions, RichOptions, export_rich_html};
+use lmdv_export::{
+    AssetResolver, DocxOptions, ExportDoc, ExportedAsset, PdfOptions, RichOptions, export_rich_fragment,
+    export_rich_html,
+};
 use lmdv_io::PathPolicy;
 use lmdv_md::MdDoc;
 
@@ -67,25 +74,38 @@ pub(crate) fn run_export(spec: &ExportSpec) -> Result<ExportOutcome, String> {
     Ok(ExportOutcome { path, bytes: bytes.len() as u64, format: spec.format, warnings, font_note })
 }
 
-/// Builds the whole-document rich clipboard fragment off the UI thread.
+/// Builds the rich clipboard fragment off the UI thread.
 ///
 /// The plain form is the Markdown snapshot captured on the UI thread; the HTML
 /// is the inline-styled export model, resolved through the same asset policy as
 /// the file exports. A stale model is replaced by a parse of the snapshot, so
-/// the copy and its plain form always describe one revision (OI-103).
+/// the copy and its plain form always describe one revision (OI-103). A
+/// selection copy (R-26/X-03) builds one fragment over the selected top-level
+/// blocks and keeps the selected text as its plain form.
 pub(crate) fn run_rich_copy(spec: &crate::share::RichCopySpec) -> Result<crate::share::RichCopy, String> {
     let assets = ExportAssets::for_source(spec.options.source_path.as_deref());
     let model = export_model("copy", &spec.source, spec.revision, spec.model.as_ref())?;
     let mut options = spec.options.clone();
     options.title = Some(export_title_text(&model, &spec.title_base));
     let doc = ExportDoc::from_md(&model, &options, &assets).map_err(|error| error.to_string())?;
+    let selection = spec.selection.as_ref();
     let options = RichOptions {
         lang: spec.options.lang.clone(),
         source_path: spec.options.source_path.clone(),
-        title: Some(doc.title.clone()),
+        // A whole-document copy names itself after the document; a selection
+        // must not claim the document's label (`export_rich_fragment`).
+        title: selection.is_none().then(|| doc.title.clone()),
     };
-    let html = export_rich_html(&doc, &options);
-    Ok(crate::share::RichCopy { markdown: spec.source.to_string(), html })
+    match selection {
+        Some(selection) => {
+            let blocks = lmdv_export::blocks_for_source(&doc, selection.source.clone());
+            let html = if blocks.is_empty() { String::new() } else { export_rich_fragment(&doc, blocks, &options) };
+            Ok(crate::share::RichCopy { markdown: selection.plain.clone(), html })
+        }
+        None => {
+            Ok(crate::share::RichCopy { markdown: spec.source.to_string(), html: export_rich_html(&doc, &options) })
+        }
+    }
 }
 
 /// Chooses the model a worker exports: an already current parse, else one made
@@ -115,8 +135,8 @@ pub(crate) fn parse_snapshot(source: &str, revision: u64) -> Result<Arc<MdDoc>, 
 }
 
 /// Writes `bytes` to `path` atomically. The parent folder must exist; a target
-/// inside it may not.
-fn write_export(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+/// inside it may not, and the folder is never created (X-15's one rule).
+pub(crate) fn write_export(path: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
     lmdv_io::path_policy::reject_network_or_device(path).map_err(|error| error.to_string())?;
     let target = lmdv_io::atomic::canonical_target(path)
         .map_err(|error| format!("{} cannot be used: {error}", path.display()))?;

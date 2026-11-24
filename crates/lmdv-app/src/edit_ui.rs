@@ -812,6 +812,30 @@ impl WindowState {
         EditorMetrics::for_reader(self.shared().prefs().reader.size)
     }
 
+    /// `Ctrl+D`: select the word at the caret, then its next occurrence (E-29).
+    ///
+    /// The pinned Rune field has one selection, so this moves that selection
+    /// instead of adding a cursor; `Ctrl+Alt+↑/↓` (add cursor) needs Rune's
+    /// multi-cursor model and is recorded as a gap.
+    pub(crate) fn select_next_occurrence_cmd(&mut self, tx: &mut Tx) -> bool {
+        let found = {
+            let Some(editor) = self.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()) else { return false };
+            if editor.block_mode_active() {
+                let Some(index) = editor.active_block() else { return false };
+                editor
+                    .block_editor_mut()
+                    .and_then(|blocks| blocks.block_mut(index))
+                    .is_some_and(lmdv_edit::select_next_occurrence)
+            } else {
+                lmdv_edit::select_next_occurrence(&mut editor.edit)
+            }
+        };
+        if found {
+            self.scroll_to_editor_selection(tx);
+        }
+        found
+    }
+
     /// Applies one format action and syncs the document.
     pub(crate) fn apply_format(&mut self, action: FormatAction) -> bool {
         let Some(tab) = self.active_tab_mut() else { return false };
@@ -886,38 +910,67 @@ impl WindowState {
 
     /// Runs the highlighted `/` row: replaces `/query` and inserts the block.
     /// The caret lands after the inserted text.
+    ///
+    /// Both changes are computed on a scratch field and applied as one
+    /// replacement, so a single undo restores the line exactly as it was
+    /// (OI-082, E-28).
     pub(crate) fn submit_slash_menu(&mut self, tx: &mut Tx) {
-        let Some((start, selected)) = self.slash_menu().map(|menu| (menu.start, menu.selected)) else { return };
+        let Some((range, selected)) =
+            self.slash_menu().map(|menu| (menu.start..menu.start + 1 + menu.query.len(), menu.selected))
+        else {
+            return;
+        };
         let items = self.slash_items();
         let Some(item) = items.get(selected).cloned() else { return };
-        let range = start..start + 1 + self.slash_menu().map_or(0, |menu| menu.query.len());
-        let before = {
-            let Some(tab) = self.active_tab_mut() else { return };
-            let Some(editor) = tab.view.editor.as_mut() else { return };
-            if editor.replace_range(range.clone(), "") {
-                editor.set_selection(range.start..range.start);
-                editor.text().to_owned()
-            } else {
-                return;
-            }
+        let Some(action) = SLASH_ACTIONS.iter().copied().find(|action| action.command_id() == item.command) else {
+            return;
         };
-        self.close_slash_menu();
-        self.editor_changed();
-        if !self.run_command(item.command, tx) {
+        let (before, after) = {
+            let Some(editor) = self.active_tab().and_then(|tab| tab.view.editor.as_ref()) else { return };
+            let before = editor.text().to_owned();
+            let end = range.end.min(before.len());
+            let start = range.start.min(end);
+            let mut scratch = TextEdit::new(before.clone());
+            scratch.set_selection(start, end);
+            scratch.insert("");
+            run_format(action, &mut scratch);
+            (before, scratch.text.clone())
+        };
+        if before == after {
+            self.close_slash_menu();
+            self.focus_editor_field(tx);
             return;
         }
-        let after = self
-            .active_tab()
-            .and_then(|tab| tab.view.editor.as_ref())
-            .map(|editor| editor.text().to_owned())
-            .unwrap_or_default();
-        let (_, _, new_end) = crate::editor::change_range(&before, &after);
-        if let Some(tab) = self.active_tab_mut()
-            && let Some(editor) = tab.view.editor.as_mut()
-        {
-            let end = new_end.min(editor.text().len());
-            editor.set_selection(end..end);
+        let (_, _, caret) = crate::editor::change_range(&before, &after);
+        let caret = caret.min(after.len());
+        let changed = {
+            let Some(editor) = self.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()) else { return };
+            if editor.block_mode_active() {
+                // The block journal rebuilds the layout as one structural step.
+                editor.replace_range(0..before.len(), &after)
+            } else {
+                // One Rune undo group: the `/query` deletion and the template
+                // are a single step, and undo restores the caret that was
+                // typing the query (not a whole-buffer selection).
+                let start = range.start.min(before.len());
+                let end = range.end.min(before.len());
+                editor.edit.undo_group(|edit| {
+                    edit.set_selection(start, end);
+                    edit.insert("");
+                    run_format(action, edit);
+                });
+                editor.note_edit();
+                true
+            }
+        };
+        if !changed {
+            return;
         }
+        if let Some(editor) = self.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()) {
+            editor.set_selection(caret..caret);
+        }
+        self.close_slash_menu();
+        self.editor_changed();
         self.focus_editor_field(tx);
     }
 
@@ -1105,6 +1158,9 @@ impl WindowState {
             self.open_goto_line(tx);
             return true;
         }
+        if event.is_command('d') && !event.mods.alt && !event.mods.shift {
+            return self.select_next_occurrence_cmd(tx);
+        }
         if event.key == Key::Function(3) {
             if event.mods.shift {
                 self.find_prev_cmd(tx);
@@ -1166,6 +1222,9 @@ impl WindowState {
             self.open_goto_line(tx);
             return true;
         }
+        if event.is_command('d') && !event.mods.alt && !event.mods.shift {
+            return self.select_next_occurrence_cmd(tx);
+        }
         if event.key == Key::Function(3) {
             if event.mods.shift {
                 self.find_prev_cmd(tx);
@@ -1190,6 +1249,7 @@ pub fn editor_keys() -> Vec<(String, String)> {
         (lmdv_i18n::t!("keys.findMatch").to_owned(), "F3 · Shift+F3".to_owned()),
         (lmdv_i18n::t!("keys.moveLine").to_owned(), "Alt+↑ · Alt+↓".to_owned()),
         (lmdv_i18n::t!("keys.dupLine").to_owned(), "Shift+Alt+↓".to_owned()),
+        (lmdv_i18n::t!("keys.nextOccurrence").to_owned(), "Ctrl+D".to_owned()),
         (lmdv_i18n::t!("cmd.deleteLine").to_owned(), "Ctrl+Shift+K".to_owned()),
         (lmdv_i18n::t!("cmd.comment").to_owned(), "Ctrl+/".to_owned()),
         (lmdv_i18n::t!("cm.gotoLine").to_owned(), "Ctrl+G · Ctrl+Alt+G".to_owned()),
@@ -1323,14 +1383,18 @@ fn plain_line_number(spec: &str) -> Option<usize> {
     spec.parse().ok()
 }
 
-/// Go-to-line for block mode: only plain numbers, mapped to the source.
+/// Go-to-line for block mode (E-31): the same `40`, `+N`, `-N`, `N%` and
+/// `line:col` grammar as the single field, mapped onto the whole source and
+/// then onto the block holding the target.
 fn goto_block_line(editor: &mut EditorSession, spec: &str) -> Option<usize> {
-    let number = plain_line_number(spec)?;
-    let target = number.saturating_sub(1);
-    let text = editor.text();
-    let start = text.split('\n').take(target).map(|line| line.len() + 1).sum::<usize>().min(text.len());
-    editor.set_selection(start..start);
-    Some(target)
+    let (line, byte) = {
+        let text = editor.text();
+        let start = editor.selection().start.min(text.len());
+        let current = text[..start].bytes().filter(|&byte| byte == b'\n').count();
+        lmdv_edit::goto_target_offset(text, spec, current)?
+    };
+    editor.set_selection(byte..byte);
+    Some(line)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

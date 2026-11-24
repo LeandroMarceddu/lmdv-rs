@@ -18,39 +18,38 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 223 done, 52 substitute, 40 partial, 9 missing, 18 n/a.
+**342 rows:** 242 done, 54 substitute, 23 partial, 5 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
-| Reading and viewer | 30 | 23 | 3 | 3 | 1 | 0 |
-| Tabs and windows | 35 | 22 | 8 | 3 | 2 | 0 |
-| Editor | 40 | 28 | 2 | 7 | 2 | 1 |
+| Reading and viewer | 30 | 26 | 3 | 0 | 1 | 0 |
+| Tabs and windows | 35 | 23 | 8 | 2 | 2 | 0 |
+| Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
-| Share, print and export | 16 | 9 | 1 | 5 | 1 | 0 |
+| Share, print and export | 16 | 10 | 2 | 4 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
-| Outline, section line and history | 15 | 11 | 2 | 2 | 0 | 0 |
+| Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
 | Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
 | Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
-| System, CLI and file integration | 27 | 14 | 5 | 0 | 1 | 7 |
+| System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
 | Window chrome | 10 | 2 | 3 | 1 | 0 | 4 |
 | Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
-| Help, start page, notices, rating | 13 | 8 | 0 | 4 | 0 | 1 |
-| Accessibility | 15 | 11 | 0 | 4 | 0 | 0 |
+| Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
+| Accessibility | 15 | 12 | 0 | 3 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **223** | **52** | **40** | **9** | **18** |
+| **All** | **342** | **242** | **54** | **23** | **5** | **18** |
 
-## P0 gaps (9)
+## P0 gaps (8)
 
 Priority-0 rows that are not yet done. The full evidence and the precise missing
 clause are in the area files.
 
-### T — Tabs and windows (3)
+### T — Tabs and windows (2)
 
 - **T-01** (partial) — The strip now passes the measured `viewport_width`, so tabs shrink toward the kit's 28 pt minimum before scrolling (`view.rs`, `tab_list` tests; `--tree` proof). Still partial: the kit has no…
 - **T-03** (partial) — Dirty shows the orange Attention dot; after a save the tab's leading slot becomes a check in the success colour for the existing 1.4 s flash (`window.rs`…
-- **T-26** (partial) — `TabView` keeps anchor, find, reader find, nav, fragment, outline filter, parsed model, editor session, find bar, slash menu, details and dirty (`window.rs:78-140`);…
 
 ### X — Share, print and export (1)
 

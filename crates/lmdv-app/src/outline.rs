@@ -25,6 +25,8 @@ struct Row {
     key: String,
     level: u8,
     text: String,
+    /// The heading's index in the document, for the filter cursor (O-05).
+    index: usize,
 }
 
 impl WindowState {
@@ -82,14 +84,21 @@ impl WindowState {
         if self.outline_filter.text != text {
             self.outline_filter.replace_text(text);
         }
+        // O-05: the cursor is the filter's, not the tab's; a switch starts it
+        // on the new tab's first visible row.
+        self.reset_outline_cursor();
     }
 
     /// Applies a typed filter to the active tab immediately (the view reads it).
+    ///
+    /// O-05: the first visible row becomes the keyboard cursor, so Enter jumps
+    /// where the filter points without a second key.
     pub(crate) fn outline_filter_changed(&mut self) {
         let text = self.outline_filter.text.clone();
         if let Some(tab) = self.active_tab_mut() {
             tab.view.toc_filter = text;
         }
+        self.reset_outline_cursor();
     }
 
     /// Clears the filter field and the active tab's filter.
@@ -98,11 +107,67 @@ impl WindowState {
         self.outline_filter_changed();
     }
 
-    /// The first heading that passes the active filter, for Enter in the field.
+    /// Puts the filter cursor on the first visible row, or drops it when the
+    /// filter is empty or the field is not drawn (O-05).
+    fn reset_outline_cursor(&mut self) {
+        let first = self
+            .active_tab()
+            .and_then(|tab| tab.view.reader.as_ref().map(|doc| (tab.view.toc_filter.clone(), doc)))
+            .filter(|(filter, doc)| cursor_eligible(filter, doc))
+            .and_then(|(filter, doc)| visible_heading_indices(doc, &filter).first().copied());
+        self.reading.outline_cursor.set(first);
+    }
+
+    /// `↑`/`↓` in the outline filter: moves the keyboard cursor among the
+    /// visible rows and keeps `Enter` on it (O-05).
+    ///
+    /// False when the field or the filter is absent, so the arrow keeps its
+    /// ordinary caret movement.
+    pub(crate) fn move_outline_cursor(&mut self, delta: isize) -> bool {
+        let Some(tab) = self.active_tab() else { return false };
+        let Some(doc) = tab.view.reader.as_ref() else { return false };
+        if !cursor_eligible(&tab.view.toc_filter, doc) || delta == 0 {
+            return false;
+        }
+        let visible = visible_heading_indices(doc, &tab.view.toc_filter);
+        let Some(last) = visible.len().checked_sub(1) else {
+            self.reading.outline_cursor.set(None);
+            return true;
+        };
+        let current = self.reading.outline_cursor.get().and_then(|index| visible.iter().position(|row| *row == index));
+        let next = match current {
+            // The first visible row is the implicit cursor after typing; Down
+            // steps off it, Up stays on it.
+            None if delta > 0 => 1.min(last),
+            None => 0,
+            Some(position) => (position as isize + delta).clamp(0, last as isize) as usize,
+        };
+        self.reading.outline_cursor.set(Some(visible[next]));
+        true
+    }
+
+    /// The heading `Enter` in the filter jumps to: the cursor's row, or the
+    /// first visible row when the cursor is not on one (O-05).
+    pub(crate) fn outline_cursor_heading_key(&self) -> Option<String> {
+        let tab = self.active_tab()?;
+        let doc = tab.view.reader.as_ref()?;
+        let visible = visible_heading_indices(doc, &tab.view.toc_filter);
+        let index = self
+            .reading
+            .outline_cursor
+            .get()
+            .filter(|index| visible.contains(index))
+            .or_else(|| visible.first().copied())?;
+        Some(lmdv_render::heading_key(index))
+    }
+
+    /// The first heading that passes the active filter, for tests of the
+    /// filter's threshold rule.
     ///
     /// Below [`OUTLINE_FILTER_MIN_HEADINGS`] the field is absent, so a filter
     /// left on the tab (a tab that lost headings, a transfer) is not applied:
     /// the first outline heading is the target.
+    #[cfg(test)]
     pub(crate) fn first_visible_heading_key(&self) -> Option<String> {
         let tab = self.active_tab()?;
         let doc = tab.view.reader.as_ref()?;
@@ -223,6 +288,27 @@ pub(crate) fn spy_heading(
     active.or_else(|| toc_headings(doc).next().map(|(index, _)| index))
 }
 
+/// The heading indices the outline draws, in order, for the active tab's
+/// filter (O-05).
+///
+/// The same 500-row cap and accent-insensitive lowercase substring rule the
+/// pane uses, so the keyboard cursor can never point at a row that is not on
+/// screen.
+fn visible_heading_indices(doc: &lmdv_md::MdDoc, filter: &str) -> Vec<usize> {
+    let needle = filter.trim().to_lowercase();
+    toc_headings(doc)
+        .take(OUTLINE_MAX_ROWS)
+        .filter(|(_, heading)| needle.is_empty() || heading.text.to_lowercase().contains(&needle))
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Whether the filter field is drawn with text in it: the only state where the
+/// outline has a keyboard cursor (O-05).
+fn cursor_eligible(filter: &str, doc: &lmdv_md::MdDoc) -> bool {
+    toc_headings(doc).count() >= OUTLINE_FILTER_MIN_HEADINGS && !filter.trim().is_empty()
+}
+
 /// The inspector's content for the active tab.
 pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
     // The closed pane is still built (then clipped), so skip the layout reads
@@ -245,6 +331,7 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
             key: lmdv_render::heading_key(index),
             level: heading.level,
             text: heading.text.clone(),
+            index,
         })
         .collect();
     let total = rows.len();
@@ -258,6 +345,20 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
         .take(OUTLINE_MAX_ROWS)
         .filter(|row| needle.is_empty() || row.text.to_lowercase().contains(&needle))
         .collect();
+    // O-05: the first visible row is the cursor after typing; the stored index
+    // survives the frame, and a cursor that the new filter hid falls back to
+    // the first visible row. Without a filter text there is no cursor, so the
+    // scroll spy's active heading keeps the selection.
+    let cursor = if filtered && !needle.is_empty() {
+        state
+            .reading
+            .outline_cursor
+            .get()
+            .filter(|index| visible.iter().any(|row| row.index == *index))
+            .or_else(|| visible.first().map(|row| row.index))
+    } else {
+        None
+    };
 
     let mut sidebar = Sidebar::new()
         .label(lmdv_i18n::t!("pane.outline"))
@@ -274,16 +375,21 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
                 .on_edit(|state: &mut WindowState| &mut state.outline_filter)
                 .on_change(|state: &mut WindowState, _: &mut Tx| state.outline_filter_changed())
                 .on_key(|state: &mut WindowState, event: &rune::KeyEvent, tx: &mut Tx| {
-                    // O-05: Esc clears and leaves the field.
-                    if event.key != rune::Key::Escape {
-                        return false;
+                    // O-05: Esc clears and leaves the field; the arrows move the
+                    // filter's keyboard cursor among the visible rows.
+                    match event.key {
+                        rune::Key::Escape => {
+                            state.clear_outline_filter();
+                            tx.blur();
+                            true
+                        }
+                        rune::Key::Down => state.move_outline_cursor(1),
+                        rune::Key::Up => state.move_outline_cursor(-1),
+                        _ => false,
                     }
-                    state.clear_outline_filter();
-                    tx.blur();
-                    true
                 })
                 .on_submit(|state: &mut WindowState, tx: &mut Tx| {
-                    if let Some(key) = state.first_visible_heading_key() {
+                    if let Some(key) = state.outline_cursor_heading_key() {
                         state.jump_to_heading(&key, tx);
                     }
                 })
@@ -310,12 +416,23 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
     }
 
     for row in visible {
-        let selected = active.as_deref() == Some(row.key.as_str());
+        let selected = match cursor {
+            Some(cursor) => row.index == cursor,
+            None => active.as_deref() == Some(row.key.as_str()),
+        };
         let key = row.key.clone();
-        let sidebar_row = SidebarRow::new(row.text.clone())
+        let mut row_builder = SidebarRow::new(row.text.clone())
             .depth(row.level.saturating_sub(1))
             .selected(selected)
-            .on_select(move |state: &mut WindowState, tx: &mut Tx| state.jump_to_heading(&key, tx))
+            .on_select(move |state: &mut WindowState, tx: &mut Tx| state.jump_to_heading(&key, tx));
+        if cursor.is_some() {
+            // O-05: with the keyboard cursor on, the filter field steers the
+            // list (↑/↓, Enter), so a row never takes the Tab stop or the
+            // keyboard; a press still selects and keeps the field focused.
+            // An empty filter leaves the rows ordinary Tab stops.
+            row_builder = row_builder.select_only();
+        }
+        let sidebar_row = row_builder
             .build(kit)
             .key(format!("outline-{}", row.key))
             // OI-017: the row is a button (the original draws `<button>`s under
@@ -501,6 +618,71 @@ mod tests {
         assert_eq!(runtime.state.outline_filter.text, "Beta 5");
         let elements = runtime.elements();
         assert_eq!(row_labels(&elements), ["Beta 5"], "each tab keeps its own filter");
+    }
+
+    #[test]
+    fn the_filter_cursor_starts_on_the_first_visible_row_and_the_arrows_move_it() {
+        let temp = TempDir::new().unwrap();
+        let mut state = outlined(&temp, 10, "Section");
+        state.outline_filter.replace_text("Section");
+        state.outline_filter_changed();
+        assert_eq!(state.reading.outline_cursor.get(), Some(0), "O-05: typing puts the cursor on the first visible");
+
+        assert!(state.move_outline_cursor(1));
+        assert_eq!(state.reading.outline_cursor.get(), Some(1), "↓ steps to the second row");
+        assert!(state.move_outline_cursor(-1));
+        assert_eq!(state.reading.outline_cursor.get(), Some(0), "↑ comes back");
+        assert!(state.move_outline_cursor(-1));
+        assert_eq!(state.reading.outline_cursor.get(), Some(0), "the first row clamps");
+        for _ in 0..40 {
+            state.move_outline_cursor(1);
+        }
+        assert_eq!(state.reading.outline_cursor.get(), Some(9), "the last visible row clamps");
+
+        // The drawn selection follows the cursor, not the scroll spy's heading.
+        let elements = draw(state);
+        let row = |key: &str| {
+            elements.iter().find(|element| element.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("{key}"))
+        };
+        assert!(row("outline-h9").item_selected, "the cursor row is selected");
+        assert!(!row("outline-h0").item_selected, "the first row is not while the cursor is elsewhere");
+    }
+
+    #[test]
+    fn enter_in_the_filter_jumps_to_the_cursor_row() {
+        let temp = TempDir::new().unwrap();
+        let mut state = outlined(&temp, 10, "Section");
+        state.outline_filter.replace_text("Section");
+        state.outline_filter_changed();
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.update(|_, tx| tx.focus("outline-filter", false));
+        runtime.frame(0.0);
+        runtime.key(rune::KeyEvent { key: rune::Key::Down, mods: rune::Mods::default() });
+        runtime.frame(0.0);
+        assert_eq!(runtime.state.reading.outline_cursor.get(), Some(1), "↓ moved the cursor");
+        runtime.key(rune::KeyEvent { key: rune::Key::Enter, mods: rune::Mods::default() });
+        for _ in 0..4 {
+            runtime.frame(1.0 / 60.0);
+        }
+        let doc = runtime.state.active_reader().expect("a model");
+        assert_eq!(
+            runtime.state.pinned_heading(&doc).as_deref(),
+            Some("h1"),
+            "O-05: Enter jumps to the cursor row, not the first visible heading"
+        );
+    }
+
+    #[test]
+    fn clearing_the_filter_drops_the_cursor_back_to_the_scroll_spy() {
+        let temp = TempDir::new().unwrap();
+        let mut state = outlined(&temp, 10, "Section");
+        state.outline_filter.replace_text("Section 4");
+        state.outline_filter_changed();
+        assert_eq!(state.reading.outline_cursor.get(), Some(4));
+        state.clear_outline_filter();
+        assert_eq!(state.reading.outline_cursor.get(), None, "an empty filter has no keyboard cursor");
+        assert!(!state.move_outline_cursor(1), "and the arrows stay the field's own");
     }
 
     #[test]

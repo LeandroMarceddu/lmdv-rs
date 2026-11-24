@@ -7,7 +7,8 @@
 //! convenience for the app; [`export_rich_html`] is the inline-styled clipboard
 //! fragment for the Share menu's rich copy (X-02), [`export_rich_fragment`] the
 //! same fragment for a selected top-level block range (X-03), and
-//! [`table_tsv`] the spreadsheet copy of a table (X-16).
+//! [`table_tsv`] the spreadsheet copy of a table (X-16). [`raster::svg_to_png`]
+//! turns an SVG picture into a PNG for the preview's copy and save actions.
 //!
 //! The exporter performs no file I/O and no network access. The application
 //! supplies picture bytes through [`AssetResolver`] and font bytes through
@@ -47,6 +48,7 @@ mod labels;
 mod link;
 mod model;
 mod pdf;
+pub mod raster;
 mod rich;
 mod tsv;
 
@@ -60,7 +62,8 @@ pub use tsv::table_tsv;
 ///
 /// The preview's copy/save actions need PNG bytes; the app has no image
 /// decoder of its own, and this crate already reads pictures for the exporters.
-/// Call it on a worker. `None` when the bytes do not decode.
+/// An SVG goes through [`raster::svg_to_png`] instead. Call it on a worker.
+/// `None` when the bytes do not decode.
 pub fn raster_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     use image::ImageEncoder;
     let image = image::load_from_memory(bytes).ok()?.to_rgba8();

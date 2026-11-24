@@ -176,6 +176,7 @@ fn preview_panel(preview: &TablePreview, kit: &Kit, width: f32, height: f32, sor
         .single_line()
         .label(lmdv_i18n::t!("zoom.filter"))
         .placeholder(lmdv_i18n::t!("zoom.filter"), c.text_faint)
+        .shortcut_hint("Control+F")
         .w(240.0)
         .on_edit(|state: &mut WindowState| state.active_table_filter_edit())
         .on_input_change(|state: &mut WindowState, tx| state.table_filter_changed(tx))

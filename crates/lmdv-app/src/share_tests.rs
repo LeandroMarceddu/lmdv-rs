@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use lmdv_core::{Document, DocumentKey, ReaderFont, SourceBuffer};
-use rune::{ElementInfo, Tx};
+use rune::{ElementInfo, Key, KeyEvent, Mods, Tx};
 use tempfile::TempDir;
 
 use super::*;
@@ -352,6 +352,31 @@ fn a_missing_parent_folder_is_an_error_not_a_created_folder() {
 }
 
 #[test]
+fn one_export_policy_covers_html_docx_and_pdf() {
+    // X-15's spec lets PDF create its parent folders; this app deliberately
+    // uses the stricter HTML/DOCX rule for every format (see `export_io`'s
+    // header). A save dialog never asks for a missing folder, so the only
+    // arguments are the headless seam and Print…'s temp, and neither should
+    // create a tree behind the user's back.
+    let temp = TempDir::new().unwrap();
+    for name in ["notes.html", "notes.docx", "notes.pdf"] {
+        // A new file in an existing folder is accepted for every format.
+        let target = temp.path().join(name);
+        let written = crate::export_io::write_export(&target, b"payload")
+            .unwrap_or_else(|error| panic!("{name} in an existing folder: {error}"));
+        assert_eq!(std::fs::read(&written).unwrap(), b"payload");
+        std::fs::remove_file(&written).unwrap();
+
+        // A missing parent is refused, and remains missing.
+        let missing = temp.path().join("missing").join(name);
+        let error = crate::export_io::write_export(&missing, b"payload").expect_err(name);
+        assert!(error.contains("cannot be used"), "{name}: {error}");
+        assert!(!missing.exists(), "{name}: no file");
+        assert!(!temp.path().join("missing").exists(), "{name}: X-15's stricter rule never creates the folder");
+    }
+}
+
+#[test]
 fn export_names_follow_the_source_stem_and_the_pasted_title() {
     let temp = TempDir::new().unwrap();
     let shared = test_support::shared(&temp);
@@ -560,6 +585,114 @@ fn rich_copy_puts_markdown_and_html_on_the_clipboard() {
 }
 
 #[test]
+fn a_selection_copy_writes_the_selected_blocks_as_rich_text() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let markdown = "# Title\n\nOpening **bold** and [link](https://example.com).\n";
+    state.open_synthetic("Notes", markdown);
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.on_key = Some(crate::app::on_key);
+    runtime.frame(0.0);
+
+    // “Opening bold and link” inside the paragraph; the heading and the
+    // final period stay out of the plain form.
+    runtime.update(|_, tx| tx.select_text("b1-text-0", 0..21));
+    runtime.frame(0.0);
+    runtime.key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ctrl: true, ..Mods::default() } });
+    wait_for_clipboard(&mut runtime, &board);
+
+    let copied = board.content().expect("clipboard content");
+    assert_eq!(copied.text(), "Opening bold and link", "R-26: the plain form is the selection as drawn");
+    let html = copied.html().expect("the HTML form");
+    assert!(html.starts_with("<div role=\"document\" style="), "X-03: no document label: {html:.120}");
+    assert!(html.contains("<strong style=\"font-weight:600\">bold</strong>"), "{html}");
+    assert!(
+        html.contains("<a href=\"https://example.com\" style=\"color:#0969da;text-decoration:underline\">link</a>"),
+        "{html}"
+    );
+    assert!(html.contains("Opening"), "the selected block is copied");
+    assert!(!html.contains("Title"), "the unselected heading is not");
+    assert!(!html.contains("<style") && !html.contains("<script"), "inline styles only");
+
+    assert!(!runtime.state.share.copy_busy());
+    assert!(!runtime.state.share.flashing(), "Ctrl+C is not the Share action (X-13)");
+    assert!(runtime.state.ui.notice.is_none(), "an ordinary copy is quiet");
+}
+
+#[test]
+fn copy_without_a_selection_does_not_start_a_rich_job() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Title\n\nOpening paragraph.\n");
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.on_key = Some(crate::app::on_key);
+    runtime.frame(0.0);
+
+    // R-26: only a selection copies as rich text; Cmd/Ctrl+C with none is
+    // Rune's own path and must not start a job.
+    runtime.key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ctrl: true, ..Mods::default() } });
+    runtime.frame(0.0);
+    assert_eq!(board.content(), None, "nothing was selected and nothing was copied");
+    assert!(!runtime.state.share.copy_busy(), "no copy job was started");
+}
+
+#[test]
+fn a_selection_with_no_export_block_falls_back_to_plain_text() {
+    // Defensive X-03 path: a source range that touches no export block (an
+    // empty range, a separator) builds no fragment, and the clipboard carries
+    // the selection as plain text instead.
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Title\n\nOpening paragraph.\n");
+    let document = state.active_tab().and_then(|tab| tab.document()).cloned().expect("a document");
+    let spec = crate::share::RichCopySpec {
+        doc: document.id,
+        source: document.snapshot(),
+        revision: document.revision(),
+        model: None,
+        title_base: "Notes".to_owned(),
+        options: lmdv_export::ExportOptions { lang: "en".to_owned(), ..lmdv_export::ExportOptions::default() },
+        selection: Some(crate::share::SelectionCopy { plain: "No block".to_owned(), source: 0..0 }),
+    };
+    let copy = crate::export_io::run_rich_copy(&spec).expect("the worker");
+    assert!(copy.html.is_empty(), "no export block: no HTML form");
+    assert_eq!(copy.markdown, "No block", "the plain selection rides along");
+
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+        state.share.copy_in_flight = Some(RichCopyJob { job: 77, doc: document.id, selection: true });
+        assert!(state.handle_rich_copied(77, document.id, Ok(copy.clone()), tx));
+    });
+    runtime.frame(0.0);
+    let copied = board.content().expect("the fallback reached the clipboard");
+    assert!(copied.html().is_none(), "plain only");
+    assert_eq!(copied.text(), "No block");
+    assert!(runtime.state.ui.notice.is_none(), "the fallback is quiet");
+}
+
+#[test]
+fn ctrl_shift_c_still_copies_the_whole_document() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let markdown = "# Title\n\nOpening paragraph.\n";
+    state.open_synthetic("Notes", markdown);
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.on_key = Some(crate::app::on_key);
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.select_text("b1-text-0", 0..7));
+    runtime.frame(0.0);
+    runtime
+        .key(KeyEvent { key: Key::Command('c'), mods: Mods { cmd: true, ctrl: true, shift: true, ..Mods::default() } });
+    wait_for_clipboard(&mut runtime, &board);
+    let copied = board.content().expect("clipboard content");
+    assert_eq!(copied.text(), markdown, "Ctrl+Shift+C keeps the whole-document rich copy (X-02)");
+    assert!(
+        copied.html().is_some_and(|html| html.contains("aria-label=\"Title\"")),
+        "named after the document's first h1"
+    );
+}
+
+#[test]
 fn rich_copy_resolves_local_pictures_through_the_path_policy() {
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("docs");
@@ -590,7 +723,7 @@ fn a_failed_rich_copy_shows_an_error_notice_and_no_flash() {
     let mut state = window(&temp);
     state.open_synthetic("Notes", "# Notes\n");
     let doc = state.active_document_id().expect("document");
-    state.share.copy_in_flight = Some(RichCopyJob { job: 41, doc });
+    state.share.copy_in_flight = Some(RichCopyJob { job: 41, doc, selection: false });
     let mut tx = Tx::default();
 
     assert!(state.handle_rich_copied(41, doc, Err("the worker stopped".to_owned()), &mut tx));

@@ -139,6 +139,20 @@ pub struct PdfExport {
     pub break_on_h1: bool,
 }
 
+/// One selection to copy instead of the whole document (X-03).
+///
+/// The reader's selection is mapped to the document source bytes of the
+/// top-level blocks it touches; the worker turns them into export blocks.
+/// [`plain`](Self::plain) is the selection exactly as drawn, the plain-text
+/// fallback a target without HTML paste support receives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionCopy {
+    /// The selected text as drawn, the plain clipboard form.
+    pub plain: String,
+    /// The selected top-level blocks' source bytes in [`RichCopySpec::source`].
+    pub source: std::ops::Range<usize>,
+}
+
 /// Everything one rich-copy job needs. It is built on the UI thread from a
 /// snapshot and moved to the worker; the Markdown source is the plain form of
 /// the clipboard content.
@@ -159,6 +173,8 @@ pub struct RichCopySpec {
     pub title_base: String,
     /// Title, language, source path and content flags.
     pub options: ExportOptions,
+    /// A selection range instead of the whole document (X-03).
+    pub selection: Option<SelectionCopy>,
 }
 
 /// A finished rich copy: the HTML fragment and its plain fallback.
@@ -177,6 +193,8 @@ pub struct RichCopyJob {
     pub job: JobId,
     /// The document it was started from.
     pub doc: DocumentId,
+    /// The job copies one selection rather than the whole document (X-03).
+    pub selection: bool,
 }
 
 /// Everything one export job needs. It is built on the UI thread from a
@@ -409,6 +427,24 @@ impl WindowState {
     /// clipboard describes the buffer the user sees, never the last parsed model
     /// (OI-103).
     pub(crate) fn start_rich_copy(&mut self) {
+        self.start_rich_copy_range(None);
+    }
+
+    /// Starts a rich copy of one article selection (R-26/X-03).
+    ///
+    /// `plain` is the selection exactly as drawn; `source` the document bytes of
+    /// the top-level blocks it touches. The worker maps them onto the export
+    /// model's blocks and writes one clipboard fragment. A refused start (a
+    /// copy already in flight) shows the existing notice and writes nothing, so
+    /// a later completion never overwrites the user's own plain copy.
+    pub(crate) fn start_rich_selection_copy(&mut self, plain: String, source: std::ops::Range<usize>) {
+        if plain.trim().is_empty() {
+            return;
+        }
+        self.start_rich_copy_range(Some(SelectionCopy { plain, source }));
+    }
+
+    fn start_rich_copy_range(&mut self, selection: Option<SelectionCopy>) {
         if self.share.copy_busy() {
             self.notice(lmdv_i18n::t!("msg.copyBusy"));
             return;
@@ -433,11 +469,12 @@ impl WindowState {
             front_matter: false,
             source_path: document.key.borrow().path().map(Path::to_path_buf),
         };
-        let spec = RichCopySpec { doc: document.id, source, revision, model, title_base, options };
+        let spec = RichCopySpec { doc: document.id, source, revision, model, title_base, options, selection };
         self.share.flash_until = None;
         self.share.flash_armed = false;
+        let selection = spec.selection.is_some();
         let job = self.shared().jobs().copy_rich(self.worker().clone(), spec);
-        self.share.copy_in_flight = Some(RichCopyJob { job, doc: document.id });
+        self.share.copy_in_flight = Some(RichCopyJob { job, doc: document.id, selection });
     }
 
     /// Commits an active editor's field text into the shared buffer when the
@@ -480,9 +517,23 @@ impl WindowState {
         if pending.job != job || pending.doc != doc {
             return false;
         }
+        let selection = pending.selection;
         self.share.copy_in_flight = None;
         match result {
             Ok(copy) => {
+                if selection {
+                    // X-03: the edit-menu copy is quiet, like any other copy;
+                    // the Share flash and its document-wide notice belong to
+                    // the Share menu's whole-document action. A selection that
+                    // touches no export block (the generated TOC, a separator)
+                    // has no HTML form, so it falls back to plain text.
+                    if copy.html.is_empty() {
+                        tx.copy(copy.markdown);
+                    } else {
+                        tx.copy_rich(ClipboardContent::new(copy.markdown).with_html(copy.html));
+                    }
+                    return true;
+                }
                 self.share.flash_until = Some(self.ui.last_now + SHARE_FLASH_SECONDS);
                 self.share.flash_armed = false;
                 tx.copy_rich(ClipboardContent::new(copy.markdown).with_html(copy.html));

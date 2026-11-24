@@ -145,6 +145,7 @@
   "keys.findReplace": "Suchen / ersetzen",
   "keys.moveLine": "Zeile verschieben",
   "keys.dupLine": "Zeile duplizieren",
+  "keys.nextOccurrence": "Nächstes Vorkommen auswählen",
   "keys.slash": "Blockmenü am Zeilenanfang",
   "keys.reload": "Datei neu vom Datenträger laden",
   "keys.newWindow": "Neues Fenster",

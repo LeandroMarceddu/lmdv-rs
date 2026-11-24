@@ -13,7 +13,7 @@ use lmdv_core::{
 };
 use lmdv_io::Launch;
 use lmdv_md::MdDoc;
-use lmdv_render::{BlockWire, LinkWire, TaskControlWire};
+use lmdv_render::{AreaWire, BlockWire, LinkWire, TaskControlWire};
 use rune::{TextEdit, Tx, Waker};
 use rune_kit::shell::{PaneState, TabDragState};
 
@@ -31,8 +31,8 @@ use crate::windows::{CloseDoc, WindowKind, WindowOpenRequest, WindowSnapshot, cl
 pub const NOTICE_SECONDS: f64 = 4.0;
 
 /// How long a sticky notice stays: until the document changes, a save, a
-/// reload or an explicit dismiss (R-29). `f64::INFINITY` keeps the ordinary
-/// deadline arithmetic honest.
+/// reload, an explicit dismiss, or its tab closing (R-29/T-26).
+/// `f64::INFINITY` keeps the ordinary deadline arithmetic honest.
 pub const NOTICE_STICKY_SECONDS: f64 = f64::INFINITY;
 
 /// A tab's rendering mode. `Editor` is legal only while the tab holds the
@@ -78,8 +78,8 @@ impl TabSource {
 /// Per-tab view state that must survive tab switches.
 ///
 /// Scroll, `--line`, outline visibility, the outline filter, the reading find
-/// bar and the Back/Forward places are per tab; editor state joins them in edit
-/// mode.
+/// bar, the Back/Forward places, the tab's own sticky notice and the scheme its
+/// last frame drew with are per tab; editor state joins them in edit mode.
 #[derive(Clone, Debug, Default)]
 pub struct TabView {
     pub mode: Mode,
@@ -95,6 +95,15 @@ pub struct TabView {
     /// A `file.md#section` link's heading, applied once the document is parsed.
     pub fragment: Option<String>,
     pub toc_filter: String,
+    /// The tab's own sticky notice (T-26/R-29): an empty/error fact about this
+    /// document stays with it while another tab is in front and comes back
+    /// with it. Transient confirmations are the window's and never reach here.
+    pub notice: Option<Notice>,
+    /// The scheme this tab's last frame was rendered with (T-26). The theme is
+    /// a live window preference (J-01), so the front tab records the current
+    /// scheme at every render; a hidden tab keeps the one it last drew with
+    /// until it is shown again.
+    pub scheme: Cell<Option<AppearanceKey>>,
     /// The last good parsed model: the reader draws it while a newer revision
     /// is parsed on a worker (M-34 keeps the previous article on failure).
     pub reader: Option<Arc<MdDoc>>,
@@ -529,6 +538,9 @@ pub struct WindowState {
     task_control_wire: TaskControlWire,
     /// One block handler per window: preview double-click and context menu.
     block_wire: BlockWire,
+    /// One image-map `<area>` handler per window (L-12), attached to viewer
+    /// articles only.
+    area_wire: AreaWire,
     /// In-flight viewer task writes and their stale guards.
     pub(crate) tasks: crate::tasks::TaskState,
     /// Edit mode, save/conflict state, drafts and the file watcher's decisions.
@@ -654,6 +666,10 @@ impl WindowState {
             link_mods: rune::Mods::default(),
             task_control_wire: crate::tasks::task_control_wire(),
             block_wire: crate::preview_nav::block_wire(),
+            area_wire: Rc::new(|element: rune::El, area: &lmdv_render::AreaRef| {
+                let dest = area.dest.clone();
+                element.on_press_tx(move |state: &mut WindowState, tx: &mut Tx| state.open_link(&dest, tx))
+            }),
             tasks: crate::tasks::TaskState::default(),
             editor: crate::editor::EditorState::default(),
             share: crate::share::ShareState::default(),
@@ -783,8 +799,16 @@ impl WindowState {
 
     /// The reading appearance for this frame, cached until the scheme or a
     /// reader preference changes (OI-019).
+    ///
+    /// T-26: the front tab records the scheme it is drawn with, so switching
+    /// back to it restores the look it last had. The theme itself stays a live
+    /// window preference (J-01): a tab shown after a theme change draws the new
+    /// scheme and records that one.
     pub(crate) fn current_appearance(&self, system_dark: bool) -> Rc<Appearance> {
         let key = AppearanceKey::for_prefs(&self.shared.prefs(), system_dark);
+        if let Some(tab) = self.tabs.get(self.active) {
+            tab.view.scheme.set(Some(key));
+        }
         let mut slot = self.appearance.borrow_mut();
         if let Some((cached, look)) = slot.as_ref()
             && *cached == key
@@ -835,6 +859,11 @@ impl WindowState {
     /// The shared block wire: E-35's double press and E-04's context menu.
     pub(crate) fn cached_block_wire(&self) -> &BlockWire {
         &self.block_wire
+    }
+
+    /// The one image-map handler this window's article uses (L-12).
+    pub(crate) fn area_wire(&self) -> AreaWire {
+        self.area_wire.clone()
     }
 
     /// The document's folder, for relative links and images.
@@ -912,6 +941,8 @@ impl WindowState {
             self.flush_active_draft();
             self.capture_active_position();
             self.save_outline_filter();
+            // T-26: the document being left keeps its own sticky notice.
+            self.stash_active_notice();
             self.lightbox = None;
         }
         let id = self.allocate_tab();
@@ -921,6 +952,7 @@ impl WindowState {
             Some(active) => self.active = if index <= active { active + 1 } else { active },
             None => {
                 self.active = index;
+                self.load_active_notice();
                 self.note_active_tab();
                 self.sync_editor_panes();
                 self.begin_restore(&ScrollAnchor::top());
@@ -1172,6 +1204,8 @@ impl WindowState {
         if !replacing_start && !keep_front {
             self.capture_active_position();
             self.save_outline_filter();
+            // T-26: the tab being left keeps its own sticky notice.
+            self.stash_active_notice();
         }
         if replacing_start {
             self.tabs[self.active] = tab;
@@ -1191,9 +1225,9 @@ impl WindowState {
             self.shared.watch_path(&path);
         }
         if !keep_front {
-            // R-29: a document coming forward ends the previous document's
-            // notice, sticky or not.
-            self.ui.notice = None;
+            // T-26: a new document coming forward shows its own notice (usually
+            // none), never the one the previous document left on screen.
+            self.load_active_notice();
             self.note_active_tab();
             self.sync_editor_panes();
             self.begin_restore(&anchor);
@@ -1272,9 +1306,10 @@ impl WindowState {
             self.export_holds_tab();
             return false;
         }
-        // R-29: a notice belongs to the document it was raised for; another
-        // document coming forward removes it, sticky or not.
-        self.ui.notice = None;
+        // T-26/R-29: the notice on screen belongs to the tab it was raised for.
+        // A sticky one waits on that tab and comes back with it; the tab coming
+        // forward shows its own, if it has one.
+        self.stash_active_notice();
         self.flush_active_draft();
         self.capture_active_position();
         self.save_outline_filter();
@@ -1286,6 +1321,7 @@ impl WindowState {
         self.tables.target = None;
         self.lightbox = None;
         self.active = index;
+        self.load_active_notice();
         self.reset_scroll_sync();
         // A tab coming forward settles like an edit-mode entry: its first
         // scroll report must not move the preview.
@@ -1414,10 +1450,14 @@ impl WindowState {
             self.active = index.min(self.tabs.len().saturating_sub(1));
         }
         if closing_active {
+            // T-26: the closed tab's notice goes with it; the neighbour coming
+            // forward brings its own.
+            self.ui.notice = None;
             self.sync_editor_panes();
             let anchor = self.active_tab().map(|tab| tab.view.anchor.clone()).unwrap_or_default();
             self.begin_restore(&anchor);
             self.load_outline_filter();
+            self.load_active_notice();
         }
         self.editor.format_menu = None;
         self.note_active_tab();
@@ -1664,9 +1704,10 @@ impl WindowState {
     }
 
     /// A notice that does not expire on its own (R-29): an empty/error state
-    /// stays readable until another document comes forward, a save, a reload,
-    /// or the user's dismiss. Use it for a fact about the document on screen,
-    /// never for a confirmation.
+    /// stays readable until its document is saved or reloaded, the user
+    /// dismisses it, or its tab closes (T-26). Another document coming forward
+    /// leaves it on the tab it describes and restores it on the way back. Use
+    /// it for a fact about the document on screen, never for a confirmation.
     pub fn sticky_notice(&mut self, text: impl Into<String>, kind: NoticeKind) {
         self.show_notice(text.into(), kind, None, NOTICE_STICKY_SECONDS);
     }
@@ -1676,15 +1717,78 @@ impl WindowState {
     /// Every notice is numbered here (H-07): the bar alternates an invisible
     /// mark on the number, so the same message twice still changes what a
     /// screen reader is told.
+    ///
+    /// T-26: a sticky notice also becomes the front tab's own, so another tab
+    /// coming forward leaves it behind and switching back restores it. A
+    /// confirmation or a settings message is transient and belongs to the
+    /// window's front tab only.
     pub(crate) fn show_notice(&mut self, text: String, kind: NoticeKind, action: Option<NoticeAction>, seconds: f64) {
         self.ui.notice_seq = self.ui.notice_seq.wrapping_add(1);
         let deadline = if seconds.is_finite() { self.ui.last_now + seconds } else { f64::INFINITY };
-        self.ui.notice = Some(Notice { text, deadline, action, kind, seq: self.ui.notice_seq });
+        let notice = Notice { text, deadline, action, kind, seq: self.ui.notice_seq };
+        if notice.is_sticky()
+            && let Some(tab) = self.tabs.get_mut(self.active)
+        {
+            tab.view.notice = Some(notice.clone());
+        }
+        self.ui.notice = Some(notice);
     }
 
-    /// Dismisses the current notice.
+    /// A sticky notice about `doc` (T-26): when that document is not the front
+    /// tab, the notice waits on its tab and is shown when it comes forward, so
+    /// a failed background load never puts its words over another document.
+    pub(crate) fn sticky_notice_for_document(&mut self, doc: DocumentId, text: impl Into<String>, kind: NoticeKind) {
+        let text = text.into();
+        if self.active_document_id() == Some(doc) {
+            self.sticky_notice(text, kind);
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.document_id() == Some(doc)) else { return };
+        self.ui.notice_seq = self.ui.notice_seq.wrapping_add(1);
+        tab.view.notice = Some(Notice { text, deadline: f64::INFINITY, action: None, kind, seq: self.ui.notice_seq });
+    }
+
+    /// Moves the front tab's visible notice onto the tab before another one
+    /// comes forward (T-26). Only a sticky notice is kept: a confirmation has
+    /// done its work and does not come back on a later switch.
+    pub(crate) fn stash_active_notice(&mut self) {
+        let Some(notice) = self.ui.notice.take() else { return };
+        if !notice.is_sticky() {
+            return;
+        }
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.view.notice = Some(notice);
+        }
+    }
+
+    /// Shows the front tab's own sticky notice, if it has one (T-26).
+    pub(crate) fn load_active_notice(&mut self) {
+        self.ui.notice = self.tabs.get(self.active).and_then(|tab| tab.view.notice.clone());
+    }
+
+    /// Ends the sticky notice a document event makes stale (R-29) on the tabs
+    /// of those documents, and on the window when one of them is in front. A
+    /// dirty document's save or reload never silences another tab's error.
+    fn clear_sticky_notice_for(&mut self, docs: &[DocumentId]) {
+        let front_affected = self.active_tab().and_then(Tab::document_id).is_some_and(|doc| docs.contains(&doc));
+        if front_affected && self.ui.notice.as_ref().is_some_and(Notice::is_sticky) {
+            self.ui.notice = None;
+        }
+        for tab in &mut self.tabs {
+            if tab.document_id().is_some_and(|doc| docs.contains(&doc))
+                && tab.view.notice.as_ref().is_some_and(Notice::is_sticky)
+            {
+                tab.view.notice = None;
+            }
+        }
+    }
+
+    /// Dismisses the current notice, including the front tab's own copy.
     pub fn dismiss_notice(&mut self) {
         self.ui.notice = None;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.view.notice = None;
+        }
     }
 
     /// T-03: keeps the strip's post-save check in step with the editor's saved
@@ -1704,11 +1808,6 @@ impl WindowState {
             self.saved_flash_docs.clear();
             return true;
         }
-        // R-29: a save is a document event: a sticky empty/error notice gives
-        // way to the save's own transient “Saved”.
-        if self.ui.notice.as_ref().is_some_and(Notice::is_sticky) {
-            self.ui.notice = None;
-        }
         let mut docs = BTreeSet::new();
         for tab in &self.tabs {
             let Some(document) = tab.document() else { continue };
@@ -1724,6 +1823,9 @@ impl WindowState {
         {
             docs.insert(doc);
         }
+        // R-29: a save is a document event: the saved document's sticky
+        // empty/error notice gives way to its own transient “Saved” (T-26).
+        self.clear_sticky_notice_for(&docs.iter().copied().collect::<Vec<_>>());
         self.saved_flash_docs = docs;
         true
     }
@@ -1770,6 +1872,13 @@ impl WindowState {
         }
         changed |= self.reap_transfers();
         changed |= self.pump_timers(now);
+        // H-02: the start page drops recents whose file is gone when it is
+        // drawn, not only when `recents.json` is loaded. The sweep is throttled
+        // and only runs while the start page is in front; a headless gate never
+        // rewrites the user's recents.
+        if !self.shared.is_headless() && self.active_tab().is_some_and(Tab::is_start) {
+            changed |= self.shared.prune_dead_recents(self.ui.now_unix_ms);
+        }
         // R-29: an ordinary notice names its own wake, so it disappears on
         // time even when nothing else changes; a sticky one waits for the
         // document or the user.
@@ -2016,7 +2125,11 @@ impl WindowState {
                         if !travel {
                             // R-29: the document's error card stays behind its
                             // sticky notice until another document comes forward.
-                            self.sticky_notice(
+                            // T-26: the notice belongs to that document's tab,
+                            // so a failed background load does not speak over
+                            // the document in front.
+                            self.sticky_notice_for_document(
+                                doc,
                                 lmdv_i18n::t!("msg.openFailed", "name" => name, "err" => error),
                                 NoticeKind::Error,
                             );
@@ -2178,10 +2291,9 @@ impl WindowState {
     /// revision baseline change. The last good model stays on screen until the
     /// parse for the new revision lands.
     fn reset_views_after_load(&mut self, doc: DocumentId) {
-        // R-29: a reload is a document event; a sticky empty/error notice goes.
-        if self.ui.notice.as_ref().is_some_and(Notice::is_sticky) {
-            self.ui.notice = None;
-        }
+        // R-29: a reload is a document event; the reloaded document's sticky
+        // empty/error notice goes from its tab and from the window (T-26).
+        self.clear_sticky_notice_for(std::slice::from_ref(&doc));
         let Some(document) = self.shared.docs().get(doc) else { return };
         let text = document.text().text().to_owned();
         let eol = document.text().eol();
@@ -2769,6 +2881,9 @@ mod tests {
     use super::*;
     use crate::reader::ScrollSnapshot;
     use crate::test_support;
+    use crate::view::view;
+    use lmdv_core::Place;
+    use rune::{Env, Runtime};
     use tempfile::TempDir;
 
     fn window(temp: &TempDir) -> WindowState {
@@ -3720,5 +3835,386 @@ mod tests {
         state.dismiss_notice();
         state.poll(0.1, &mut tx);
         assert!(state.ui.notice.is_none(), "OI-073: the watcher failure is not repeated");
+    }
+
+    // ---- T-26: per-tab state ---------------------------------------------
+
+    #[test]
+    fn a_sticky_notice_stays_with_its_tab_and_comes_back_with_it() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let first = state.open_synthetic("First", "# First\n");
+        state.sticky_notice("Not found: deleted.md", NoticeKind::Error);
+        assert!(state.tab(first).expect("the first tab").view.notice.is_some(), "the tab keeps its own copy");
+
+        let second = state.open_synthetic("Second", "# Second\n");
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(second));
+        assert!(state.ui.notice.is_none(), "T-26: the second tab does not inherit the first one's notice");
+        assert!(state.tab(second).expect("the second tab").view.notice.is_none());
+        assert!(state.tab(first).expect("the first tab").view.notice.is_some(), "the notice waits on its own tab");
+
+        assert!(state.activate_tab(first));
+        let notice = state.ui.notice.as_ref().expect("T-26: the first tab's notice is restored");
+        assert!(notice.text.contains("deleted.md"), "{}", notice.text);
+        assert_eq!(notice.kind, NoticeKind::Error);
+        assert!(notice.is_sticky(), "it is the same sticky notice, not a new one");
+
+        // Ctrl+T puts a fresh start page in front: it wears no notice, and the
+        // document keeps its own for the way back.
+        state.new_start_tab();
+        assert!(state.ui.notice.is_none(), "a new start page does not inherit the document's notice");
+        assert!(state.tab(first).expect("the first tab").view.notice.is_some());
+        assert!(state.activate_tab(first));
+        assert!(state.ui.notice.is_some(), "the document's notice returns with its tab");
+
+        // Dismissing it ends the tab's copy too: a later switch does not undo it.
+        state.dismiss_notice();
+        assert!(state.tab(first).expect("the first tab").view.notice.is_none());
+        state.activate_tab(second);
+        state.activate_tab(first);
+        assert!(state.ui.notice.is_none(), "a dismissed notice never comes back");
+    }
+
+    #[test]
+    fn an_ordinary_notice_does_not_follow_its_tab_back() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let first = state.open_synthetic("First", "# First\n");
+        state.notice("Path copied to the clipboard.");
+        assert_eq!(state.ui.notice.as_ref().map(|notice| notice.kind), Some(NoticeKind::Success));
+
+        state.open_synthetic("Second", "# Second\n");
+        assert!(state.ui.notice.is_none(), "another tab does not show the first one's confirmation");
+        state.activate_tab(first);
+        assert!(state.ui.notice.is_none(), "T-26 keeps sticky state only: a confirmation is spent");
+        assert!(state.tab(first).expect("the first tab").view.notice.is_none());
+    }
+
+    #[test]
+    fn a_save_clears_the_tabs_sticky_notice_for_good() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let tab = state.open_synthetic("Notes", "# Notes\n");
+        state.sticky_notice("Not found: deleted.md", NoticeKind::Error);
+
+        // A save completion arms the flash in a later poll; the sticky goes and
+        // must not return when the tab is switched away and back.
+        let before = state.editor.saved_flash_until;
+        state.editor.saved_flash_until = Some(10.0);
+        state.track_saved_flash(before, &[]);
+        assert!(state.ui.notice.is_none(), "R-29: a save clears the sticky notice");
+        assert!(state.tab(tab).expect("the tab").view.notice.is_none(), "and its per-tab copy");
+
+        let other = state.open_synthetic("Other", "# Other\n");
+        state.activate_tab(tab);
+        assert!(state.ui.notice.is_none(), "the saved document's tab no longer carries it");
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(tab));
+        assert!(state.tab(other).is_some_and(|tab| tab.view.notice.is_none()));
+    }
+
+    #[test]
+    fn a_failed_background_load_keeps_its_notice_on_that_documents_tab() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let prior = state.open_synthetic("Prior", "# Prior\n");
+
+        // A background open of a missing file: its load fails while the first
+        // tab stays in front, so the notice must not be spoken over it.
+        let missing = temp.path().join("deleted.md");
+        let failed = state.open_path_background(missing);
+        poll_until(&mut state, "the background failure", |state| {
+            state
+                .tab(failed)
+                .and_then(Tab::document)
+                .is_some_and(|doc| matches!(*doc.status.borrow(), DocStatus::Error(_)))
+        });
+
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(prior), "the first tab stayed in front");
+        assert!(state.ui.notice.is_none(), "T-26: the failed background tab's notice is not the front tab's");
+        let stored = state.tab(failed).and_then(|tab| tab.view.notice.as_ref()).expect("the notice waits on its tab");
+        assert!(stored.text.contains("deleted.md"), "{}", stored.text);
+        assert!(stored.is_sticky());
+
+        assert!(state.activate_tab(failed));
+        assert!(
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("deleted.md")),
+            "bringing the failed tab forward shows its error notice with its card"
+        );
+    }
+
+    #[test]
+    fn each_tab_keeps_the_scheme_its_last_frame_was_rendered_with() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let first = state.open_synthetic("First", "# First\n");
+
+        state.current_appearance(false);
+        let light = AppearanceKey::for_prefs(&shared.prefs(), false);
+        assert_eq!(state.tab(first).expect("the first tab").view.scheme.get(), Some(light));
+
+        let second = state.open_synthetic("Second", "# Second\n");
+        assert_eq!(
+            state.tab(second).expect("the second tab").view.scheme.get(),
+            None,
+            "a tab that has not drawn yet has no scheme of its own"
+        );
+        state.current_appearance(true);
+        let dark = AppearanceKey::for_prefs(&shared.prefs(), true);
+        assert_eq!(state.tab(second).expect("the second tab").view.scheme.get(), Some(dark));
+        assert_eq!(
+            state.tab(first).expect("the first tab").view.scheme.get(),
+            Some(light),
+            "T-26: a hidden tab keeps the scheme it last drew with"
+        );
+
+        // Switching back renders the scheme it had and records it again.
+        state.activate_tab(first);
+        state.current_appearance(false);
+        assert_eq!(state.tab(first).expect("the first tab").view.scheme.get(), Some(light));
+
+        // A theme change is live: the next render records the new scheme on the
+        // tab that is shown, even though the hidden one still has the old key.
+        state.activate_tab(second);
+        let mut prefs = shared.prefs().clone();
+        prefs.theme = lmdv_core::ThemePref::Dark;
+        assert!(shared.set_prefs(prefs), "the theme changed");
+        state.current_appearance(false);
+        let dark_theme = AppearanceKey::for_prefs(&shared.prefs(), false);
+        assert_eq!(state.tab(second).expect("the second tab").view.scheme.get(), Some(dark_theme));
+        assert_eq!(
+            state.tab(first).expect("the first tab").view.scheme.get(),
+            Some(light),
+            "the hidden tab keeps its old record until it is drawn again"
+        );
+        state.activate_tab(first);
+        state.current_appearance(false);
+        assert_eq!(
+            state.tab(first).expect("the first tab").view.scheme.get(),
+            Some(dark_theme),
+            "J-01: showing the tab draws the live theme and records it"
+        );
+    }
+
+    // ---- H-02: dead recents at display time ------------------------------
+
+    #[test]
+    fn dead_recents_disappear_when_the_start_page_is_drawn() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let alive = temp.path().join("alive.md");
+        std::fs::write(&alive, "# Alive\n").unwrap();
+        let dead = temp.path().join("deleted.md");
+        shared.preview_recents([(alive.clone(), 1_000), (dead.clone(), 2_000)]);
+        let mut state = WindowState::new(shared.clone());
+        assert!(state.active_tab().is_some_and(Tab::is_start));
+
+        let mut tx = Tx::default();
+        state.poll(0.0, &mut tx);
+
+        let recents = shared.recents();
+        assert_eq!(recents.len(), 1, "H-02: the vanished file is removed when the start page is drawn");
+        assert_eq!(recents[0].path, alive, "the living recent stays");
+        drop(recents);
+
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let elements = runtime.elements();
+        assert!(elements.iter().any(|element| element.key.as_deref() == Some("recent-0")), "the living row draws");
+        assert!(
+            !elements.iter().any(|element| element.text.as_deref().is_some_and(|text| text.contains("deleted.md"))),
+            "the dead row is not drawn"
+        );
+    }
+
+    // ---- H-08: the tab's save confirmation and its announcement -----------
+
+    #[test]
+    fn a_save_marks_the_tab_and_announces_it_as_a_polite_status() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("saved.md");
+        std::fs::write(&path, "# Title\n\nBody\n").unwrap();
+        let mut state = window(&temp);
+        state.open_path(path.clone());
+        poll_until(&mut state, "the document and its parse", |state| {
+            loaded_active(state).is_some() && state.active_tab().is_some_and(|tab| tab.view.reader.is_some())
+        });
+        let tab = state.active_tab().map(|tab| tab.id).expect("a document tab");
+
+        let mut tx = Tx::default();
+        assert!(state.enter_editor(None, &mut tx), "edit mode");
+        state.active_editor_edit().set_caret(0);
+        state.active_editor_edit().insert("New ");
+        state.editor_changed();
+        state.request_save_active(&mut tx);
+        poll_until(&mut state, "the save", |state| state.saved_flash() && state.ui.notice.is_some());
+
+        // H-08/T-03: the check is the tab's, and the notice bar is the
+        // announcement: a polite status carrying the save's own words.
+        assert!(state.tab(tab).is_some_and(|tab| state.tab_shows_saved_check(tab)), "the tab shows the saved check");
+        let notice = state.ui.notice.clone().expect("the saved announcement");
+        assert_eq!(notice.text, lmdv_i18n::t!("msg.saved"));
+        assert_eq!(notice.kind, NoticeKind::Success, "a save is a success, not an error alert");
+
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let elements = runtime.elements();
+        assert!(
+            elements.iter().any(|element| element.key.as_deref() == Some(&format!("tab-saved-{}", tab_key(tab)))),
+            "H-08: the check draws in the tab's leading slot, not only in the toolbar"
+        );
+        let tree = runtime.accessibility_json();
+        let status = a11y_node(&tree, "notice-text").expect("the notice's accessible text");
+        assert_eq!(status.get("role").and_then(|value| value.as_str()), Some("status"));
+        assert!(
+            a11y_states(status).contains(&"live-polite"),
+            "H-08: “Saved” is announced by the window's polite live region: {:?}",
+            a11y_states(status)
+        );
+        let saved = lmdv_i18n::t!("msg.saved");
+        assert_eq!(status.get("name").and_then(|value| value.as_str()), Some(saved));
+    }
+
+    // ---- H-09: the error card, its reading time and the prior document ----
+
+    #[test]
+    fn an_unreadable_document_shows_the_error_card_and_no_reading_time() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let missing = temp.path().join("unreadable.md");
+        let tab = state.open_path(missing.clone());
+        poll_until(&mut state, "the failed load", |state| {
+            state
+                .tab(tab)
+                .and_then(Tab::document)
+                .is_some_and(|doc| matches!(*doc.status.borrow(), DocStatus::Error(_)))
+        });
+
+        let shown = state.tab(tab).expect("the error tab");
+        assert!(shown.view.reading.is_none(), "H-09: an unreadable document has no reading time");
+        let title = shown.title();
+
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let elements = runtime.elements();
+        let card = by_key(&elements, "document-error");
+        assert_eq!(card.role, "group", "H-09: the article shows a centered error card");
+        let [cx0, cy0, cw, ch] = card.rect;
+        let in_card = |element: &&rune::ElementInfo| {
+            let [x, y, w, h] = element.rect;
+            x >= cx0 - 0.5 && y >= cy0 - 0.5 && x + w <= cx0 + cw + 0.5 && y + h <= cy0 + ch + 0.5
+        };
+        let text: Vec<&str> = elements.iter().filter(in_card).filter_map(|element| element.text.as_deref()).collect();
+        assert!(text.iter().any(|line| line.contains("unreadable.md")), "the card names the document: {text:?}");
+        assert!(
+            text.iter().any(|line| *line == lmdv_i18n::t!("msg.openFailedCard")),
+            "the card says the document could not be opened: {text:?}"
+        );
+        assert!(by_key(&elements, "retry-open").label.is_some(), "the card offers Try again");
+        assert!(by_key(&elements, "close-error-tab").label.is_some(), "and Close tab");
+        assert!(
+            !elements.iter().any(|element| element.key.as_deref() == Some("start-page-scroll")),
+            "H-09: a failed open never falls back to the home page"
+        );
+        let title_path = format!("t-{}/pill/title/label", tab_key(tab));
+        let tab_title = elements
+            .iter()
+            .find(|element| element.path.ends_with(&title_path))
+            .unwrap_or_else(|| panic!("no title element at {title_path}"));
+        assert_eq!(tab_title.text.as_deref(), Some(title.as_str()), "the tab shows its name only, no time");
+    }
+
+    #[test]
+    fn a_failed_back_move_keeps_the_previous_document_and_says_not_found() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let path = temp.path().join("prior.md");
+        std::fs::write(&path, "# Prior\n\nBody\n").unwrap();
+        let mut state = WindowState::new(shared);
+        state.open_path(path.clone());
+        poll_until(&mut state, "the prior document", |state| loaded_active(state).is_some());
+        let prior = state.active_tab().map(|tab| tab.id).expect("the prior tab");
+
+        let missing = temp.path().join("deleted.md");
+        if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == prior) {
+            tab.view.nav.record(Place::new(missing.to_string_lossy(), ScrollAnchor::top()));
+        }
+        let mut tx = Tx::default();
+        state.nav_back(&mut tx);
+        poll_until(&mut state, "the not-found notice", |state| {
+            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("Not found"))
+        });
+
+        // H-09: with a prior document, the dead target is a notice over that
+        // document, never home and never a leftover error tab.
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(prior), "the previous document stays in front");
+        assert_eq!(state.tabs().len(), 1, "the failed move's error tab is closed again");
+        let notice = state.ui.notice.clone().expect("the not-found notice");
+        assert!(notice.text.contains("deleted.md"), "{}", notice.text);
+        assert!(!notice.is_sticky(), "a failed move is a transient notice, not the tab's error state");
+
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let elements = runtime.elements();
+        assert!(
+            !elements.iter().any(|element| element.key.as_deref() == Some("document-error")),
+            "the prior document's article is still the subject"
+        );
+        assert!(
+            !elements.iter().any(|element| element.key.as_deref() == Some("start-page-scroll")),
+            "H-09: no home page replaces the prior document"
+        );
+        assert!(
+            elements.iter().any(|element| element.key.as_deref() == Some("notice-text")
+                && element.text.as_deref().is_some_and(|text| text.contains("deleted.md"))),
+            "the notice says what was not found"
+        );
+    }
+
+    // ---- H-13: one version on the start page and in Help ------------------
+
+    #[test]
+    fn the_start_page_and_help_show_the_same_version() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_help(HelpView::Full);
+
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+        runtime.frame(0.0);
+        let elements = runtime.elements();
+
+        let expected = lmdv_i18n::t!("start.version", "version" => env!("CARGO_PKG_VERSION"));
+        assert!(expected.contains(env!("CARGO_PKG_VERSION")), "the label carries the package version");
+        let start = by_key(&elements, "start-version");
+        let header = by_key(&elements, crate::help::HELP_VERSION);
+        let about = by_key(&elements, crate::help::HELP_ABOUT_VERSION);
+        assert_eq!(start.text.as_deref(), Some(expected.as_str()), "H-13: the start-page footer");
+        assert_eq!(header.text.as_deref(), Some(expected.as_str()), "H-13: the Help header");
+        assert_eq!(about.text.as_deref(), Some(expected.as_str()), "H-13: the Help About row");
+        assert_eq!(start.text, header.text);
+        assert_eq!(header.text, about.text);
+    }
+
+    /// The accessibility node keyed `key`, depth first.
+    fn a11y_node<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+        if node.get("key").and_then(|value| value.as_str()) == Some(key) {
+            return Some(node);
+        }
+        node.get("children")?.as_array()?.iter().find_map(|child| a11y_node(child, key))
+    }
+
+    /// The state names on an accessibility node (`live-polite`, `focused`, …).
+    fn a11y_states(node: &serde_json::Value) -> Vec<&str> {
+        node.get("states")
+            .and_then(|value| value.as_array())
+            .map(|states| states.iter().filter_map(|state| state.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    fn by_key<'a>(elements: &'a [rune::ElementInfo], key: &str) -> &'a rune::ElementInfo {
+        elements
+            .iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("no element keyed {key}"))
     }
 }

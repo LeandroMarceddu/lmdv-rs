@@ -61,6 +61,9 @@
 //!   video/audio are placeholder cards with `media:<src>` (M-27/M-28 gap).
 //! * **Link policy and opening** — the tree only reports destinations; the app
 //!   resolves relative paths, fragments and refused network paths (M-30/M-31).
+//!   An HTML image map's `<area>` hit boxes come through
+//!   [`RenderWires::area`] (L-12); SVG `<a>`/`xlink:href` links are ordinary
+//!   link runs inside the SVG group.
 //! * **`<details>` bodies after a blank line** — `lmdv-md` ends the HTML block at
 //!   the blank line, so those blocks are ordinary document blocks outside the
 //!   card; the HTML inside one block is a real card (M-22 partial).
@@ -275,6 +278,49 @@ pub type TableWire = Rc<dyn Fn(El, &TableRef) -> El>;
 /// lightbox reads (V-01–V-10); the element is the media as drawn, so the wire
 /// only adds the app's open handler.
 pub type MediaWire = Rc<dyn Fn(El, &MediaRef) -> El>;
+/// Wraps one image-map `<area>` with the [`AreaRef`] the app's link handler
+/// reads (L-12). The element is the transparent hit box drawn over the picture;
+/// the wire adds the press that opens the area's destination.
+pub type AreaWire = Rc<dyn Fn(El, &AreaRef) -> El>;
+
+/// How an image map's `<area>` describes its region (L-12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AreaShape {
+    /// `shape="rect"`: `coords="x1,y1,x2,y2"`.
+    Rect,
+    /// `shape="circle"`: `coords="x,y,r"`.
+    Circle,
+    /// `shape="poly"`: `coords="x1,y1,x2,y2,…"`.
+    Poly,
+    /// `shape="default"` or no shape: the whole picture.
+    Default,
+}
+
+/// One `<area>` of an HTML image map, for the app's link handler (L-12).
+///
+/// The element handed to [`AreaWire`] is the area's **bounding box** drawn over
+/// the picture: `rect` and `default` are exact, while `circle` and `poly` use
+/// the box around their points because Rune has no shaped hit region. The
+/// [`coords`](Self::coords) and [`shape`](Self::shape) are the source's own, so
+/// a future precise hit test has the geometry. `source` is in the image's
+/// intrinsic pixels; [`hit_box`](Self::hit_box) is the drawn rectangle in points.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AreaRef {
+    /// The top-level block's stable key (`b{index}`).
+    pub block: String,
+    /// The `<map name>` the area belongs to.
+    pub map: String,
+    /// The destination as written (a script URL never gets this far).
+    pub dest: String,
+    /// The area's alternative text, or its destination when it has none.
+    pub alt: String,
+    /// The area's shape.
+    pub shape: AreaShape,
+    /// The source `coords`, in the image's intrinsic pixels.
+    pub coords: Vec<f32>,
+    /// The drawn hit box, relative to the picture's top-left, in points.
+    pub hit_box: [f32; 4],
+}
 
 /// What kind of media a [`MediaRef`] names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -388,8 +434,12 @@ pub struct TableRef {
 /// matches it to one of these to find the word's offset in [`BlockRef::text`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewText {
-    /// The text element's own key (`text`, `h3`), when the renderer gave it one.
+    /// The text element's own key. A heading keeps its `h{n}`; every other
+    /// text gets a window-unique, block-scoped key (`b{i}-text-{index}`), so
+    /// two identical keyless texts stay distinct (E-35).
     pub key: Option<String>,
+    /// The text's position among the block's drawn texts, in reading order.
+    pub index: usize,
     /// The text's byte range in [`BlockRef::text`].
     pub range: std::ops::Range<usize>,
     /// The keys the renderer created between the block and this text, outermost
@@ -438,6 +488,8 @@ pub struct RenderWires {
     pub table: Option<TableWire>,
     /// The media wrapper that hands the app each image or diagram (V-01).
     pub media: Option<MediaWire>,
+    /// The image-map wrapper that hands the app each `<area>` hit box (L-12).
+    pub area: Option<AreaWire>,
 }
 
 impl std::fmt::Debug for RenderWires {
@@ -449,6 +501,7 @@ impl std::fmt::Debug for RenderWires {
             .field("block", &self.block.as_ref().map(|_| "…"))
             .field("table", &self.table.as_ref().map(|_| "…"))
             .field("media", &self.media.as_ref().map(|_| "…"))
+            .field("area", &self.area.as_ref().map(|_| "…"))
             .finish()
     }
 }
@@ -482,6 +535,20 @@ impl DetailsState for AllClosed {
     }
 }
 
+/// A source-keyed store of rendered Mermaid cards (E-06).
+///
+/// The renderer has no cache of its own: it asks the store for a diagram's
+/// source, and only when the store misses does it call
+/// `rune_kit::mermaid::render`. The app keys the store by the document's
+/// appearance and clears it when that changes, so typing prose between two
+/// diagrams neither rebuilds them nor makes them flash.
+pub trait MermaidCache {
+    /// The card last rendered for `source`, if any.
+    fn get(&self, source: &str) -> Option<El>;
+    /// Remembers `diagram` for `source`, evicting the oldest entry when full.
+    fn put(&self, source: &str, diagram: El);
+}
+
 /// Everything the renderer needs beyond the document and theme.
 pub struct RenderOptions<'a> {
     /// The reading column's content width in points, used for wide tables and
@@ -496,6 +563,9 @@ pub struct RenderOptions<'a> {
     pub images: &'a dyn ImageResolver,
     /// App handlers (links, task checkboxes, block source mapping).
     pub wires: RenderWires,
+    /// E-06: rendered diagrams reused while their source and theme are
+    /// unchanged; `None` renders every diagram on every build.
+    pub mermaid: Option<&'a dyn MermaidCache>,
     /// Open `<details>` cards.
     pub details: Option<&'a dyn DetailsState>,
     /// Whether prose is selectable and copies as drawn (R-25, R-26).
@@ -530,6 +600,7 @@ impl<'a> RenderOptions<'a> {
             math,
             images,
             wires: RenderWires::default(),
+            mermaid: None,
             details: None,
             selectable: true,
             sticky_tables: true,
@@ -569,6 +640,25 @@ impl<'a> RenderOptions<'a> {
     /// (V-01–V-10), with its block, source, alt and natural size.
     pub fn media_wire(mut self, wire: MediaWire) -> Self {
         self.wires.media = Some(wire);
+        self
+    }
+
+    /// Attaches the app's handler to each image-map `<area>` hit box (L-12).
+    ///
+    /// Without the wire no hit box is drawn, so a read-only tree (export, a
+    /// headless gate) is unchanged by image maps.
+    pub fn area_wire(mut self, wire: AreaWire) -> Self {
+        self.wires.area = Some(wire);
+        self
+    }
+
+    /// Attaches the app's rendered-diagram cache (E-06).
+    ///
+    /// A source the cache already holds draws its saved card; the first sight
+    /// of a source renders once and stores the card. The app clears the cache
+    /// when the theme changes, so a stale colour never survives.
+    pub fn mermaid(mut self, cache: &'a dyn MermaidCache) -> Self {
+        self.mermaid = Some(cache);
         self
     }
 
@@ -620,6 +710,7 @@ pub fn render(doc: &MdDoc, theme: &DocTheme, opts: &RenderOptions<'_>) -> El {
         list_depth: std::cell::Cell::new(0),
         code_base: std::cell::Cell::new(0),
         preview: std::cell::RefCell::new(PreviewBlock::default()),
+        html_maps: std::cell::RefCell::new((usize::MAX, Vec::new())),
     };
     r.article()
 }

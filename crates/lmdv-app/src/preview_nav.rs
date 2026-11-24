@@ -29,9 +29,10 @@ use std::rc::Rc;
 
 use lmdv_md::Block;
 use lmdv_render::{BlockRef, BlockWire, PreviewText};
-use rune::{El, PointerPress, SelectedText, TextSelection, Tx};
+use rune::{El, PointerEvent, PointerPress, SelectedText, TextSelection, Tx};
 
 use crate::edit_ui::SOURCE_FIELD_KEY;
+use crate::editor::scroll_sync::line_from_preview_y;
 use crate::window::{Mode, WindowState};
 
 /// The context menu's anchor element key.
@@ -51,6 +52,7 @@ pub fn block_wire() -> BlockWire {
     Rc::new(|element: El, block: &BlockRef| {
         let shared = Rc::new(block.clone());
         let pressed = shared.clone();
+        let hovered = shared.clone();
         let menu = shared;
         element
             // Focusable but out of the Tab order: a click puts the keyboard on
@@ -59,9 +61,21 @@ pub fn block_wire() -> BlockWire {
             .focusable(true)
             .tab_index(-1)
             .no_focus_ring()
+            // E-35: the padding fallback needs the press point, and Rune's
+            // double-press handler does not carry one; the pointer's last move
+            // over the block is the same point for a click.
+            .on_pointer_move_local(move |state: &mut WindowState, point: PointerEvent, _: &mut Tx| {
+                state.editor.preview_point.set(Some([point.window_x, point.window_y]));
+                state.editor.preview_block.set(block_index(&hovered.key));
+            })
             .on_double_press_tx(move |state: &mut WindowState, tx: &mut Tx| state.preview_double_press(&pressed, tx))
             .on_secondary_press(move |state: &mut WindowState, point, _| state.show_block_menu(&menu, point))
     })
+}
+
+/// The index in a block's `b{index}` stable key.
+fn block_index(key: &str) -> Option<usize> {
+    key.strip_prefix('b').and_then(|number| number.parse().ok())
 }
 
 /// A double-click while reading only selects a word (R-27); while editing it
@@ -72,23 +86,56 @@ impl WindowState {
         if !self.active_tab().is_some_and(|tab| tab.view.mode == Mode::Editor) {
             return;
         }
-        // Rune's own word selection is the hit signal. No selection inside this
-        // block means the press landed on something that is not its text — a
-        // link, a task box, a picture, a diagram, or the block's padding — so
-        // those keep their own clicks.
-        let Some(selection) = tx.text_selection() else { return };
-        if !selection_in_block(block, selection) {
-            return;
-        }
-        let found = locate_word(block, selection);
-        let (word, before) = match found {
+        // Rune's own word selection is the hit signal. A selected word inside
+        // the block names the caret exactly; anything else — no selection, a
+        // task box, a link, a picture, a diagram — goes through the guarded
+        // padding fallback, which only moves the caret when the press missed
+        // every drawn text box.
+        let selection = tx.text_selection();
+        let found = selection
+            .filter(|selection| selection_in_block(block, selection))
+            .and_then(|selection| locate_word(block, selection));
+        match found {
             Some((offset, word)) => {
                 let offset = offset.min(block.text.len());
-                (Some(word), Some(block.text[..offset].to_owned()))
+                let before = block.text[..offset].to_owned();
+                self.place_caret_in_block(block, Some(&word), Some(&before), tx);
             }
-            None => (None, None),
+            // E-35's preview-height caret for the block's padding.
+            None => {
+                self.place_caret_on_preview_padding(block, tx);
+            }
+        }
+    }
+
+    /// E-35: a double-click on a block's padding lands on the source line at
+    /// the click's fraction of the block's drawn height.
+    ///
+    /// The measured text boxes keep a press on a link, task box, picture or
+    /// diagram from moving the caret; without a measurement (the first frame)
+    /// nothing happens rather than guessing.
+    pub(crate) fn place_caret_on_preview_padding(&mut self, block: &BlockRef, tx: &mut Tx) -> bool {
+        let Some(point) = self.editor.preview_point.get() else { return false };
+        let index = block_index(&block.key).or_else(|| self.editor.preview_block.get());
+        let Some(index) = index else { return false };
+        let line = {
+            let geometry = self.editor.preview.borrow();
+            let Some(measured) = geometry.blocks.iter().find(|candidate| candidate.index == index) else {
+                return false;
+            };
+            if measured.text_boxes.is_empty() {
+                return false;
+            }
+            let content_y = point[1] + self.scroll_snapshot().offset;
+            let inside_text =
+                measured.text_boxes.iter().any(|box_| content_y >= box_[1] && content_y <= box_[1] + box_[3]);
+            if inside_text {
+                return false;
+            }
+            line_from_preview_y(measured.top, measured.height, block.line, block.end_line, content_y)
         };
-        self.place_caret_in_block(block, word.as_deref(), before.as_deref(), tx);
+        let Some(range) = self.source_range_for_line(block, line) else { return false };
+        self.apply_source_selection(range, tx)
     }
 
     /// `on_secondary_press` of a preview block: remember where the menu opens.
@@ -199,6 +246,21 @@ impl WindowState {
             Some(hit) => Some(start + hit.start..start + hit.end),
             None => Some(start..start),
         }
+    }
+
+    /// The byte at the start of `line`, clamped into `block`'s own source span
+    /// (E-35's padding→line fallback).
+    fn source_range_for_line(&self, block: &BlockRef, line: usize) -> Option<Range<usize>> {
+        let editor = self.active_tab()?.view.editor.as_ref()?;
+        let text = editor.text();
+        let mut start = line_start(text, block.line);
+        let end = line_start(text, block.end_line.max(block.line + 1)).max(start).min(text.len());
+        start = start.min(end);
+        if block.code && is_fence_opener(text.get(start..).unwrap_or("").lines().next().unwrap_or("")) {
+            start = line_start(text, block.line + 1).min(end);
+        }
+        let byte = line_start(text, line).clamp(start, end);
+        Some(byte..byte)
     }
 
     /// Applies `range` to the active editor, focusing and revealing it.
@@ -552,7 +614,12 @@ mod tests {
     }
 
     fn preview(key: Option<&str>, range: Range<usize>, path: &[&str]) -> PreviewText {
-        PreviewText { key: key.map(str::to_owned), range, path: path.iter().map(|key| (*key).to_owned()).collect() }
+        PreviewText {
+            key: key.map(str::to_owned),
+            index: 0,
+            range,
+            path: path.iter().map(|key| (*key).to_owned()).collect(),
+        }
     }
 
     #[test]

@@ -381,6 +381,51 @@ fn mermaid_draws_or_falls_back_to_its_source() {
 }
 
 #[test]
+fn an_unchanged_diagram_is_reused_by_its_source() {
+    use std::cell::RefCell;
+
+    use crate::MermaidCache;
+
+    struct CountingCache {
+        hits: Cell<usize>,
+        misses: Cell<usize>,
+        entries: RefCell<Vec<(String, rune::El)>>,
+    }
+
+    impl MermaidCache for CountingCache {
+        fn get(&self, source: &str) -> Option<rune::El> {
+            let found = self.entries.borrow().iter().find(|(key, _)| key == source).map(|(_, card)| card.clone());
+            if found.is_some() {
+                self.hits.set(self.hits.get() + 1);
+            } else {
+                self.misses.set(self.misses.get() + 1);
+            }
+            found
+        }
+
+        fn put(&self, source: &str, diagram: rune::El) {
+            self.entries.borrow_mut().push((source.to_owned(), diagram));
+        }
+    }
+
+    let source = "Before\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter\n";
+    let doc = lmdv_md::parse(source);
+    let theme = DocTheme::neutral(false);
+    let style = MarkdownStyle::neutral(false);
+    let cache = CountingCache { hits: Cell::new(0), misses: Cell::new(0), entries: RefCell::new(Vec::new()) };
+    let opts = RenderOptions::new(760.0, &style, &NoMath, &NoImages).mermaid(&cache);
+
+    let _first = render(&doc, &theme, &opts);
+    assert_eq!(cache.misses.get(), 1, "one render for the source");
+    assert_eq!(cache.entries.borrow().len(), 1);
+
+    let _second = render(&doc, &theme, &opts);
+    assert_eq!(cache.misses.get(), 1, "the second build never renders the same source again");
+    assert!(cache.hits.get() >= 1, "it came from the cache");
+    assert_eq!(cache.entries.borrow().len(), 1, "no duplicate entry");
+}
+
+#[test]
 fn a_memoised_neighbour_does_not_shift_copy_destinations() {
     // M-13: a rebuilt block is numbered from the model, so blocks a memo
     // reused (here, one whose source the highlight does not overlap) cannot
@@ -910,7 +955,8 @@ fn the_block_wire_sees_every_blocks_key_line_and_drawn_text() {
     assert_eq!((first.line, first.end_line), (0, 1));
     assert_eq!(first.text.trim_end(), "First paragraph.");
     assert_eq!(first.texts.len(), 1);
-    assert_eq!(first.texts[0].key.as_deref(), Some("text"));
+    assert_eq!(first.texts[0].key.as_deref(), Some("b0-text-0"), "a keyless identity, unique in the window");
+    assert_eq!(first.texts[0].index, 0);
     assert_eq!(&first.text[first.texts[0].range.clone()], "First paragraph.");
 
     // A list: one drawn text per item, each carrying the item key the app can
@@ -928,6 +974,57 @@ fn the_block_wire_sees_every_blocks_key_line_and_drawn_text() {
     assert!(code.code && code.key == "b2");
     assert_eq!((code.line, code.end_line), (5, 8));
     assert!(code.text.trim_end().ends_with("fn main() {}"), "{:?}", code.text);
+}
+
+#[test]
+fn two_identical_keyless_texts_keep_distinct_stable_identities() {
+    use std::cell::RefCell;
+
+    use crate::{BlockRef, BlockWire, RenderWires};
+
+    struct Wired {
+        doc: MdDoc,
+        theme: DocTheme,
+        style: MarkdownStyle,
+        wire: BlockWire,
+    }
+
+    fn render_once(doc: &MdDoc) -> Vec<BlockRef> {
+        let seen: Rc<RefCell<Vec<BlockRef>>> = Rc::new(RefCell::new(Vec::new()));
+        let sink = seen.clone();
+        let wire: BlockWire = Rc::new(move |element, block: &BlockRef| {
+            sink.borrow_mut().push(block.clone());
+            element
+        });
+        let scene =
+            Wired { doc: doc.clone(), theme: DocTheme::neutral(false), style: MarkdownStyle::neutral(false), wire };
+        let mut runtime = rune::Runtime::new(
+            scene,
+            |scene: &Wired, _: &mut Cx<Wired>| {
+                let mut opts = RenderOptions::new(760.0, &scene.style, &NoMath, &NoImages);
+                opts.wires = RenderWires { block: Some(scene.wire.clone()), ..RenderWires::default() };
+                render(&scene.doc, &scene.theme, &opts)
+            },
+            (760.0, 900.0),
+            rune::Env::new(true, 1.0),
+        );
+        runtime.frame(0.0);
+        seen.borrow().clone()
+    }
+
+    // List items are drawn without a text key; two with the same words must
+    // still map to different elements, and to the same elements on a rebuild.
+    let doc = lmdv_md::parse("- same\n- same\n");
+    let first = render_once(&doc);
+    let keys: Vec<(String, usize)> =
+        first[0].texts.iter().map(|text| (text.key.clone().unwrap_or_default(), text.index)).collect();
+    assert_eq!(keys, [("b0-text-0".to_owned(), 0), ("b0-text-1".to_owned(), 1)]);
+    assert_eq!(first[0].texts.iter().filter(|text| &first[0].text[text.range.clone()] == "same").count(), 2);
+
+    let second = render_once(&doc);
+    let again: Vec<(String, usize)> =
+        second[0].texts.iter().map(|text| (text.key.clone().unwrap_or_default(), text.index)).collect();
+    assert_eq!(again, keys, "the identities are stable across a rebuild");
 }
 
 // ---------------------------------------------------------------------------
@@ -1554,4 +1651,148 @@ fn missing_images_and_unsupported_diagrams_never_reach_the_media_wire() {
     );
     runtime.frame(0.0);
     assert!(seen.borrow().is_empty(), "a broken image and an unsupported diagram are inert");
+}
+
+// ---- L-12: image maps and SVG links --------------------------------------
+
+/// A runtime whose article uses the square image resolver and an area wire
+/// that records every `<area>` it wraps.
+fn image_map_tree(source: &str) -> (ElTree, Rc<std::cell::RefCell<Vec<crate::AreaRef>>>) {
+    use std::cell::RefCell;
+
+    use crate::{AreaRef, AreaWire};
+
+    struct Map {
+        doc: MdDoc,
+        theme: DocTheme,
+        style: MarkdownStyle,
+        seen: Rc<RefCell<Vec<AreaRef>>>,
+    }
+
+    let seen: Rc<RefCell<Vec<AreaRef>>> = Rc::new(RefCell::new(Vec::new()));
+    let scene = Map {
+        doc: lmdv_md::parse(source),
+        theme: DocTheme::neutral(false),
+        style: MarkdownStyle::neutral(false),
+        seen,
+    };
+    let mut runtime = rune::Runtime::new(
+        scene,
+        |scene: &Map, _: &mut Cx<Map>| {
+            let sink = scene.seen.clone();
+            let wire: AreaWire = Rc::new(move |element, area: &AreaRef| {
+                sink.borrow_mut().push(area.clone());
+                element
+            });
+            let opts = RenderOptions::new(760.0, &scene.style, &NoMath, &SQUARE_IMAGES).area_wire(wire);
+            render(&scene.doc, &scene.theme, &opts)
+        },
+        (760.0, 900.0),
+        rune::Env::new(true, 1.0),
+    );
+    runtime.frame(0.0);
+    let seen = runtime.state.seen.clone();
+    (ElTree { elements: runtime.elements() }, seen)
+}
+
+#[test]
+fn an_image_map_draws_scaled_area_boxes_and_reports_their_geometry() {
+    let source = "<div><img src=\"shot.png\" alt=\"Map\" usemap=\"#m\"><map name=\"m\">\
+                  <area href=\"#one\" alt=\"One\" shape=\"rect\" coords=\"0,0,4,4\">\
+                  <area href=\"#two\" alt=\"Two\" shape=\"rect\" coords=\"4,0,8,4\">\
+                  <area href=\"#c\" alt=\"Circle\" shape=\"circle\" coords=\"2,2,1\">\
+                  <area href=\"#all\" alt=\"All\" shape=\"default\">\
+                  </map></div>\n";
+    let (tree, seen) = image_map_tree(source);
+    let wrapper = tree.by_key("image-map").expect("the mapped picture").rect;
+    assert_eq!((wrapper[2], wrapper[3]), (8.0, 4.0), "the 8×4 picture box");
+
+    let area = |key: &str| tree.by_key(key).unwrap_or_else(|| panic!("{key}")).rect;
+    let first = area("area-0");
+    assert_eq!([first[0] - wrapper[0], first[1] - wrapper[1], first[2], first[3]], [0.0, 0.0, 4.0, 4.0]);
+    let second = area("area-1");
+    assert_eq!([second[0] - wrapper[0], second[2], second[3]], [4.0, 4.0, 4.0]);
+    let circle = area("area-2");
+    assert_eq!(
+        [circle[0] - wrapper[0], circle[1] - wrapper[1], circle[2], circle[3]],
+        [1.0, 1.0, 2.0, 2.0],
+        "a circle gets the box around its points"
+    );
+    let all = area("area-3");
+    assert_eq!([all[0] - wrapper[0], all[1] - wrapper[1], all[2], all[3]], [0.0, 0.0, 8.0, 4.0]);
+
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 4, "every area reached the wire");
+    assert_eq!(seen[0].block, "b0");
+    assert_eq!(seen[0].map, "m");
+    assert_eq!(seen[0].dest, "#one");
+    assert_eq!(seen[0].alt, "One");
+    assert_eq!(seen[0].shape, crate::AreaShape::Rect);
+    assert_eq!(seen[0].coords, vec![0.0, 0.0, 4.0, 4.0]);
+    assert_eq!(seen[2].shape, crate::AreaShape::Circle);
+    assert_eq!(seen[3].shape, crate::AreaShape::Default);
+}
+
+#[test]
+fn an_image_map_without_an_area_wire_is_the_plain_picture() {
+    let source = "<div><img src=\"shot.png\" alt=\"Map\" usemap=\"#m\">\
+                  <map name=\"m\"><area href=\"#one\" alt=\"One\" coords=\"0,0,4,4\"></map></div>\n";
+    let scene = Scene::new(source).images();
+    let tree = scene.render();
+    assert!(!tree.has_key("image-map"), "no hit boxes without the app's wire");
+    assert!(!tree.has_key("area-0"));
+    assert!(tree.has_key("image"), "the picture still draws");
+}
+
+#[test]
+fn an_svg_draws_its_link_text_and_each_anchor_opens_its_own_href() {
+    use std::cell::RefCell;
+
+    use crate::{LinkWire, RenderOptions};
+
+    struct Svg {
+        doc: MdDoc,
+        theme: DocTheme,
+        style: MarkdownStyle,
+        clicked: Rc<RefCell<Vec<String>>>,
+    }
+
+    let source = "<div><svg><a href=\"#a\">Alpha</a> <a xlink:href=\"#b\">Beta</a></svg></div>\n";
+    let scene = Svg {
+        doc: lmdv_md::parse(source),
+        theme: DocTheme::neutral(false),
+        style: MarkdownStyle::neutral(false),
+        clicked: Rc::new(RefCell::new(Vec::new())),
+    };
+    let mut runtime = rune::Runtime::new(
+        scene,
+        |scene: &Svg, _: &mut Cx<Svg>| {
+            let wire: LinkWire = Rc::new(|element| {
+                element.on_link(|scene: &mut Svg, url: &str, _| scene.clicked.borrow_mut().push(url.to_owned()))
+            });
+            let opts = RenderOptions::new(760.0, &scene.style, &NoMath, &NoImages).link_wire(wire);
+            render(&scene.doc, &scene.theme, &opts)
+        },
+        (760.0, 900.0),
+        rune::Env::new(true, 1.0),
+    );
+    runtime.frame(0.0);
+    let elements = runtime.elements();
+    let group = elements
+        .iter()
+        .find(|element| element.role == "group" && element.label.as_deref() == Some("SVG"))
+        .expect("the SVG group");
+    assert!(group.rect[3] >= 0.0);
+    let alpha =
+        elements.iter().find(|element| element.text.as_deref() == Some("Alpha")).expect("the first anchor's text");
+    let [x, y, w, h] = alpha.rect;
+
+    // A click inside “Alpha” follows its own `href` (`xlink:href` became
+    // `href` in the parser), never the second anchor's.
+    runtime.pointer_move(x + w * 0.5, y + h * 0.5);
+    runtime.pointer_down(x + w * 0.5, y + h * 0.5);
+    runtime.pointer_up(x + w * 0.5, y + h * 0.5);
+    runtime.frame(0.0);
+    assert_eq!(runtime.state.clicked.borrow().as_slice(), ["#a"]);
+    assert!(elements.iter().any(|element| element.text.as_deref() == Some("Beta")), "the second anchor draws too");
 }

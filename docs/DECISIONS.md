@@ -311,3 +311,16 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 **Decision:** Every app-visible string uses **lmdv**: all six locale catalogs, the window-title template, help pages and packaging metadata. The legacy name is scrubbed from the repository; only a single README attribution line may name it. Do not add `<url type="homepage">` or create a project site; `url=` in packaging recipes is only a release-source base. Keep the AppStream `url-homepage-missing` warning as an accepted gap.
 
 **Consequences:** Branding is consistent with the native app identity. A distribution channel that requires a homepage may be unavailable; the release workflow can ship without one. Future locale/help ports must not reintroduce the legacy name.
+
+
+---
+
+## ADR-026 — AppStream identity is metainfo-only; release checksums are signed
+
+**Status:** Accepted · 2026-11-24
+
+**Context:** AppStream rejects the two-part component id `md.lmdv` (`cid-desktopapp-is-not-rdns`). A full rename would change the runtime/desktop identity and moving the `md.lmdv` data root would require a migration. Releases had no integrity signature.
+
+**Decision:** Use `io.github.leandromarceddu.lmdv` as the AppStream component id and `io.github.leandromarceddu` as the developer id, with `<launchable type="desktop-id">lmdv.desktop</launchable>`. Keep the runtime id `lmdv`, the desktop/icon names and the `md.lmdv` data root unchanged. Sign `SHA256SUMS` with a dedicated Ed25519 release key (fingerprint `DD029B151E6A78B4D2357B17FEFE77EDE1F2E862`, expires 2028-11-24), publish the public half and `SHA256SUMS.asc`, and keep the private key/passphrase only in GitHub Actions secrets. X-15 keeps one stricter export rule: the parent must exist for HTML, DOCX and PDF; folders are never created.
+
+**Consequences:** The AppStream warning is gone with no migration; only `url-homepage-missing` remains accepted. A full runtime/data rename is a separate decision. Release checksums now detect tampering as well as transfer corruption; Windows Authenticode and AppImage signatures still need platform tooling. The first signed tag must be observed before calling a release signed.

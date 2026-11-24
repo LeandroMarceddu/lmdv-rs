@@ -274,9 +274,18 @@ impl Lightbox {
         }
     }
 
+    /// The PNG bytes the copy and save actions use, once the worker answered
+    /// (V-08/V-09): the file's own PNG or a raster the worker converted.
+    pub fn png_bytes(&self) -> Option<Arc<[u8]>> {
+        match self.png() {
+            PngState::Ready(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
     /// Reads the picture's file on a worker, so Copy and Save never touch a
-    /// frame (ADR-017). Only a PNG can be handed to the clipboard or written
-    /// again: `lmdv-app` has no decoder to re-encode another format.
+    /// frame (ADR-017). The worker hands back PNG bytes: the file's own, a
+    /// converted raster, or an SVG rasterized at the preview scale (OI-196).
     fn load_png(&self, root: PathBuf, source: String, waker: Waker) {
         let slot = self.png.clone();
         let allow_outside = self.allow_outside;
@@ -555,9 +564,11 @@ fn png_file_name(media: &MediaRef) -> String {
 
 /// Reads a picture's file for the copy/save menu (V-08/V-09), on a worker.
 ///
-/// Only a PNG can be passed on unchanged: this crate has no decoder to turn
-/// another raster format into PNG. A network, `data:` or refused path answers
-/// [`PngState::Unavailable`] rather than touching the filesystem.
+/// A PNG is passed on unchanged. An SVG is rasterized through the public
+/// `lmdv_export::raster::svg_to_png` at twice its intrinsic size on an opaque
+/// white background (OI-196), and another raster is re-encoded to PNG. A
+/// network, `data:` or refused path answers [`PngState::Unavailable`] rather
+/// than touching the filesystem.
 fn read_png(root: &Path, source: &str, linked_path: bool) -> PngState {
     let unavailable = || PngState::Unavailable(lmdv_i18n::t!("msg.imageUnavailable").to_owned());
     // M-24/L-15: an embedded source is a URL path: a query and fragment are
@@ -581,11 +592,32 @@ fn read_png(root: &Path, source: &str, linked_path: bool) -> PngState {
     if bytes.starts_with(PNG_SIGNATURE) {
         return PngState::Ready(Arc::from(bytes));
     }
+    // OI-196: a vector picture becomes a PNG at twice its intrinsic size. The
+    // source's own extension is the fallback when the markup starts with a
+    // long XML prolog the byte sniff does not read.
+    if looks_like_svg(&bytes) || src.to_ascii_lowercase().ends_with(".svg") {
+        if let Some(png) = lmdv_export::raster::svg_to_png(&bytes, lmdv_export::raster::PREVIEW_SCALE) {
+            return PngState::Ready(Arc::from(png));
+        }
+        return unavailable();
+    }
     // V-08/V-09: other rasters are converted on the worker.
     match lmdv_export::raster_to_png(&bytes) {
         Some(png) => PngState::Ready(Arc::from(png)),
         None => unavailable(),
     }
+}
+
+/// Whether `bytes` start like an SVG document (a BOM, whitespace and an XML
+/// prolog are allowed before the root element).
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = bytes.get(..bytes.len().min(1024)).unwrap_or(bytes);
+    let head = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    let head = head.trim_ascii_start();
+    head.starts_with(b"<svg")
+        || head.starts_with(b"<?xml")
+        || head.starts_with(b"<!DOCTYPE svg")
+        || head.starts_with(b"<!--")
 }
 
 /// Whether an image source names a local path rather than a URL, a device or a
@@ -1517,6 +1549,7 @@ pub(crate) fn media_refs(state: &WindowState) -> Vec<MediaRef> {
         math: &math,
         images: &images,
         wires: RenderWires { media: Some(wire), ..RenderWires::default() },
+        mermaid: None,
         details: None,
         selectable: true,
         sticky_tables: true,

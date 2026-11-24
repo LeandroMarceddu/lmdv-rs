@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-23
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (223 done, 52 substitutes, 40 partial, 9 missing, 18 n/a), the P0 missing and app-side P0 cleanup plus a broad P1 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll fixes are in, and v0.9.0 is released. Remaining: 9 P0 partials (Rune/rune-kit or the T-26/X-02 edges), the scheduled Rune port (OI-189), P7 packaging (OI-153) and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (242 done, 54 substitutes, 23 partial, 5 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.9.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), packaging signatures/reproducibility and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -505,14 +505,24 @@
 - Audit: **223 done, 52 substitute, 40 partial, 9 missing, 18 n/a; 9 P0 gaps**.
 - v0.9.0; release notes in `docs/releases/v0.9.0.md`.
 
+## P1/P2 batch — editor, reader, windows, packaging — complete
+
+- Editor: E-03 caret from the measured block/`--line`, E-06 Mermaid cache, E-28 caret-anchored slash + one undo, E-30 comment no-ops, E-31 block go-to-line, E-34 tail, E-35 padding/keyless identities/preview-height caret, E-36 image paste/drop into `assets/`. E-29 keeps Ctrl+D only; multi-cursor is a Rune gap.
+- Reader/export: R-11 modal key routing (guide body keeps PageDown/Home), R-17 Find in document menu, R-26/X-03 selection rich copy, X-15 stricter single parent rule (accepted substitute), A-13 table-preview a11y, O-05 outline cursor, L-12 area/SVG renderer + area wire, public SVG rasterizer OI-196.
+- Windows: T-26 per-tab sticky notice/scheme (tree root per window, OI-129), H-02 dead recents on the display clock, H-08/H-09/H-13 tests for saved check/error card/version.
+- Packaging: S-08 `~/Templates` substitute, current installer icon, `SHA256SUMS` + signed `SHA256SUMS.asc` with the Ed25519 key, metainfo-only rDNS `io.github.leandromarceddu.lmdv`, ADR-026.
+- New scenes: `tab-notice`, `version`; help PageDown fix.
+- Audit: **242 done, 54 substitute, 23 partial, 5 missing, 18 n/a; 8 P0 gaps**.
+- Post-0.9.0 work; no new tag yet.
+
 ## Next up
 
 **Next when work resumes:**
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
-2. Close or accept the 9 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10; T-26 and X-02 (rune-mermaid serializer) are the app/vendor edges. D-03 image drop (OI-187) and drag-to-scroll (OI-186) follow.
+2. Close or accept the 8 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10; X-02 needs the rune-mermaid serializer. Remaining app-side P1s are D-06/R-28 drag-to-scroll, T-34/W-10 toolbar, T-15 pulse, E-29 multi-cursor (Rune), L-12 menu/OI-195, A-01/A-05/A-06/I-07/I-08.
 3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — the user asked to hold it for now.
-4. P7 packaging: three-part reverse-DNS id, installer icon, signed checksums (OI-153); LICENSE is done. Windows runtime only if it becomes a target (OI-155).
+4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime only if it becomes a target (OI-155).
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 

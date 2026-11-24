@@ -51,8 +51,41 @@ pub const REVEAL_WINDOW: f64 = 0.3;
 /// Editor scroll reports this soon after entering edit mode settle the editor
 /// rather than moving the preview (the original's `syncSuppressedUntil`).
 pub const ENTRY_SUPPRESS: Duration = Duration::from_millis(200);
+/// E-34: the least blank space after the last source line.
+pub const TAIL_MIN: f32 = 160.0;
+/// E-34: the tail as a share of the source viewport's height.
+pub const TAIL_RATIO: f32 = 0.6;
 /// Below this many points two scroll offsets are the same line.
 const OFFSET_EPSILON: f32 = 0.5;
+
+/// The blank space after the last source line (E-34).
+///
+/// The editor may scroll past its end so the preview can follow to the end of
+/// the document; 60% of the viewport, never less than [`TAIL_MIN`]. A frame
+/// without a measured viewport still gets the minimum, so the scrollable extent
+/// does not change once it is measured.
+pub fn tail_space(viewport: f32) -> f32 {
+    if viewport.is_finite() && viewport > 0.0 { (viewport * TAIL_RATIO).max(TAIL_MIN) } else { TAIL_MIN }
+}
+
+/// The source line a double-click at `y` inside a measured preview block maps
+/// to (E-35's preview-height caret).
+///
+/// `top`/`height` are the block's article-content box, `first_line`/`end_line`
+/// its source span (the end is exclusive), and `y` the press in the same
+/// content points. The fraction of the block's height is the fraction of its
+/// source lines, clamped into the block: a click on the block's padding lands on
+/// its first or last line rather than doing nothing. Without a measurement the
+/// block's first line is the fallback.
+pub fn line_from_preview_y(top: f32, height: f32, first_line: usize, end_line: usize, y: f32) -> usize {
+    let last = end_line.saturating_sub(1).max(first_line);
+    if !(height.is_finite() && height > 0.0) || !y.is_finite() {
+        return first_line;
+    }
+    let t = ((y - top) / height).clamp(0.0, 1.0);
+    let line = first_line as f32 + t * last.saturating_sub(first_line) as f32;
+    (line.round() as usize).clamp(first_line, last)
+}
 
 /// What the source view measured about the editor's scrollable content.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -286,6 +319,10 @@ pub struct PreviewBlock {
     pub next_top: f32,
     /// The heading inside this block, when it has one.
     pub heading: Option<PreviewPart>,
+    /// The block's drawn text boxes in article content points, in reading
+    /// order: where a double-click is on text rather than on the block's
+    /// padding (E-35). Empty when the text elements were not measured.
+    pub text_boxes: Vec<[f32; 4]>,
 }
 
 impl PreviewBlock {
@@ -310,6 +347,9 @@ pub struct PreviewGeometry {
     pub reserve: f32,
     /// The article's bottom in content points.
     pub content_bottom: f32,
+    /// The article viewport's top in unscrolled window points, so a pointer
+    /// point can be turned into article content points (E-35).
+    pub viewport_top: f32,
     /// The article viewport's height, points.
     pub viewport: f32,
     /// The article viewport's maximum scroll offset from its last report.
@@ -702,15 +742,21 @@ impl WindowState {
         if let Some(caret) = block_at_or_above(doc, caret_line) {
             wanted.extend(caret.saturating_sub(1)..=caret.saturating_add(1).min(last));
         }
+        // E-35: the block a double-click last moved over, so the next frame
+        // measures where its text really is.
+        if let Some(pressed) = self.editor.preview_block.get() {
+            wanted.extend(pressed.saturating_sub(1)..=pressed.saturating_add(1).min(last));
+        }
         wanted.sort_unstable();
         wanted.dedup();
         let content_bottom = cx.layout(DOC_KEY).map_or(0.0, |rect| rect[1] + rect[3]);
         let viewport_rect = cx.layout(ARTICLE_SCROLL_KEY);
         let viewport = viewport_rect.map_or(0.0, |rect| rect[3]);
+        let viewport_top = viewport_rect.map_or(0.0, |rect| rect[1]);
         let scroll = self.scroll_snapshot();
         // Layout reads are unscrolled window points: the article viewport's own
         // top plus the reported content offset is where its visible top sits.
-        let visible_top = viewport_rect.map_or(0.0, |rect| rect[1]) + scroll.offset;
+        let visible_top = viewport_top + scroll.offset;
         let mut blocks = Vec::with_capacity(wanted.len());
         for index in wanted {
             let Some(key) = doc.block_key(index).map(str::to_owned) else { continue };
@@ -723,7 +769,13 @@ impl WindowState {
                 let key = heading_key(heading);
                 cx.layout(&key).map(|rect| PreviewPart { key, top: rect[1], height: rect[3] })
             });
-            blocks.push(PreviewBlock { index, key, top: rect[1], height: rect[3], next_top, heading });
+            let mut text_boxes = preview_text_boxes(&key, cx);
+            if let Some(part) = &heading {
+                // A heading keeps its `h{n}` key rather than a text identity;
+                // its own band still counts as text for the padding guard.
+                text_boxes.push([0.0, part.top, 1.0, part.height]);
+            }
+            blocks.push(PreviewBlock { index, key, top: rect[1], height: rect[3], next_top, heading, text_boxes });
         }
         // Every table whose rows can hold the viewport's top, not only the
         // ones near the source caret: a table crossing the top keeps its header
@@ -733,8 +785,16 @@ impl WindowState {
         // O-07 keeps the section line out of edit mode; the reserve is the
         // overlay's measured height whenever a frame does draw it.
         let reserve = cx.layout(crate::section::SECTION_LINE_KEY).map_or(0.0, |rect| rect[3]).max(0.0);
-        *self.editor.preview.borrow_mut() =
-            PreviewGeometry { blocks, tables, front_matter, reserve, content_bottom, viewport, max: scroll.max };
+        *self.editor.preview.borrow_mut() = PreviewGeometry {
+            blocks,
+            tables,
+            front_matter,
+            reserve,
+            content_bottom,
+            viewport_top,
+            viewport,
+            max: scroll.max,
+        };
     }
 
     /// Drops the measured preview geometry (leaving edit mode, or a source-only
@@ -880,6 +940,23 @@ fn front_matter_geometry(doc: &MdDoc, cx: &Cx<WindowState>) -> Option<PreviewAnc
     let rect = cx.layout(FRONT_MATTER_KEY)?;
     let next_top = doc.block_key(0).and_then(|key| cx.layout(key)).map_or(rect[1] + rect[3], |next| next[1]);
     Some(PreviewAnchor { key: FRONT_MATTER_KEY.to_owned(), top: rect[1], height: rect[3], next_top })
+}
+
+/// How many drawn text boxes one preview block may contribute (E-35).
+const MAX_PREVIEW_TEXT_BOXES: usize = 128;
+
+/// The measured boxes of a block's drawn texts, in article content points.
+///
+/// The renderer keys every text `{block}-text-{index}`, and headings keep
+/// `h{n}`; the probe stops at the first key the block did not build, so an
+/// ordinary paragraph costs one read.
+fn preview_text_boxes(key: &str, cx: &Cx<WindowState>) -> Vec<[f32; 4]> {
+    let mut boxes = Vec::new();
+    for index in 0..MAX_PREVIEW_TEXT_BOXES {
+        let Some(rect) = cx.layout(&format!("{key}-text-{index}")) else { break };
+        boxes.push(rect);
+    }
+    boxes
 }
 
 /// Every top-level table whose rows can hold `top_offset` under the viewport,

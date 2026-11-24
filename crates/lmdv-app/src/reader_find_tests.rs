@@ -435,7 +435,7 @@ fn a_selection_across_a_code_span_prefills_its_drawn_text() {
     state.open_synthetic("Code", "Before **bold** and `code` after.\n");
     let mut runtime = runtime(state);
     runtime.frame(0.0);
-    runtime.update(|_, tx| tx.select_text("text", 0..27));
+    runtime.update(|_, tx| tx.select_text("b0-text-0", 0..27));
     runtime.frame(0.0);
     runtime.update(|state, tx| state.open_reader_find(tx));
     runtime.frame(0.0);
@@ -465,7 +465,7 @@ fn a_selection_across_an_inline_image_drops_the_object_marker() {
     assert!(state.active_tab().and_then(|tab| tab.view.reader.as_ref()).is_some(), "the page parsed");
     let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
     runtime.frame(0.0);
-    runtime.update(|_, tx| tx.select_text("text", 0..100));
+    runtime.update(|_, tx| tx.select_text("b0-text-0", 0..100));
     runtime.frame(0.0);
     runtime.update(|state, tx| state.open_reader_find(tx));
     runtime.frame(0.0);
@@ -487,7 +487,7 @@ fn a_selection_that_trims_to_nothing_opens_an_empty_query() {
     runtime.frame(0.0);
     // The two spaces between the words: a real, non-collapsed selection that
     // trims to nothing.
-    runtime.update(|_, tx| tx.select_text("text", 5..7));
+    runtime.update(|_, tx| tx.select_text("b0-text-0", 5..7));
     runtime.frame(0.0);
     runtime.update(|state, tx| state.open_reader_find(tx));
     runtime.frame(0.0);
@@ -503,6 +503,49 @@ fn a_selection_that_trims_to_nothing_opens_an_empty_query() {
         .find(|element| element.key.as_deref() == Some("reader-find-query"))
         .expect("the query field");
     assert!(query.focused, "the field keeps the keyboard");
+}
+
+// ---- R-17: the block menu's Find in document -----------------------------
+
+#[test]
+fn the_block_menus_find_in_document_uses_the_selection_prefill_and_focuses_the_query() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Quiet", READER_MARKDOWN);
+    let mut runtime = runtime(state);
+    runtime.frame(0.0);
+    runtime.update(|_, tx| tx.select_text("h0", 0..14));
+    runtime.frame(0.0);
+    runtime.update(|state, tx| {
+        // The right-click that opened the menu, then its Find in document row.
+        state.show_block_menu(
+            &lmdv_render::BlockRef {
+                key: "b0".to_owned(),
+                line: 0,
+                end_line: 1,
+                code: false,
+                text: "The quiet page".to_owned(),
+                texts: Vec::new(),
+            },
+            rune::PointerPress { x: 40.0, y: 60.0 },
+        );
+        assert!(state.block_menu().is_some());
+        state.find_in_document_from_block_menu(tx);
+    });
+    runtime.frame(0.0);
+
+    let find = &active_tab(&runtime.state).view.reader_find;
+    assert!(find.open, "R-17: Find in document opens the reading bar");
+    assert_eq!(find.query.text, "The quiet page", "the same query Ctrl+F would prefill");
+    assert_eq!(find.query.range(), (0, 14), "the query is selected for typing");
+    assert_eq!(find.matches.len(), 1, "the hit is already revealed");
+    assert!(runtime.state.block_menu().is_none(), "the menu closes behind the bar");
+    let query = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some("reader-find-query"))
+        .expect("the query field");
+    assert!(query.focused, "the field takes the keyboard");
 }
 
 // ---- R-19: the scroll band ----------------------------------------------

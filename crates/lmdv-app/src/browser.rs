@@ -1899,9 +1899,10 @@ pub(crate) fn pane(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit) -> El {
     {
         state.browser.shell_width.set(width);
     }
-    if !state.left.is_open() {
+    if !state.left.is_open() && !state.left.is_peeking() {
         // The closed pane is clipped; building a 2,000-row tree every frame
-        // would be wasted work. Opening it builds the real pane next frame.
+        // would be wasted work. A peek is visible, so it must build the real
+        // pane; opening it also builds it on the next frame.
         return Sidebar::new().label(lmdv_i18n::t!("pane.files")).build(kit);
     }
     // F-12: a keyboard menu follows the focused row's rect, which the layout

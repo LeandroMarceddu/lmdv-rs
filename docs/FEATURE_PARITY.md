@@ -158,12 +158,13 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | T-20 / T-22 | Tear-off placed under pointer; drop on another window | X11 exact if spike works; Wayland new window compositor-placed / menu move | **spike**, partial gap |
 | W-07 | Always-on-top | X11 works; Wayland no-op | **accepted-gap** on Wayland |
 | X-04 | System print dialog | PDF + system viewer/print | **substitute** |
+| X-15 | PDF parent folders | One stricter rule for every format: an existing canonical parent is required and folders are never created | **substitute** (user 2026-11-24) |
 | X-08 | Native Word equations (OMML) | Images first; OMML optional | **proposed gap** |
 | X-08 / V-08 | SVG export | PNG first; SVG spike | **proposed gap** |
-| S-07/08/09/25 | Windows associations, New template, recent/jump list, alias | XDG MIME, `~/.local/bin`, app recents; `.desktop` actions optional; Settings → **Make default…** applies the XDG association in one press (`lmdv_io::assoc::linux`) | **substitute** |
+| S-07/08/09/25 | Windows associations, New template, recent/jump list, alias | XDG MIME, `~/.local/bin`, app recents; `.desktop` actions optional; Settings → **Make default…** applies the XDG association in one press (`lmdv_io::assoc::linux`); the installer writes a `~/Templates` New-document template (DE dependent) | **substitute** |
 | S-11/15/16/17, W-03/05/06/08, I-05 | Store/MSIX/WebView2-native behavior | Not applicable | **n/a** |
 | M-12 | Full Mermaid 11 | 17 native families; unsupported → code block | **substitute** |
-| R-20/X-03 | Rich copy of a selection | Whole-doc rich copy done (P5-04b); selection needs a block-range serializer | **build** |
+| R-20/X-03 | Rich copy of a selection | `Ctrl+C` on an article selection maps its top-level blocks to the source range and exports the rich fragment + selected text; block-granular. `Ctrl+Shift+C` stays whole-document | **done** |
 | R-07 | Space pages the article even with a control focused | Keyboard focus on an interactive control keeps Space activation (accessibility-first); PageDown always pages and Space pages with the article/block focused | **substitute** (OI-161, user 2026-11-20) |
 | R-19 | Click-to-source centring and landing flash | Owning block as the hit proxy, 40 pt horizontal reveal margin, static 1.2 s landing band | **substitute** (OI-163, user 2026-11-20) |
 | T-17 | Tab strip wheel translation and overflow timing | Horizontal/Shift wheel, physical digits and clamped moves; plain vertical wheel and exact ⌄ timing need kit APIs | **accepted-gap** (OI-166) |

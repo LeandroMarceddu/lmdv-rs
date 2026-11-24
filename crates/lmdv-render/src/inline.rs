@@ -108,7 +108,7 @@ impl<'a> Renderer<'a> {
     /// The text element for `inline`.
     pub(crate) fn inline(&self, inline: &Inline, opts: InlineOptions<'_>) -> El {
         let built = self.build_inline(inline, opts.strip_tasks);
-        self.note_text(opts.key, &built.text);
+        let identity = self.note_text(opts.key, &built.text);
         let mut e = rich(built.text, built.spans).font(opts.style).color(opts.color).exact_lines().w_full();
         for range in built.strikes {
             e = e.strike(range.start, range.end, None);
@@ -140,7 +140,7 @@ impl<'a> Renderer<'a> {
         if let Some(prefix) = opts.copy_prefix {
             e = e.copy_prefix(prefix);
         }
-        if let Some(key) = opts.key {
+        if let Some(key) = identity.as_deref().or(opts.key) {
             e = e.key(key);
         }
         if has_links && let Some(wire) = &self.opts.wires.link {

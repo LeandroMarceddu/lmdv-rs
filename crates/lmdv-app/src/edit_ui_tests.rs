@@ -1,7 +1,7 @@
 //! P3-03 integration: the find/replace bar, format bar, `/` menu, go-to-line
 //! and the editor keymap.
 
-use rune::{ElementInfo, Key, KeyEvent, Mods, Tx};
+use rune::{ElementInfo, Env, Key, KeyEvent, Mods, Runtime, Tx};
 use tempfile::TempDir;
 
 use crate::edit_ui::{FormatAction, FormatMenu, FormatMenuRow};
@@ -48,6 +48,12 @@ fn render(state: WindowState) -> Vec<ElementInfo> {
     let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
     runtime.frame(0.0);
     runtime.elements()
+}
+
+fn set_large_file_mode(state: &WindowState, mode: lmdv_core::LargeFileMode) {
+    let mut prefs = state.shared().prefs().clone();
+    prefs.editor.large_file_mode = mode;
+    state.shared().set_prefs(prefs);
 }
 
 fn has_key(elements: &[ElementInfo], key: &str) -> bool {
@@ -351,6 +357,144 @@ fn an_indented_slash_command_replaces_the_whole_line_and_leaves_the_caret_at_the
     assert!(after.starts_with("intro\n\n| Column"), "{after:?}");
     assert!(!after.contains("  |"), "the indentation went with the query: {after:?}");
     assert_eq!(selection(&state).start, after.len(), "the caret is after the template");
+}
+
+#[test]
+fn the_slash_insert_and_query_replacement_are_one_undo_step() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Slash", "intro\n\n");
+    enter_editor(&mut state);
+    let mut tx = Tx::default();
+    state.active_editor_edit().set_caret(7);
+    type_source(&mut state, "/ta");
+    assert!(state.slash_menu().is_some());
+    let table = state.slash_items().iter().position(|item| item.command == "edit.insert-table").expect("the table row");
+    state.active_tab_mut().expect("tab").view.slash_menu.selected = table;
+    assert!(state.editor_key(&KeyEvent { key: Key::Enter, mods: Mods::default() }, &mut tx));
+    assert!(text(&state).starts_with("intro\n\n| Column"), "{:?}", text(&state));
+
+    state.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()).expect("editor").undo();
+    state.editor_changed();
+    assert_eq!(text(&state), "intro\n\n/ta", "one undo restores the query line, not an empty one");
+}
+
+#[test]
+fn the_slash_insert_in_block_mode_is_one_undo_step() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Block Slash", "intro\n\n/ta\n");
+    set_large_file_mode(&state, lmdv_core::LargeFileMode::Block);
+    enter_editor(&mut state);
+    assert!(
+        state.active_tab().and_then(|tab| tab.view.editor.as_ref()).is_some_and(|editor| editor.block_mode_active())
+    );
+    let mut tx = Tx::default();
+    state.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()).expect("editor").set_selection(10..10);
+    state.refresh_slash_menu();
+    let table = state.slash_items().iter().position(|item| item.command == "edit.insert-table").expect("the table row");
+    state.active_tab_mut().expect("tab").view.slash_menu.selected = table;
+    assert!(state.editor_key(&KeyEvent { key: Key::Enter, mods: Mods::default() }, &mut tx));
+    assert!(text(&state).contains("| Column"), "{:?}", text(&state));
+    state.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()).expect("editor").undo();
+    state.editor_changed();
+    assert_eq!(text(&state), "intro\n\n/ta\n", "one block-journal undo restores the query line");
+}
+
+#[test]
+fn the_slash_panel_anchors_below_the_caret() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Slash", "intro\n\n");
+    let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+    runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+    runtime.frame(0.0);
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+        assert!(state.enter_editor(None, tx));
+    });
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+    runtime.update(|state: &mut WindowState, _: &mut Tx| {
+        state.active_editor_edit().set_caret(7);
+        state.editor_changed();
+        state.active_editor_edit().insert("/ta");
+        state.editor_changed();
+    });
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+    runtime.frame(0.0);
+
+    let anchor = runtime.state.editor.slash_anchor.get().expect("the focused field's caret was measured");
+    let elements = runtime.elements();
+    let menu =
+        elements.iter().find(|element| element.key.as_deref() == Some("slash-menu")).expect("the panel is drawn");
+    assert!(
+        (menu.rect[0] - anchor[0]).abs() < 40.0,
+        "the panel starts at the caret's x: {:?} vs {anchor:?}",
+        menu.rect
+    );
+    let below = anchor[1] + anchor[3];
+    assert!((menu.rect[1] - below).abs() < 24.0, "the panel sits below the caret line: {:?} vs {below}", menu.rect);
+    assert!((menu.rect[3] - 1.0) > 0.0);
+}
+
+#[test]
+fn ctrl_d_selects_the_word_then_the_next_occurrence() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Next", "one budget two budget three\n");
+    enter_editor(&mut state);
+    let mut tx = Tx::default();
+    state.active_editor_edit().set_caret(6);
+    assert!(state.editor_key(&command('d'), &mut tx));
+    assert_eq!(selection(&state), 4..10, "the caret's word");
+    assert!(state.editor_key(&command('d'), &mut tx));
+    assert_eq!(selection(&state), 15..21, "the next occurrence");
+    assert_eq!(text(&state), "one budget two budget three\n", "a selection-only command");
+}
+
+#[test]
+fn block_mode_go_to_line_accepts_the_same_forms_as_the_single_field() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Block", "one\ntwo\nthree\nfour\nfive\n");
+    set_large_file_mode(&state, lmdv_core::LargeFileMode::Block);
+    enter_editor(&mut state);
+    assert!(
+        state.active_tab().and_then(|tab| tab.view.editor.as_ref()).is_some_and(|editor| editor.block_mode_active())
+    );
+    let mut tx = Tx::default();
+
+    state.open_goto_line(&mut tx);
+    state.active_goto_edit().replace_text("+2");
+    state.submit_goto_line(&mut tx);
+    assert_eq!(selection(&state), 8..8, "`+2` from line 1 reaches line 3");
+
+    state.open_goto_line(&mut tx);
+    state.active_goto_edit().replace_text("40%");
+    state.submit_goto_line(&mut tx);
+    assert_eq!(selection(&state), 8..8, "40% of the five text lines is the middle one");
+
+    state.open_goto_line(&mut tx);
+    state.active_goto_edit().replace_text("2:3");
+    state.submit_goto_line(&mut tx);
+    assert_eq!(selection(&state), 6..6, "line 2, third character");
+    assert!(state.editor.goto_line.is_none(), "the prompt closed");
+}
+
+#[test]
+fn the_source_viewport_has_a_tail_below_the_last_line() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Tail", "one line\n");
+    enter_editor(&mut state);
+    let elements = render(state);
+    let tail = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some("editor-tail"))
+        .expect("the scroll extent has a tail");
+    assert!(tail.rect[3] >= 160.0, "E-34's tail space: {:?}", tail.rect);
+    assert!(tail.visible[3] <= tail.rect[3]);
 }
 
 #[test]

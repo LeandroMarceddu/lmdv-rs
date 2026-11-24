@@ -2,18 +2,17 @@
 <!--
   AppStream metadata for lmdv.
 
-  The component id is md.lmdv (the app's XDG data root, crates/lmdv-io/src/dirs.rs).
-  The app still reports the window id "lmdv" (crates/lmdv-app/src/shared.rs APP_ID),
-  so the launchable is lmdv.desktop; keep the two in sync if APP_ID ever becomes
-  reverse-DNS.
+  The component id is io.github.leandromarceddu.lmdv, the reverse-DNS id of
+  the public repository. The runtime/window id stays "lmdv"
+  (crates/lmdv-app/src/shared.rs APP_ID), and the data root stays md.lmdv
+  (crates/lmdv-io/src/dirs.rs); the launchable bridges the AppStream id to
+  lmdv.desktop. A full runtime rename would need a data migration.
 
-  Known validator findings (see packaging/README.md):
-    * cid-desktopapp-is-not-rdns: md.lmdv has two components; AppStream wants a
-      reverse-DNS id with a project component.
+  Known validator finding (see packaging/README.md):
     * url-homepage-missing: accepted by decision; no project homepage will be provided.
 -->
 <component type="desktop-application">
-  <id>md.lmdv</id>
+  <id>io.github.leandromarceddu.lmdv</id>
   <name>lmdv</name>
   <summary>View and edit Markdown documents</summary>
 
@@ -42,7 +41,7 @@
     <category>Utility</category>
   </categories>
 
-  <developer id="md.lmdv">
+  <developer id="io.github.leandromarceddu">
     <name>lmdv contributors</name>
   </developer>
 

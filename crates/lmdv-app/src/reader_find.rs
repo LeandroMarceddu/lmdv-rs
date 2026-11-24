@@ -230,6 +230,15 @@ impl WindowState {
         self.fill_reader_find(index, query);
     }
 
+    /// The preview block menu's **Find in document** (R-17): closes the menu and
+    /// opens the reading find bar through the same path `Ctrl+F` uses, so a
+    /// selection made before the right-click becomes the query and the field
+    /// takes the keyboard.
+    pub(crate) fn find_in_document_from_block_menu(&mut self, tx: &mut Tx) {
+        self.close_block_menu();
+        self.open_reader_find(tx);
+    }
+
     /// Fills `tab`'s reading find bar with `query` (F-16): a folder-search
     /// result carries its query into the document it opened.
     ///
@@ -345,9 +354,24 @@ impl WindowState {
     /// Reading-view keys that belong to the find bar even when the input does
     /// not hold the focus: Esc closes it and `n`/`N` step it (R-10). Nothing
     /// happens without an open bar.
+    ///
+    /// R-26/X-03 rides the same viewer context: `Ctrl+C` over an article
+    /// selection copies the selected blocks as rich text with the selection as
+    /// its plain form. No selection, an editing tab or a modal keeps Rune's own
+    /// copy (or nothing).
     pub(crate) fn viewer_context_key(&mut self, event: &KeyEvent, tx: &mut Tx) -> bool {
+        // R-11: the keys overlay is modal. `app::on_key` handled the keys that
+        // close it; every other chord stops here, before a window command. It
+        // applies on every tab kind and mode: the overlay opens over the start
+        // page and the editor too.
+        if crate::reader::help_overlay_holds_keys(self, event) {
+            return true;
+        }
         if self.active_tab().is_none_or(|tab| tab.view.mode != Mode::Viewer) {
             return false;
+        }
+        if is_plain_copy(event) && self.reader_copy_context() && self.copy_article_selection(tx) {
+            return true;
         }
         if !self.active_tab().is_some_and(|tab| tab.view.reader_find.open) {
             return false;
@@ -356,7 +380,7 @@ impl WindowState {
             self.close_reader_find(tx);
             return true;
         }
-        if self.prompt().is_some() || self.help_view().is_some() || self.share.menu_open {
+        if !self.reader_copy_context() {
             return false;
         }
         match bare_n(event) {
@@ -370,6 +394,49 @@ impl WindowState {
             }
             None => false,
         }
+    }
+
+    /// Whether the reader is the surface taking keys: no prompt, dialog, menu,
+    /// palette, preview or lightbox in front.
+    fn reader_copy_context(&self) -> bool {
+        !(self.prompt().is_some()
+            || self.help_view().is_some()
+            || self.share.menu_open
+            || self.palette_is_open()
+            || self.settings_is_open()
+            || self.table_preview().is_some()
+            || self.lightbox.is_some()
+            || self.block_menu().is_some()
+            || self.browser_menu().is_some()
+            || self.tab_menu().is_some())
+    }
+
+    /// Copies the current article selection as rich text (R-26/X-03).
+    ///
+    /// The HTML is built on the rich-copy worker from the top-level blocks the
+    /// selection touches; the clipboard also carries the selection exactly as
+    /// drawn. A selection that maps to no source block (the front matter card),
+    /// or to a source range the exporter has no block for (the generated TOC),
+    /// falls back to plain text. False when there is no non-empty article
+    /// selection, so Rune's own copy path stays untouched.
+    pub(crate) fn copy_article_selection(&mut self, tx: &mut Tx) -> bool {
+        let Some(selection) = tx.text_selection().cloned() else { return false };
+        if !selection.texts().iter().any(|text| selection_in_article(text.path())) {
+            return false;
+        }
+        let plain = selection.text().to_owned();
+        if plain.trim().is_empty() {
+            return false;
+        }
+        let blocks = self.active_reader().and_then(|model| selected_source_range(&model, &selection));
+        match blocks {
+            // A mapped selection starts the rich job; the worker's answer writes
+            // both clipboard forms (or the plain fallback when it has no block).
+            Some(blocks) => self.start_rich_selection_copy(plain, blocks),
+            // Drawn outside any source block (the front-matter card): plain only.
+            None => tx.copy(plain),
+        }
+        true
     }
 
     /// The paint-only highlights for one tab's article, in the order the
@@ -554,6 +621,52 @@ pub(crate) fn refresh_tab(tab: &mut Tab) {
 /// in every path below it.
 pub(crate) fn selection_in_article(path: &str) -> bool {
     path.split('/').any(|segment| segment == crate::reader::ARTICLE_SCROLL_KEY)
+}
+
+/// Whether `event` is `Ctrl+C`/`Cmd+C` with no extra modifier (R-26/X-03).
+fn is_plain_copy(event: &KeyEvent) -> bool {
+    event.is_command('c') && event.mods.primary() && !event.mods.shift && !event.mods.alt && !event.mods.logo
+}
+
+/// The source range of the top-level blocks a reader selection touches (X-03).
+///
+/// Every text element the renderer draws inside a top-level block carries that
+/// block's `b{i}` key in its path, so the selection's own paths name the blocks
+/// directly; the block's [`lmdv_md::BlockSpan::source`] gives its bytes. The
+/// exporter then maps that range onto its own block list
+/// (`lmdv_export::blocks_for_source`), which is not always the parser's order
+/// (an opt-in TOC, split list blocks). A selection drawn outside any block —
+/// the front matter card — yields `None` and the caller falls back to plain
+/// text. `None` also for an empty selection.
+///
+/// The mapping is block-granular: a selection inside a list, table or footnote
+/// body copies its whole top-level block, because the export fragment API
+/// serializes whole blocks. A footnote body therefore copies every definition
+/// in its one `FootnoteDefs` block.
+pub fn selected_source_range(doc: &MdDoc, selection: &rune::TextSelection) -> Option<Range<usize>> {
+    let mut range: Option<Range<usize>> = None;
+    for text in selection.texts() {
+        if !text.is_selected() || !selection_in_article(text.path()) {
+            continue;
+        }
+        let Some(index) = text.path().split('/').find_map(|segment| block_index(doc, segment)) else { continue };
+        let Some(span) = doc.block_spans.get(index) else { continue };
+        range = Some(match range {
+            Some(range) => range.start.min(span.source.start)..range.end.max(span.source.end),
+            None => span.source.clone(),
+        });
+    }
+    range
+}
+
+/// The block index a `b{i}` path segment names, when the document has it.
+fn block_index(doc: &MdDoc, segment: &str) -> Option<usize> {
+    let digits = segment.strip_prefix('b')?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let index: usize = digits.parse().ok()?;
+    (index < doc.blocks.len()).then_some(index)
 }
 
 /// The selection as the reading find prefill (R-17).

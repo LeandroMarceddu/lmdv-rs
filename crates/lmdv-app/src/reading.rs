@@ -137,6 +137,9 @@ pub(crate) struct ReadingState {
     pub(crate) footnote_tops: std::cell::RefCell<Vec<MeasuredFootnote>>,
     /// The outline row the scroll spy last revealed (O-03).
     pub(crate) outline_revealed: Option<String>,
+    /// The outline filter's keyboard cursor: the heading index the arrow keys
+    /// are on (O-05). `None` while the filter has no visible row.
+    pub(crate) outline_cursor: Cell<Option<usize>>,
 }
 
 impl WindowState {

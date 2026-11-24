@@ -807,3 +807,71 @@ fn clicking_a_link_in_a_preview_cell_follows_it_and_closes_the_preview() {
     assert!(runtime.state.table_preview().is_none(), "the preview closes on its link");
     assert!(runtime.state.reading.landing.is_some(), "and the destination was followed");
 }
+
+// ---- A-13: the preview's instructions, filter and sort semantics ---------
+
+/// One node of the accessibility JSON, by element key.
+fn a11y<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    if node.get("key").and_then(|value| value.as_str()) == Some(key) {
+        return Some(node);
+    }
+    node.get("children")?.as_array()?.iter().find_map(|child| a11y(child, key))
+}
+
+fn a11y_states(node: &serde_json::Value) -> Vec<&str> {
+    node.get("states")
+        .and_then(|value| value.as_array())
+        .map(|states| states.iter().filter_map(|state| state.as_str()).collect())
+        .unwrap_or_default()
+}
+
+#[test]
+fn the_preview_announces_its_region_keys_filter_and_sort_state() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    crate::table_ui::scene_table_preview(&mut state);
+    let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.frame(0.0);
+    let tree = runtime.accessibility_json();
+
+    // A-13: the region label is the full key list, read once.
+    let region = a11y(&tree, "table-preview-scroll").expect("the scroll region");
+    let name = region.get("name").and_then(|value| value.as_str()).expect("the region's label");
+    assert!(name.contains("Table preview."), "{name}");
+    for key in [
+        "arrow keys",
+        "Page Up",
+        "Page Down",
+        "plus and minus",
+        "W fits the width",
+        "1 shows the actual size",
+        "Ctrl+F filters the rows",
+        "Escape closes",
+    ] {
+        assert!(name.contains(key), "the instruction label names {key:?}: {name}");
+    }
+
+    let filter = a11y(&tree, "table-preview-query").expect("the filter field");
+    assert_eq!(filter.get("name").and_then(|value| value.as_str()), Some("Filter rows"));
+    assert_eq!(
+        filter.get("shortcut").and_then(|value| value.as_str()),
+        Some("Control+F"),
+        "A-13: the filter carries aria-keyshortcuts"
+    );
+
+    // The count stays a polite live region while filtering.
+    let count = a11y(&tree, "table-preview-count").expect("the count");
+    assert!(a11y_states(count).contains(&"live-polite"), "the row count announces: {count}");
+    assert_eq!(count.get("name").and_then(|value| value.as_str()), Some("2 of 8 rows"));
+
+    // Sortable headers say their direction; the others still explain the click.
+    let sorted = a11y(&tree, "table-preview-head-0").expect("the sorted header");
+    assert_eq!(sorted.get("sort").and_then(|value| value.as_str()), Some("ascending"));
+    let unsorted = a11y(&tree, "table-preview-head-1").expect("another header");
+    assert!(unsorted.get("sort").is_none());
+    assert_eq!(
+        unsorted.get("description").and_then(|value| value.as_str()),
+        Some(lmdv_i18n::t!("zoom.sortHint")),
+        "A-13: the header's title explains what a click does"
+    );
+}

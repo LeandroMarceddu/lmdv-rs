@@ -702,6 +702,85 @@ fn question_mark_toggles_the_keys_overlay_in_the_reading_view() {
 }
 
 #[test]
+fn the_keys_overlay_traps_focus_and_ignores_reading_keys() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    scene_reader(&mut state);
+    let mut runtime = open(state);
+    settle(&mut runtime, 4);
+    runtime.key(shifted("?"));
+    settle(&mut runtime, 2);
+    assert_eq!(runtime.state.help_view(), Some(crate::window::HelpView::Shortcuts), "`?` opens it (R-11)");
+
+    // Rune's modal stack opens on the dialog's content and keeps Tab inside it.
+    let focused = |rt: &Runtime<WindowState>| {
+        rt.elements().into_iter().find(|element| element.focused).and_then(|element| element.key)
+    };
+    assert_eq!(focused(&runtime).as_deref(), Some("close"), "focus lands on the dialog's Close button");
+    for _ in 0..6 {
+        runtime.key(key(Key::Tab));
+        settle(&mut runtime, 1);
+        assert_eq!(focused(&runtime).as_deref(), Some("close"), "Tab never leaves the dialog");
+    }
+
+    // R-11: “while open, most keys are ignored”. The reading keys must not move
+    // the article behind the scrim.
+    let start = scroll(&runtime).offset;
+    for _ in 0..5 {
+        runtime.key(text("j"));
+    }
+    settle(&mut runtime, 8);
+    assert_eq!(scroll(&runtime).offset, start, "`j` is ignored while the overlay is open");
+
+    // Nor may a window command run behind it: Ctrl+T would add a tab and
+    // Ctrl+Q would start the quit sequence.
+    let tabs = runtime.state.tabs().len();
+    runtime.key(command('t'));
+    settle(&mut runtime, 2);
+    assert_eq!(runtime.state.tabs().len(), tabs, "Ctrl+T is ignored");
+    runtime.key(command('q'));
+    settle(&mut runtime, 2);
+    assert_eq!(runtime.state.tabs().len(), tabs, "Ctrl+Q is ignored");
+    assert!(runtime.state.prompt().is_none(), "no close or quit prompt opened");
+    assert_eq!(runtime.state.help_view(), Some(crate::window::HelpView::Shortcuts), "the overlay stays");
+
+    // Escape closes it and the article gets its keys back.
+    runtime.key(key(Key::Escape));
+    settle(&mut runtime, 2);
+    assert!(runtime.state.help_view().is_none(), "Esc closes the overlay");
+    runtime.key(text("j"));
+    settle(&mut runtime, 8);
+    assert!(scroll(&runtime).offset > start, "the reading keys work again after closing");
+}
+
+#[test]
+fn the_keys_overlay_closes_on_a_backdrop_click_and_returns_focus() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    scene_reader(&mut state);
+    let mut runtime = open(state);
+    settle(&mut runtime, 4);
+    runtime.key(shifted("?"));
+    settle(&mut runtime, 2);
+    runtime.pointer_move(5.0, 5.0);
+    runtime.pointer_down(5.0, 5.0);
+    runtime.pointer_up(5.0, 5.0);
+    settle(&mut runtime, 2);
+    assert!(runtime.state.help_view().is_none(), "a click outside the dialog closes it");
+
+    let article = runtime
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(ARTICLE_SCROLL_KEY))
+        .expect("the article");
+    assert!(
+        !runtime.elements().iter().any(|element| element.focused && element.key.as_deref() == Some("close")),
+        "the dialog's focus is gone"
+    );
+    assert!(article.rect[3] > 0.0);
+}
+
+#[test]
 fn a_fast_wheel_burst_keeps_the_article_and_lands_on_its_target() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
@@ -763,4 +842,30 @@ fn opening_the_front_matter_card_builds_the_article_again() {
     });
     runtime.frame(1.0 / 60.0);
     assert!(!has_entries(&runtime), "and closing it takes the table away again");
+}
+
+#[test]
+fn the_keys_overlay_holds_the_window_keys_on_the_start_page_too() {
+    // R-11: “works even with no document”; the modal's key hold applies there
+    // as well, where no article owns the reading keys.
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.reset_to_start_page();
+    let mut runtime = open(state);
+    settle(&mut runtime, 2);
+    runtime.key(shifted("?"));
+    settle(&mut runtime, 2);
+    assert_eq!(runtime.state.help_view(), Some(crate::window::HelpView::Shortcuts));
+
+    let tabs = runtime.state.tabs().len();
+    runtime.key(command('t'));
+    runtime.key(command('p'));
+    settle(&mut runtime, 2);
+    assert_eq!(runtime.state.tabs().len(), tabs, "Ctrl+T is ignored");
+    assert!(!runtime.state.share.busy(), "Ctrl+P did not start a print");
+    assert_eq!(runtime.state.help_view(), Some(crate::window::HelpView::Shortcuts));
+
+    runtime.key(key(Key::Escape));
+    settle(&mut runtime, 2);
+    assert!(runtime.state.help_view().is_none(), "Esc still closes it");
 }

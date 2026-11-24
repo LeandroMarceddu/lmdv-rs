@@ -198,6 +198,41 @@ pub fn has_toc_headings(doc: &MdDoc) -> bool {
     toc_headings(doc).next().is_some()
 }
 
+/// R-11: the keys overlay holds the reading surface's keyboard.
+///
+/// The overlay is a Rune modal: focus and Tab stay inside it, its own buttons
+/// take Enter and Space, and `app::on_key` has already handled the keys that
+/// close it (`Esc`, `Ctrl+W`, `F1`, `?`). Everything else belongs to the
+/// dialog, so the reading surface answers `true` and no window command (open,
+/// new tab, quit, print) runs behind the scrim. Tab stays Rune's so a frame
+/// without focus inside the dialog can still traverse into it.
+pub(crate) fn help_overlay_holds_keys(state: &WindowState, event: &KeyEvent) -> bool {
+    if state.help_view().is_none() {
+        return false;
+    }
+    if event.key == rune::Key::Tab {
+        return false;
+    }
+    // A plain scroll/activation key belongs to the dialog's scroll view and
+    // focus, not to the reading surface behind it. Modified chords (Ctrl+T,
+    // Ctrl+Q, Ctrl+F, …) still stop here so no window command runs behind the
+    // scrim.
+    let plain = !event.mods.cmd && !event.mods.ctrl && !event.mods.alt && !event.mods.logo;
+    let dialog_key = matches!(
+        event.key,
+        rune::Key::PageDown
+            | rune::Key::PageUp
+            | rune::Key::Home
+            | rune::Key::End
+            | rune::Key::Up
+            | rune::Key::Down
+            | rune::Key::Left
+            | rune::Key::Right
+            | rune::Key::Enter
+    ) || matches!(&event.key, rune::Key::Text(text) if text == " ");
+    !(plain && dialog_key)
+}
+
 /// The source byte range of `line` (1-based, without its newline), clamped to
 /// the document; `--line` paints this while the flash lasts.
 pub fn line_range(doc: &MdDoc, line: usize) -> Option<Range<usize>> {
@@ -371,6 +406,9 @@ pub struct ReaderView<'a> {
     images: &'a dyn ImageResolver,
     wires: RenderWires,
     details: Option<&'a dyn lmdv_render::DetailsState>,
+    /// E-06: the app's rendered-diagram cache, when the preview should reuse
+    /// unchanged diagrams instead of rebuilding them.
+    mermaid: Option<&'a dyn lmdv_render::MermaidCache>,
     highlights: Vec<Highlight>,
     scroll: Rc<Cell<ScrollSnapshot>>,
     /// The report signal the heading pin watches (O-04); `None` in a bare reader.
@@ -403,6 +441,7 @@ impl<'a> ReaderView<'a> {
             images: &lmdv_render::NoImages,
             wires: RenderWires::default(),
             details: None,
+            mermaid: None,
             highlights: Vec::new(),
             scroll,
             signal: None,
@@ -458,6 +497,13 @@ impl<'a> ReaderView<'a> {
     /// The open `<details>`/front-matter cards (M-22).
     pub fn details(mut self, details: Option<&'a dyn lmdv_render::DetailsState>) -> Self {
         self.details = details;
+        self
+    }
+
+    /// The rendered-diagram cache (E-06): an unchanged diagram is reused from
+    /// `cache` instead of being laid out again on every preview refresh.
+    pub fn mermaid(mut self, cache: &'a dyn lmdv_render::MermaidCache) -> Self {
+        self.mermaid = Some(cache);
         self
     }
 
@@ -543,6 +589,7 @@ impl<'a> ReaderView<'a> {
             math: self.math,
             images: self.images,
             wires: self.wires,
+            mermaid: self.mermaid,
             details: self.details,
             selectable: true,
             sticky_tables: true,

@@ -160,6 +160,52 @@ jobs:
           pattern: "*-release"
           merge-multiple: true
 
+      # The public key ships so a user can verify without cloning the repo.
+      - name: Stage release key
+        run: cp packaging/lmdv-release-key.asc dist/
+
+      # One checksum file covering every published asset, signed below with the
+      # dedicated release key (OI-153). The signature is over SHA256SUMS; the
+      # key itself is also an asset.
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          # Exactly the files this release publishes (dist/*): no directories,
+          # no SHA256SUMS itself, no GitHub source archives. Sorted by name.
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\0' \
+            | LC_ALL=C sort -z \
+            | xargs -0 -r sha256sum -- > SHA256SUMS
+          [ -s SHA256SUMS ] || { echo "no release assets in dist/" >&2; exit 1; }
+          # Fail the release if the rows and dist/* disagree.
+          awk '{ print $2 }' SHA256SUMS | LC_ALL=C sort > "$RUNNER_TEMP/checksummed"
+          find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%P\n' \
+            | LC_ALL=C sort > "$RUNNER_TEMP/dist-files"
+          diff -u "$RUNNER_TEMP/dist-files" "$RUNNER_TEMP/checksummed"
+          cat SHA256SUMS
+
+      - name: Sign SHA256SUMS
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.LMDV_GPG_PRIVATE_KEY }}
+          GPG_PASSPHRASE: ${{ secrets.LMDV_GPG_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_PRIVATE_KEY:-}" ] || [ -z "${GPG_PASSPHRASE:-}" ]; then
+            echo "::error::release signing secrets LMDV_GPG_PRIVATE_KEY/LMDV_GPG_PASSPHRASE are missing"
+            exit 1
+          fi
+          export GNUPGHOME="$(mktemp -d)"
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          chmod 700 "$GNUPGHOME"
+          printf '%s\n' "$GPG_PRIVATE_KEY" > "$GNUPGHOME/private.asc"
+          gpg --batch --import "$GNUPGHOME/private.asc"
+          printf '%s' "$GPG_PASSPHRASE" > "$GNUPGHOME/passphrase"
+          chmod 600 "$GNUPGHOME/passphrase"
+          gpg --batch --yes --pinentry-mode loopback --passphrase-file "$GNUPGHOME/passphrase" \
+            --armor --detach-sign --output dist/SHA256SUMS.asc dist/SHA256SUMS
+          gpg --batch --verify dist/SHA256SUMS.asc dist/SHA256SUMS
+          gpg --batch --list-keys
+
       # A release keeps its curated notes in docs/releases/<tag>.md; without one
       # (an old tag, a quick patch) GitHub's generated notes stand in.
       - name: Choose release notes

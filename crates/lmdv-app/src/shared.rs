@@ -19,7 +19,7 @@ use lmdv_io::store::{
     WindowSession, load_positions_reported, load_prefs_reported, load_recents_reported, load_ui_reported,
 };
 use lmdv_io::watch::{DocWatcher, FileEvent};
-use lmdv_io::{AppDirs, DirsIssue, Launch};
+use lmdv_io::{AppDirs, DirsIssue, Launch, ReadError};
 use lmdv_md::MdDoc;
 use rune::{Waker, WindowPlacement};
 
@@ -62,6 +62,11 @@ fn cascade_point(placement: WindowPlacement) -> (i32, i32) {
 /// It matches the desktop-file basename (`lmdv.desktop`), not the XDG data root.
 pub const APP_ID: &str = "lmdv";
 
+/// How often the start page re-checks its recents for files that are gone
+/// (H-02). The sweep is a metadata probe of at most twelve paths and runs only
+/// while the start page is in front, so two seconds is generous and cheap.
+pub const RECENTS_SWEEP_MS: u64 = 2_000;
+
 /// State every window reads and writes through `Rc`.
 ///
 /// Created once on the UI thread by [`AppShared::start`]. Workers only ever see
@@ -75,6 +80,9 @@ pub struct AppShared {
     docs: RefCell<DocumentRegistry>,
     windows: RefCell<WindowRegistry>,
     recents: RefCell<Vec<Recent>>,
+    /// When the start page last swept the recents for files that are gone
+    /// (H-02), so drawing it never stats the list every frame.
+    recents_swept: Cell<Option<u64>>,
     positions: RefCell<PositionTable>,
     /// The latest parse per document, shared by every window showing it.
     parse: RefCell<ParseCache>,
@@ -223,6 +231,7 @@ impl AppShared {
             docs: RefCell::new(DocumentRegistry::new()),
             windows: RefCell::new(WindowRegistry::new()),
             recents: RefCell::new(recents.value),
+            recents_swept: Cell::new(None),
             positions: RefCell::new(positions.value),
             parse: RefCell::new(ParseCache::default()),
             store,
@@ -568,6 +577,41 @@ impl AppShared {
     /// `recents.json`.
     pub(crate) fn preview_recents(&self, entries: impl IntoIterator<Item = (PathBuf, u64)>) {
         *self.recents.borrow_mut() = entries.into_iter().map(|(path, at)| Recent::new(path, at)).collect();
+        // A previewed list is not on disk; the next start-page frame checks it
+        // like any other list (H-02).
+        self.recents_swept.set(None);
+    }
+
+    /// Removes the recent files whose path no longer exists (H-02).
+    ///
+    /// The check belongs to **display**, not to loading `recents.json`: a file
+    /// deleted while the app runs disappears the next time the start page is
+    /// drawn. It is a synchronous metadata probe of at most
+    /// [`RECENTS_MAX`](lmdv_io::store::RECENTS_MAX) paths, run only while the
+    /// start page is in front and at most once every [`RECENTS_SWEEP_MS`], so
+    /// it never becomes per-frame I/O. A file that exists but cannot be read
+    /// is kept: only a vanished path is removed. Returns whether the list
+    /// changed, and persists the pruned list through the store writer.
+    pub fn prune_dead_recents(&self, now_unix_ms: u64) -> bool {
+        if let Some(last) = self.recents_swept.get()
+            && now_unix_ms.saturating_sub(last) < RECENTS_SWEEP_MS
+        {
+            return false;
+        }
+        self.recents_swept.set(Some(now_unix_ms));
+        let mut recents = self.recents.borrow_mut();
+        let before = recents.len();
+        if before == 0 {
+            return false;
+        }
+        recents.retain(|recent| !matches!(lmdv_io::probe(&recent.path), Err(ReadError::NotFound(_))));
+        if recents.len() == before {
+            return false;
+        }
+        let snapshot = recents.clone();
+        drop(recents);
+        self.queue_store(StorePatch::Recents(snapshot));
+        true
     }
 
     /// Remembered reading positions, keyed by canonical document path.
@@ -1809,6 +1853,35 @@ mod tests {
         assert!(shared.recents().is_empty(), "H-02: Clear empties the list");
         assert!(shared.flush_store(Duration::from_secs(2)), "the store writer answered");
         assert!(lmdv_io::store::load_recents(shared.dirs()).is_empty(), "P-05: the stored list is empty after Clear");
+    }
+
+    #[test]
+    fn dead_recents_are_pruned_on_the_display_clock_not_at_load() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let alive = temp.path().join("alive.md");
+        std::fs::write(&alive, "# Alive\n").unwrap();
+        let dying = temp.path().join("dying.md");
+        std::fs::write(&dying, "# Dying\n").unwrap();
+        shared.preview_recents([(alive.clone(), 1), (dying.clone(), 2)]);
+        assert_eq!(shared.recents().len(), 2, "H-02: loading keeps the entries until the page is shown");
+
+        std::fs::remove_file(&dying).unwrap();
+        assert!(shared.prune_dead_recents(10_000), "the vanished file is removed by the sweep");
+        assert_eq!(shared.recents().len(), 1);
+        assert_eq!(shared.recents()[0].path, alive);
+        assert!(!shared.prune_dead_recents(10_500), "the sweep is throttled, so drawing is never per-frame I/O");
+        assert!(shared.flush_store(Duration::from_secs(2)), "the store writer answered");
+        assert_eq!(lmdv_io::store::load_recents(shared.dirs()).len(), 1, "the pruned list is persisted");
+
+        // A path that exists but is not a readable file is not “dead”.
+        let replaced = temp.path().join("replaced.md");
+        std::fs::write(&replaced, "# Replaced\n").unwrap();
+        shared.preview_recents([(replaced.clone(), 3)]);
+        std::fs::remove_file(&replaced).unwrap();
+        std::fs::create_dir(&replaced).unwrap();
+        assert!(!shared.prune_dead_recents(20_000), "only a vanished path is removed");
+        assert_eq!(shared.recents().len(), 1, "a directory at the path keeps its row");
     }
 
     #[test]
