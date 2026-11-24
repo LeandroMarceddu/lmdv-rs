@@ -31,6 +31,7 @@ pub type Scene = fn(&mut WindowState);
 /// Headless scenes, for `--snap`, `--tree` and `--scene`.
 pub const SCENES: &[(&str, Scene)] = &[
     ("start", view::scene_start),
+    ("start-sepia", view::scene_start_sepia),
     ("tabs", view::scene_tabs),
     ("tab-overflow", view::scene_tab_overflow),
     ("help", view::scene_help),
@@ -47,6 +48,7 @@ pub const SCENES: &[(&str, Scene)] = &[
     ("browser-menu", view::scene_browser_menu),
     ("share", view::scene_share),
     ("editor", view::scene_editor),
+    ("editor-sepia", view::scene_editor_sepia),
     ("editor-menus", view::scene_editor_menus),
     ("notice-stack", view::scene_notice_stack),
     ("editor-block", view::scene_editor_block),

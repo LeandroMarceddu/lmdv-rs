@@ -2708,6 +2708,12 @@ pub fn scene_start(state: &mut WindowState) {
     state.ui.now_unix_ms = now;
 }
 
+/// The start page in the sepia palette, for the project site and J-01 checks.
+pub fn scene_start_sepia(state: &mut WindowState) {
+    scene_start(state);
+    state.scene_prefs(|prefs| prefs.theme = ThemePref::Sepia);
+}
+
 /// Three synthetic documents so the strip, panes and source preview are all
 /// visible without touching the filesystem.
 pub fn scene_tabs(state: &mut WindowState) {
@@ -3122,6 +3128,12 @@ pub fn scene_editor(state: &mut WindowState) {
     state.set_find_replace("buffer");
     state.ui.notice = None;
     state.ui.help = None;
+}
+
+/// The editor in the sepia palette, for the project site and J-01 checks.
+pub fn scene_editor_sepia(state: &mut WindowState) {
+    scene_editor(state);
+    state.scene_prefs(|prefs| prefs.theme = ThemePref::Sepia);
 }
 
 /// E-22: the format bar with its Insert menu open, next to the Tools trigger
