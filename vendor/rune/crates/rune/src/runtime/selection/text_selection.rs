@@ -13,6 +13,7 @@ pub struct TextSelection {
     pub(super) texts: Vec<SelectedText>,
     pub(super) text: String,
     pub(super) backward: bool,
+    pub(super) truncated: bool,
 }
 
 impl TextSelection {
@@ -33,6 +34,25 @@ impl TextSelection {
     /// the pointer is at.
     pub fn backward(&self) -> bool {
         self.backward
+    }
+    /// Collection across unbuilt virtual rows ([`El::virtual_rows`](crate::El::virtual_rows) or
+    /// [`El::virtualize`](crate::El::virtualize)) hit its cap of 10,000 unbuilt rows or 4 MiB of
+    /// UTF-8 text, so [`texts`](Self::texts) and [`text`](Self::text) hold only the prefix
+    /// collected before stopping. Always `false` when every selected text is mounted.
+    ///
+    /// ```
+    /// # use rune::col;
+    /// # let _ =
+    /// col().selection_group(true).selection_copy(|sel| {
+    ///     if sel.truncated() {
+    ///         return Some(format!("{}\n[selection truncated]", sel.text()));
+    ///     }
+    ///     None
+    /// })
+    /// # ;
+    /// ```
+    pub fn truncated(&self) -> bool {
+        self.truncated
     }
 }
 

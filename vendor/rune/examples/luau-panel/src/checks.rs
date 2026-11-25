@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use rune::time::Instant;
+use rune::time::now;
 use rune_luau::mlua::Value;
 use rune_luau::{Data, ErrorKind, Script, ScriptOptions, Sources};
 
@@ -30,7 +30,7 @@ fn watchdog() -> Check {
         "spin",
         Sources::single("return { spin = function() while true do end end, ok = function() return 1 end }"),
     );
-    let start = Instant::now();
+    let start = now();
     let err = script.query("spin", []).err();
     let took = start.elapsed();
     let still = script.query("ok", []).ok().and_then(|d| d.as_i64());

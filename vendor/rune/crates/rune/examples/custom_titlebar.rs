@@ -4,8 +4,9 @@
 //! over maximize. `Cx::chrome_insets` says what each takes. Press "Theme" to switch the app's
 //! colours away from the system's: the caption buttons follow through `Cx::caption_color`.
 //! "Zoom" scales the band with `Cx::titlebar_height`; "Dialog" opens a modal, which leaves the
-//! window's controls usable. Alt+Space in the field opens the window menu on Windows and
-//! types nothing.
+//! window's controls usable; "Language" toggles Dutch accessible names for the Windows caption
+//! buttons through `rune::set_labels` (also reachable headlessly via `--tree --scene dutch`).
+//! Alt+Space in the field opens the window menu on Windows and types nothing.
 use rune::*;
 
 const HEIGHT: f32 = 44.0;
@@ -16,7 +17,22 @@ struct State {
     presses: u32,
     zoom: usize,
     dialog: bool,
+    dutch: bool,
     note: TextEdit,
+}
+
+fn apply_labels(dutch: bool) {
+    if dutch {
+        rune::set_labels(|label| match label {
+            Label::Minimize => Some("Minimaliseren".into()),
+            Label::Maximize => Some("Maximaliseren".into()),
+            Label::Restore => Some("Herstellen".into()),
+            Label::Close => Some("Sluiten".into()),
+            _ => None,
+        });
+    } else {
+        rune::set_labels(|_| None);
+    }
 }
 
 fn view(s: &State, cx: &mut Cx<State>) -> El {
@@ -31,6 +47,11 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
     let band_height = HEIGHT * ZOOMS[s.zoom];
     cx.titlebar_height(band_height);
     let insets = cx.chrome_insets();
+    let full_screen = cx.is_full_screen();
+    let inset = cx.titlebar_inset();
+    let decoration_mode = cx.decoration_mode();
+    let tiled_edges = cx.tiled_edges();
+    let window_actions = cx.window_actions();
     let button = |key: &'static str, label: &'static str| {
         row()
             .key(key)
@@ -57,6 +78,14 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .gap(8.0)
         .child(text("Custom titlebar").color(ink))
         .child(el().grow(1.0))
+        .child(
+            button("full-screen", if full_screen { "Exit full screen" } else { "Full screen" })
+                .on_press_tx(move |_: &mut State, tx| tx.set_full_screen(!full_screen)),
+        )
+        .child(button("language", if s.dutch { "NL" } else { "EN" }).on_press(|s: &mut State| {
+            s.dutch = !s.dutch;
+            apply_labels(s.dutch);
+        }))
         .child(button("zoom", "Zoom").on_press(|s: &mut State| s.zoom = (s.zoom + 1) % ZOOMS.len()))
         .child(button("dialog", "Dialog").on_press(|s: &mut State| s.dialog = true))
         .child(button("theme", "Theme").on_press(move |s: &mut State| {
@@ -95,12 +124,34 @@ fn view(s: &State, cx: &mut Cx<State>) -> El {
         .child(col().padding(24.0).gap(8.0)
             .child(text("Drag the band to move the window; double-click it to maximize; right-click it for the window menu.").color(ink).wrap())
             .child(note)
-            .child(line(format!("chrome insets: leading {:.0}, trailing {:.0}, height {:.0}", insets.leading, insets.trailing, insets.height)))
-            .child(line(format!("scale {:.2}, theme presses {}", cx.env().scale, s.presses))))
+            .child(line(format!("chrome insets: leading {:.0}, trailing {:.0}, height {:.0} | full screen: {}, titlebar inset: {:.0}", insets.leading, insets.trailing, insets.height, full_screen, inset)))
+            .child(line(format!("wm: mode {:?} | tiled {:?} | actions menu={:?} max={:?} min={:?} full={:?} close={:?}", decoration_mode, tiled_edges, window_actions.window_menu, window_actions.maximize, window_actions.minimize, window_actions.fullscreen, window_actions.close)))
+            .child(line(format!("scale {:.2}, theme presses {}", cx.env().scale, s.presses)))
+            .child(line(format!(
+                "caption labels: {} / {} ({}) / {}",
+                rune::labels::label(Label::Minimize),
+                rune::labels::label(Label::Maximize),
+                rune::labels::label(Label::Restore),
+                rune::labels::label(Label::Close),
+            ))))
         .children(dialog)
 }
 
 fn main() {
-    let init = || State { dark: None, presses: 0, zoom: 0, dialog: false, note: TextEdit::new("") };
-    App::new(AppSpec::new("Custom titlebar", (720.0, 420.0), init, view)).titlebar(Titlebar::new(HEIGHT)).run();
+    let init = || State { dark: None, presses: 0, zoom: 0, dialog: false, dutch: false, note: TextEdit::new("") };
+    App::new(AppSpec {
+        scenes: &[
+            ("default", |s: &mut State| {
+                s.dutch = false;
+                apply_labels(false);
+            }),
+            ("dutch", |s: &mut State| {
+                s.dutch = true;
+                apply_labels(true);
+            }),
+        ],
+        ..AppSpec::new("Custom titlebar", (720.0, 420.0), init, view)
+    })
+    .titlebar(Titlebar::new(HEIGHT))
+    .run();
 }

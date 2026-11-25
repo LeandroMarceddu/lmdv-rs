@@ -9,12 +9,12 @@ deterministic. Do not run `cargo fmt --all` from the repository root: it
 follows path dependencies into `vendor/rune`; use `scripts/fmt-check.sh` for
 lmdv's own crates.
 
-Applied:
+Applied `0001`, `0003`, `0004` and `0005`. `0002` is retired: upstream Rune
+`f4ec14e` provides `App::on_close_request -> CloseResponse` itself.
 
 - `0001-text-inline-object.patch` — `Span::image` + `Span::rise`, inline image
   geometry for math, and `InlineImage::label` (the words a screen reader says
   where the image draws).
-- `0002-close-request-veto.patch` — `on_close_request` before hiding.
 - `0003-a11y-inline-object.patch` — the accessibility text speaks an inline
   image's label instead of the U+FFFC object marker; character lengths and word
   starts stay consistent with the spoken value.

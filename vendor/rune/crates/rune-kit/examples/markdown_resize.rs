@@ -259,7 +259,7 @@ fn main() {
                 rt.invalidate();
             });
             report(kb, "marks", &[row]);
-            let t = std::time::Instant::now();
+            let t = rune::time::now();
             let elements = rt.elements();
             println!(
                 "MARKS requested={} reported={} nodes={} elements={} elements_ms={:.3}",

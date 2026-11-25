@@ -9,6 +9,8 @@
 //!
 //! cargo build --profile perf -p rune --example embed_cost --features metal-backend --target aarch64-apple-ios-sim
 
+#![allow(unsafe_code)]
+
 use rune::{AppSpec, Color, Cx, El, ScrollSpec, TextStyle, Tx, col, oklch, row, text};
 
 const SECTIONS: usize = 60;
@@ -75,7 +77,6 @@ fn main() {
 mod embedded {
     use std::ffi::{c_char, c_void};
     use std::sync::Arc;
-    use std::time::Instant;
 
     use rune::embed::LayerHost;
 
@@ -102,6 +103,7 @@ mod embedded {
     fn process_cpu_us() -> f64 {
         // SAFETY: a zeroed rusage is valid, and getrusage only writes it.
         let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        // SAFETY: `u` is a live, writable `libc::rusage` for `RUSAGE_SELF`.
         unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
         let us = |t: libc::timeval| t.tv_sec as f64 * 1e6 + t.tv_usec as f64;
         us(u.ru_utime) + us(u.ru_stime)
@@ -124,9 +126,9 @@ mod embedded {
     }
 
     pub fn run() {
-        let began = Instant::now();
-        let warmup: usize = std::env::var("EMBED_WARMUP").ok().and_then(|s| s.parse().ok()).unwrap_or(120);
-        let frames: usize = std::env::var("EMBED_FRAMES").ok().and_then(|s| s.parse().ok()).unwrap_or(600);
+        let began = rune::time::now();
+        let warmup: usize = rune::env::var("EMBED_WARMUP").and_then(|s| s.parse().ok()).unwrap_or(120);
+        let frames: usize = rune::env::var("EMBED_FRAMES").and_then(|s| s.parse().ok()).unwrap_or(600);
         // SAFETY: a live CAMetalLayer that outlives the host, used only on this thread.
         let mut host = unsafe {
             LayerHost::from_core_animation_layer(
@@ -147,7 +149,7 @@ mod embedded {
         for _ in 0..warmup {
             host.frame();
         }
-        let (cpu, process, before, wall) = (thread_cpu_us(), process_cpu_us(), usage(), Instant::now());
+        let (cpu, process, before, wall) = (thread_cpu_us(), process_cpu_us(), usage(), rune::time::now());
         let mut drew = 0;
         for _ in 0..frames {
             drew += usize::from(host.frame().drew);
@@ -157,7 +159,7 @@ mod embedded {
         let n = frames as f64;
         println!(
             "backend={} host_ms={host_ms:.1} first_frame_ms={first_ms:.1} frames={frames} drew={drew} fps={:.1}",
-            std::env::var("RUNE_GPU_BACKEND").unwrap_or_else(|_| "wgpu".into()),
+            rune::env::var("RUNE_GPU_BACKEND").unwrap_or_else(|| "wgpu".into()),
             n / wall
         );
         println!(

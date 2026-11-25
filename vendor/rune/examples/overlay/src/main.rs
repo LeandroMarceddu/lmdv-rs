@@ -1,3 +1,8 @@
+//! A control window plus one transparent, click-through overlay per display sharing a `Live`
+//! remote cursor.
+
+#![forbid(unsafe_code)]
+
 use rune::{AppSpec, Color, Cx, El, Icon, Live, Tx, WindowHandle, WindowOptions, WindowSpec, col, el, icon, text};
 use std::sync::{
     Arc, Mutex,
@@ -44,7 +49,7 @@ fn view(s: &State, _: &mut Cx<State>) -> El {
             )
             .on_press(|s: &mut State| {
                 for window in s.overlays.lock().unwrap().iter() {
-                    let _ = window.set_click_through(true);
+                    window.set_click_through(true).ok();
                 }
             });
     }
@@ -81,11 +86,11 @@ fn setup(s: &mut State, _: rune::Waker) {
     }
     let cursor = s.cursor.clone();
     std::thread::spawn(move || {
-        let start = std::time::Instant::now();
+        let start = rune::time::now();
         for tick in 1..=480 {
             let t = tick as f64 / 120.0;
             std::thread::sleep(
-                (start + std::time::Duration::from_secs_f64(t)).saturating_duration_since(std::time::Instant::now()),
+                (start + std::time::Duration::from_secs_f64(t)).saturating_duration_since(rune::time::now()),
             );
             cursor.set(point(t));
         }

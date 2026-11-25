@@ -19,7 +19,7 @@ mod lazy {
     use rune::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     static STARTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -31,7 +31,7 @@ mod lazy {
     }
 
     fn wait(limit: Duration, f: impl Fn() -> bool) -> Option<Duration> {
-        let start = Instant::now();
+        let start = rune::time::now();
         while !f() {
             if start.elapsed() > limit {
                 return None;
@@ -71,6 +71,7 @@ mod lazy {
     }
 
     #[cfg(target_os = "windows")]
+    #[allow(unsafe_code)]
     fn private_mb() -> f64 {
         #[repr(C)]
         #[derive(Default)]

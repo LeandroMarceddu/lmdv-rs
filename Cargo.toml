@@ -4,7 +4,7 @@ members = ["crates/lmdv", "crates/lmdv-core", "crates/lmdv-io", "crates/lmdv-app
 exclude = ["vendor/rune"]
 
 [workspace.package]
-version = "0.10.0"
+version = "0.11.0"
 edition = "2024"
 license = "MIT"
 homepage = "https://leandromarceddu.github.io/lmdv-rs/"
@@ -22,15 +22,18 @@ rune = { path = "vendor/rune/crates/rune", default-features = false, features = 
 ] }
 rune-kit = { path = "vendor/rune/crates/rune-kit", features = ["markdown", "mermaid"] }
 
-# Rune's own workspace patches these five crates; a dependency's [patch] does
+# Rune's own workspace patches these eight crates; a dependency's [patch] does
 # not apply to the dependent workspace, so repeat them here. `tiny-skia-path`
-# is vendored too, but as a path dependency of `crates/rune` itself rather than
-# a patch, so resvg keeps its own copy of the published crate.
+# is vendored too, but as a path dependency of `crates/rune-text` itself rather
+# than a patch, so resvg keeps its own copy of the published crate.
 [patch.crates-io]
 wgpu-hal = { path = "vendor/rune/vendor/wgpu-hal" }
+naga = { path = "vendor/rune/vendor/naga" }
 winit = { path = "vendor/rune/vendor/winit" }
+sctk-adwaita = { path = "vendor/rune/vendor/sctk-adwaita" }
 parley_engine = { path = "vendor/rune/vendor/parley_engine" }
 accesskit_windows = { path = "vendor/rune/vendor/accesskit_windows" }
+accesskit_atspi_common = { path = "vendor/rune/vendor/accesskit_atspi_common" }
 accesskit_macos = { path = "vendor/rune/vendor/accesskit_macos" }
 
 [profile.dev]

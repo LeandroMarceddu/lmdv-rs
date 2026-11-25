@@ -1,9 +1,30 @@
+//! A small chat view with safe-area insets, text input and clipboard copy, built for both
+//! desktop and `wasm32` browsers (`scripts/web-build.sh web-hello`).
+
+#![forbid(unsafe_code)]
+
 use rune::tok::{self, type_};
 use rune::{AppSpec, Cx, El, ScrollSpec, TextEdit, Tx, col, el, row, text, text_input};
+#[cfg(target_arch = "wasm32")]
+mod a11y_proof;
+#[cfg(target_arch = "wasm32")]
+mod aria_proof;
+#[cfg(target_arch = "wasm32")]
+mod auto_complete_proof;
+#[cfg(target_arch = "wasm32")]
+mod caret_browsing_proof;
 #[cfg(target_arch = "wasm32")]
 mod image_proof;
 #[cfg(target_arch = "wasm32")]
 mod input_proof;
+#[cfg(target_arch = "wasm32")]
+mod pointer_lock_proof;
+#[cfg(target_arch = "wasm32")]
+mod popup_modal_proof;
+#[cfg(target_arch = "wasm32")]
+mod rtl_proof;
+#[cfg(target_arch = "wasm32")]
+mod textbox_mirror_proof;
 
 struct State {
     messages: Vec<String>,
@@ -47,6 +68,7 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
     }
     let composer = text_input(&state.draft, type_::BODY)
         .key("composer")
+        .label("Message")
         .placeholder("Message", t.text_secondary)
         .color(t.text)
         .grow(1.0)
@@ -58,6 +80,8 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
         .on_submit(send);
     let send_button = el()
         .key("send")
+        .role("button")
+        .disabled(state.draft.text.trim().is_empty())
         .h(48.0)
         .px(16.0)
         .center()
@@ -67,6 +91,7 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
         .on_press_tx(send);
     let copy = el()
         .key("copy")
+        .role("button")
         .h(44.0)
         .px(8.0)
         .center()
@@ -79,7 +104,7 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
     let title = text("Messages").font(type_::TITLE).color(t.text).grow(1.0);
     #[cfg(target_arch = "wasm32")]
     let title = title.on_press(|_: &mut State| {
-        let _ = rune::web::open_url("https://www.rust-lang.org/");
+        rune::web::open_url("https://www.rust-lang.org/").ok();
     });
     col()
         .w_full()
@@ -90,7 +115,16 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
         .pl(16.0 + left)
         .gap(8.0)
         .fill(t.bg)
-        .child(row().w_full().center_y().child(title).child(copy))
+        .child(
+            row()
+                .key("header")
+                .role("toolbar")
+                .label("Conversation actions")
+                .w_full()
+                .center_y()
+                .child(title)
+                .child(copy),
+        )
         .child(
             col()
                 .key("messages")
@@ -104,8 +138,64 @@ fn view(state: &State, cx: &mut Cx<State>) -> El {
         .child(row().w_full().gap(8.0).child(composer).child(send_button))
 }
 
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(inline_js = "
+export function recordFrameDrawn(messages, elements) {
+    const prev = window.__runeFramesDrawn;
+    window.__runeFramesDrawn = {
+        count: (prev ? prev.count : 0) + 1,
+        messages,
+        elements,
+    };
+}
+")]
+extern "C" {
+    #[wasm_bindgen(js_name = recordFrameDrawn)]
+    fn record_frame_drawn(messages: usize, elements: usize);
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen(start))]
 pub fn start() {
+    #[cfg(target_arch = "wasm32")]
+    if a11y_proof::enabled() {
+        a11y_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if aria_proof::enabled() {
+        aria_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if auto_complete_proof::enabled() {
+        auto_complete_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if caret_browsing_proof::enabled() {
+        caret_browsing_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if pointer_lock_proof::enabled() {
+        pointer_lock_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if popup_modal_proof::enabled() {
+        popup_modal_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if rtl_proof::enabled() {
+        rtl_proof::run();
+        return;
+    }
+    #[cfg(target_arch = "wasm32")]
+    if textbox_mirror_proof::enabled() {
+        textbox_mirror_proof::run();
+        return;
+    }
     #[cfg(target_arch = "wasm32")]
     if input_proof::enabled() {
         input_proof::run();
@@ -116,5 +206,15 @@ pub fn start() {
         image_proof::run();
         return;
     }
-    rune::run(AppSpec::new("Messages", (390.0, 760.0), State::default, view));
+    #[cfg(target_arch = "wasm32")]
+    if image_proof::scaled_enabled() {
+        image_proof::run_scaled();
+        return;
+    }
+    let app = rune::App::new(AppSpec::new("Messages", (390.0, 760.0), State::default, view));
+    #[cfg(target_arch = "wasm32")]
+    let app = app.on_frame_drawn(|rt| {
+        record_frame_drawn(rt.state.messages.len(), rt.elements().len());
+    });
+    app.run();
 }

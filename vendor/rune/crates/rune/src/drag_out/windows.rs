@@ -15,8 +15,13 @@
 //! it with the drop description every Windows drag shows; a file drag without a picture gets
 //! the shell's own image of the files.
 
-use std::cell::RefCell;
-use std::sync::OnceLock;
+#![allow(unsafe_code)]
+
+use std::cell::{Cell, RefCell};
+use std::sync::{
+    OnceLock,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use windows::Win32::Foundation::{
     DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HGLOBAL, POINT, S_OK, SIZE,
@@ -44,17 +49,28 @@ type Done = Box<dyn FnOnce(DragOutcome)>;
 
 /// A session waiting for its posted message.
 struct Pending {
+    hwnd: usize,
+    id: usize,
     start: DragOutStart,
     picture: Option<DragImage>,
     done: Done,
     scale: f32,
 }
 
+static NEXT_DRAG: AtomicUsize = AtomicUsize::new(0x5255_4e47);
+
 thread_local! {
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
+    static DRAGGING: Cell<bool> = const { Cell::new(false) };
 }
 
-const SUBCLASS: usize = 0x5255_4e47;
+struct DragGuard;
+
+impl Drop for DragGuard {
+    fn drop(&mut self) {
+        DRAGGING.with(|d| d.set(false));
+    }
+}
 
 fn message() -> u32 {
     static MESSAGE: OnceLock<u32> = OnceLock::new();
@@ -65,23 +81,40 @@ fn message() -> u32 {
 }
 
 pub(super) fn begin(window: &winit::window::Window, start: DragOutStart, picture: Option<DragImage>, done: Done) {
+    // Refuse re-entrant drag loops while `DoDragDrop` is already on the stack.
+    if DRAGGING.with(Cell::get) {
+        return done(DragOutcome::Cancelled);
+    }
     let Some(hwnd) = crate::platform::win32::hwnd(window) else { return done(DragOutcome::Cancelled) };
-    let pending = Pending { start, picture, done, scale: window.scale_factor() as f32 };
-    // One drag at a time: one that never got to run ends now.
+    let id = NEXT_DRAG.fetch_add(1, Ordering::Relaxed);
+    let pending = Pending { hwnd: hwnd as usize, id, start, picture, done, scale: window.scale_factor() as f32 };
+    use windows_sys::Win32::UI::Shell::{RemoveWindowSubclass, SetWindowSubclass};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IsWindow, PostMessageW};
+    // One drag at a time: remove any earlier window's pending subclass and cancel it.
     if let Some(old) = PENDING.with(|p| p.borrow_mut().replace(pending)) {
+        // SAFETY: removes the old drag's subclass if its window is still live.
+        unsafe {
+            if IsWindow(old.hwnd as _) != 0 {
+                RemoveWindowSubclass(old.hwnd as _, Some(procedure), old.id);
+            }
+        }
         (old.done)(DragOutcome::Cancelled);
     }
-    use windows_sys::Win32::UI::Shell::{RemoveWindowSubclass, SetWindowSubclass};
     // SAFETY: Win32 calls on a live window this thread owns; the subclass keeps no pointer.
     let posted = unsafe {
-        SetWindowSubclass(hwnd, Some(procedure), SUBCLASS, 0) != 0
-            && (windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, message(), 0, 0) != 0 || {
-                RemoveWindowSubclass(hwnd, Some(procedure), SUBCLASS);
+        SetWindowSubclass(hwnd, Some(procedure), id, 0) != 0
+            && (PostMessageW(hwnd, message(), id, 0) != 0 || {
+                RemoveWindowSubclass(hwnd, Some(procedure), id);
                 false
             })
     };
     if !posted {
-        run();
+        if let Some(p) = PENDING.with(|p| {
+            let mut slot = p.borrow_mut();
+            slot.as_ref().is_some_and(|cur| cur.id == id).then(|| slot.take()).flatten()
+        }) {
+            (p.done)(DragOutcome::Cancelled);
+        }
     }
 }
 
@@ -90,20 +123,23 @@ unsafe extern "system" fn procedure(
     msg: u32,
     w: usize,
     l: isize,
-    _: usize,
+    id: usize,
     _: usize,
 ) -> isize {
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::WM_NCDESTROY;
-    if msg == message() || msg == WM_NCDESTROY {
+    if (msg == message() && w == id) || msg == WM_NCDESTROY {
         // SAFETY: removes this subclass from the window it was set on.
-        unsafe { RemoveWindowSubclass(hwnd, Some(procedure), SUBCLASS) };
+        unsafe { RemoveWindowSubclass(hwnd, Some(procedure), id) };
         if msg == message() {
-            run();
+            run(hwnd as usize, id);
             return 0;
         }
-        if let Some(p) = PENDING.with(|p| p.borrow_mut().take()) {
-            (p.done)(DragOutcome::Cancelled);
+        if let Some(p) = PENDING.with(|p| {
+            let mut slot = p.borrow_mut();
+            slot.as_ref().is_some_and(|cur| cur.hwnd == hwnd as usize && cur.id == id).then(|| slot.take()).flatten()
+        }) {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (p.done)(DragOutcome::Cancelled))).ok();
         }
     }
     // SAFETY: passes every other message on.
@@ -111,9 +147,22 @@ unsafe extern "system" fn procedure(
 }
 
 /// Runs the pending session to its end and reports how it ended.
-fn run() {
-    let Some(p) = PENDING.with(|p| p.borrow_mut().take()) else { return };
-    let outcome = session(&p).unwrap_or(DragOutcome::Cancelled);
+fn run(hwnd: usize, id: usize) {
+    let Some(p) = PENDING.with(|p| {
+        let mut slot = p.borrow_mut();
+        slot.as_ref().is_some_and(|cur| cur.hwnd == hwnd && cur.id == id).then(|| slot.take()).flatten()
+    }) else {
+        return;
+    };
+    if DRAGGING.with(|d| d.replace(true)) {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (p.done)(DragOutcome::Cancelled))).ok();
+        return;
+    }
+    let _guard = DragGuard;
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session(&p)))
+        .ok()
+        .flatten()
+        .unwrap_or(DragOutcome::Cancelled);
     if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (p.done)(outcome))).is_err() {
         eprintln!("rune: drag end callback panicked");
     }
@@ -125,7 +174,7 @@ fn session(p: &Pending) -> Option<DragOutcome> {
     // Every object made here is released when it drops; media handed to `SetData` with
     // `fRelease` belong to the data object.
     unsafe {
-        let _ = OleInitialize(None);
+        OleInitialize(None).ok();
         let data = data_object(item)?;
         if let Some(png) = item.png_data() {
             set(&data, png_format(), hglobal(png)?);
@@ -146,7 +195,7 @@ fn session(p: &Pending) -> Option<DragOutcome> {
                 }
                 // The shell's own picture of the files, under the pointer.
                 None if !item.paths().is_empty() => {
-                    let _ = helper.InitializeFromWindow(None, None, &data);
+                    helper.InitializeFromWindow(None, None, &data).ok();
                 }
                 None => {}
             }
@@ -247,7 +296,7 @@ unsafe fn set(data: &IDataObject, format: u16, medium: HGLOBAL) {
     };
     // SAFETY: a valid format and an HGLOBAL medium the call takes ownership of.
     unsafe {
-        let _ = data.SetData(&format, &medium, true);
+        data.SetData(&format, &medium, true).ok();
     }
 }
 

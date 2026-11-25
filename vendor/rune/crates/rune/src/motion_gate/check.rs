@@ -17,6 +17,7 @@ use crate::ElementInfo;
 
 mod commits;
 mod evidence;
+mod handovers;
 mod kicks;
 mod loops;
 pub mod paint;
@@ -26,6 +27,7 @@ mod regions;
 mod series;
 
 pub use evidence::{dump, sheet};
+pub use handovers::Handover;
 use paint::Paint;
 
 /// One finding kind, its threshold and what it means. The checker reads its numbers from here.
@@ -47,6 +49,11 @@ pub const RULES: &[Rule] = &[
         means: "unmounts at or above this opacity: it vanished instead of leaving",
     },
     Rule { kind: "cut-exit", threshold: 0.05, means: "unmounts above this opacity, below pop-out's: a fade cut short" },
+    Rule {
+        kind: "bad-handover",
+        threshold: 2.0,
+        means: "a recorded matched handover whose target was not born on the same frame, within this many pt of the source's last drawn rect, or at its opacity",
+    },
     Rule {
         kind: "jump",
         threshold: 2.0,
@@ -274,6 +281,8 @@ pub struct Recording {
     /// Per frame: the box (x y w h, points) of the tooltip Rune drew for `El::help`, which
     /// shows and hides at once after a rest, as AppKit's does.
     pub tips: Vec<Option<[f32; 4]>>,
+    /// `El::matched` handovers recorded during the run.
+    pub handovers: Vec<Handover>,
 }
 
 impl Recording {
@@ -546,11 +555,15 @@ pub fn check(rec: &Recording) -> Vec<Finding> {
             })
             .collect()
     };
+    let paired = handovers::check(rec, &mut out);
     let mut left: HashMap<usize, Vec<(usize, Snap)>> = HashMap::new(); // frame → (track, last state) of pop-outs
     let mut ks: Vec<&usize> = deaths.keys().collect();
     ks.sort();
     for &k in ks {
         for i in outermost(&deaths[&k]) {
+            if paired.deaths.contains(&(k, i)) {
+                continue;
+            }
             let Some(last) = tr[i].at(k - 1).copied() else { continue };
             if !seen(&last, size) || area(&last.vis) < 16.0 || loops.contains(&i) || last.flags & VIRTUAL != 0 {
                 continue;
@@ -601,6 +614,9 @@ pub fn check(rec: &Recording) -> Vec<Finding> {
     ks.sort();
     for &k in ks {
         for i in outermost(&births[&k]) {
+            if paired.births.contains(&(k, i)) {
+                continue;
+            }
             let t = &tr[i];
             let Some(first) = t.at(k).copied() else { continue };
             if first.op < rule("pop-in")

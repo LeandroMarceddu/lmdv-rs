@@ -7,11 +7,108 @@
 //! and never changes after, so a block turns at most once: from the direction around it to its
 //! own, when its first letter arrives.
 
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
 use super::*;
 use rune::Direction;
 
+#[derive(Default)]
+struct PtrHasher(u64);
+
+impl Hasher for PtrHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.wrapping_mul(0x517cc1b727220a95) ^ u64::from(b);
+        }
+    }
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (i as u64).wrapping_mul(0x517cc1b727220a95).rotate_left(5);
+    }
+}
+
+/// Precomputed first-strong direction for every [`Block`] in a document, evaluated bottom-up in
+/// one iterative pass so deep neutral lists and quotes never re-scan their subtrees.
+#[derive(Default)]
+pub(super) struct Dirs(HashMap<usize, Option<Direction>, BuildHasherDefault<PtrHasher>>);
+
+enum DirWork<'a> {
+    Enter(&'a [Block]),
+    Visit(&'a Block),
+    FinishQuote(&'a Block, &'a [Block]),
+    FinishList(&'a Block, &'a [Vec<Block>]),
+}
+
+impl Dirs {
+    pub(super) fn new(blocks: &[Block]) -> Self {
+        let mut map: HashMap<usize, Option<Direction>, BuildHasherDefault<PtrHasher>> =
+            HashMap::with_capacity_and_hasher(blocks.len() * 2, BuildHasherDefault::default());
+        let mut stack = vec![DirWork::Enter(blocks)];
+        while let Some(work) = stack.pop() {
+            match work {
+                DirWork::Enter(slice) => {
+                    for b in slice.iter().rev() {
+                        stack.push(DirWork::Visit(b));
+                    }
+                }
+                DirWork::Visit(b) => match b {
+                    Block::Para(inl) | Block::Heading(_, inl) => {
+                        map.insert(std::ptr::from_ref(b) as usize, inline_dir(inl));
+                    }
+                    Block::Table(t) => {
+                        map.insert(std::ptr::from_ref(b) as usize, table_dir(t));
+                    }
+                    Block::Quote(inner) => {
+                        stack.push(DirWork::FinishQuote(b, inner));
+                        stack.push(DirWork::Enter(inner));
+                    }
+                    Block::List { items, .. } => {
+                        stack.push(DirWork::FinishList(b, items));
+                        for item in items.iter().rev() {
+                            stack.push(DirWork::Enter(item));
+                        }
+                    }
+                    _ => {
+                        map.insert(std::ptr::from_ref(b) as usize, None);
+                    }
+                },
+                DirWork::FinishQuote(b, inner) => {
+                    let d = inner.iter().find_map(|c| map.get(&(std::ptr::from_ref(c) as usize)).copied().flatten());
+                    map.insert(std::ptr::from_ref(b) as usize, d);
+                }
+                DirWork::FinishList(b, items) => {
+                    let d = items.iter().find_map(|item| {
+                        item.iter().find_map(|c| map.get(&(std::ptr::from_ref(c) as usize)).copied().flatten())
+                    });
+                    map.insert(std::ptr::from_ref(b) as usize, d);
+                }
+            }
+        }
+        Self(map)
+    }
+
+    #[inline(always)]
+    pub(super) fn of(&self, b: &Block) -> Option<Direction> {
+        self.0.get(&(std::ptr::from_ref(b) as usize)).copied().flatten()
+    }
+
+    #[inline]
+    pub(super) fn of_slice(&self, blocks: &[Block]) -> Option<Direction> {
+        blocks.iter().find_map(|b| self.of(b))
+    }
+}
+
 /// The direction of `inl`'s first strong character outside its isolated runs.
 pub(super) fn inline_dir(inl: &Inline) -> Option<Direction> {
+    if !inl.text.bytes().any(|b| b.is_ascii_alphabetic() || b >= 0x80) {
+        return None;
+    }
     let mut at = 0;
     for r in units(inl).into_iter().chain([inl.text.len()..inl.text.len()]) {
         if let Some(d) = inl.text.get(at..r.start).and_then(Direction::of) {
@@ -20,18 +117,6 @@ pub(super) fn inline_dir(inl: &Inline) -> Option<Direction> {
         at = at.max(r.end);
     }
     None
-}
-
-/// The direction of the first of `blocks` that has one: a list's first item's, a quote's first
-/// block's, a table's.
-pub(super) fn blocks_dir(blocks: &[Block]) -> Option<Direction> {
-    blocks.iter().find_map(|b| match b {
-        Block::Para(inl) | Block::Heading(_, inl) => inline_dir(inl),
-        Block::List { items, .. } => items.iter().find_map(|item| blocks_dir(item)),
-        Block::Quote(inner) => blocks_dir(inner),
-        Block::Table(t) => table_dir(t),
-        _ => None,
-    })
 }
 
 /// A table's direction (which side its first column sits on): its header's, else its rows'.
@@ -53,12 +138,23 @@ pub(super) fn isolated(e: El, inl: &Inline) -> El {
     units(inl).into_iter().fold(e, |e, r| e.isolate(r, Direction::Ltr))
 }
 
+/// Whether the link over bytes `a..b` of `inl`, to `url`, shows its own address (a bare or
+/// autolinked URL, a `mailto:`), not a label.
+pub(super) fn shows_address(inl: &Inline, a: usize, b: usize, url: &str) -> bool {
+    let shown = inl.text.get(a..b).unwrap_or_default().trim();
+    shown == url || ["http://", "https://", "www.", "file://", "mailto:"].iter().any(|p| shown.starts_with(p))
+}
+
 /// The runs of `inl` that keep their own order: each inline code chip with its padding, and each
 /// link whose text is its address.
 fn units(inl: &Inline) -> Vec<Range<usize>> {
     let mut out: Vec<Range<usize>> = Vec::new();
-    let mut code: Vec<Range<usize>> =
-        inl.spans.iter().filter(|s| matches!(s.2, Style::Code | Style::CodePad)).map(|s| s.0..s.1).collect();
+    let mut code: Vec<Range<usize>> = inl
+        .spans
+        .iter()
+        .filter(|s| matches!(s.2, Style::Code | Style::CodePad | Style::Math))
+        .map(|s| s.0..s.1)
+        .collect();
     code.sort_by_key(|r| r.start);
     for r in code {
         match out.last_mut() {
@@ -67,10 +163,7 @@ fn units(inl: &Inline) -> Vec<Range<usize>> {
         }
     }
     for (a, b, url) in &inl.links {
-        let shown = inl.text.get(*a..*b).unwrap_or_default().trim();
-        let address = shown == url.as_str()
-            || ["http://", "https://", "www.", "file://", "mailto:"].iter().any(|p| shown.starts_with(p));
-        if address && !out.iter().any(|r| r.start < *b && *a < r.end) {
+        if shows_address(inl, *a, *b, url) && !out.iter().any(|r| r.start < *b && *a < r.end) {
             out.push(*a..*b);
         }
     }

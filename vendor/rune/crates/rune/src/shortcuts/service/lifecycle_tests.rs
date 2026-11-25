@@ -71,7 +71,7 @@ fn closing_releases_callers_waiting_for_the_owner() {
     let guard = Guard::attach(
         &app.shared,
         Arc::new(move || {
-            let _ = wake.send(());
+            wake.send(()).ok();
         }),
         true,
         false,
@@ -92,7 +92,7 @@ fn a_second_host_keeps_waiting_callers_and_either_close_ends_the_service() {
     let first = Guard::attach(
         &app.shared,
         Arc::new(move || {
-            let _ = first_wake.send(());
+            first_wake.send(()).ok();
         }),
         true,
         false,

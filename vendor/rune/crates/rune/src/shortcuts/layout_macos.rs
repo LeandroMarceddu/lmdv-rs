@@ -1,4 +1,7 @@
 //! Translate only display labels. The input source is borrowed for one call and never changed.
+
+#![allow(unsafe_code)]
+
 use std::ffi::c_void;
 
 #[link(name = "Carbon", kind = "framework")]
@@ -32,6 +35,7 @@ unsafe extern "C" {
 struct Source(*const c_void);
 impl Drop for Source {
     fn drop(&mut self) {
+        // SAFETY: `self.0` is a non-null retained `TISInputSourceRef` from `TISCopyCurrentKeyboardLayoutInputSource`, released once on drop.
         unsafe { CFRelease(self.0) };
     }
 }
@@ -56,10 +60,12 @@ pub(super) fn label(key: u32, modifiers: u32) -> Option<String> {
     }
     // AppKit also calls TIS. A private mutex cannot serialize with it; stay on the
     // UI thread. Background/headless callers get the documented US fallback.
+    // SAFETY: `pthread_main_np` takes no arguments and is safe to call from any thread.
     if unsafe { pthread_main_np() } == 0 {
         return None;
     }
-    // TIS returns a retained source; its layout data remains alive until Source drops.
+    // SAFETY: on the main thread (checked above); `TISCopyCurrentKeyboardLayoutInputSource` returns
+    // a retained source wrapped in `Source` so `layout` stays valid for `chord_label`.
     unsafe {
         let source = TISCopyCurrentKeyboardLayoutInputSource();
         if source.is_null() {
@@ -90,6 +96,7 @@ const CONTROL: u32 = 1 << 12;
 /// The layout must point to live TIS Unicode layout data, on the main thread.
 pub(super) unsafe fn chord_label(layout: *const c_void, key: u32, modifiers: u32) -> Option<String> {
     let modifiers = modifiers & (CMD | CONTROL);
+    // SAFETY: caller guarantees `layout` points to live TIS Unicode layout data on the main thread.
     [modifiers, modifiers & !CONTROL, 0].into_iter().find_map(|state| unsafe { translate(layout, key, state) })
 }
 
@@ -100,6 +107,8 @@ pub(super) unsafe fn translate(layout: *const c_void, key: u32, modifiers: u32) 
     let mut dead = 0;
     // kUCKeyActionDisplay, kUCKeyTranslateNoDeadKeysMask. UCKeyTranslate takes Carbon
     // modifiers shifted down a byte.
+    // SAFETY: caller guarantees `layout` is valid TIS layout data on the main thread; `dead`,
+    // `length`, and `chars` are live, writable output buffers matching `chars.len()`.
     let status = unsafe {
         UCKeyTranslate(
             layout,

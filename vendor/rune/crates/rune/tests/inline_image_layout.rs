@@ -166,3 +166,29 @@ fn a_rise_on_plain_text_shifts_its_run() {
     assert!(shifts[1].abs() < 1e-3, "the text after it keeps the baseline: {shifts:?}");
     assert!(raised.height() >= 30.0, "the line grows above the rise: {}", raised.height());
 }
+
+/// A changed image or rise is a new layout: both enter `Span::affects_layout` and the layout key,
+/// so the cache never hands back a shape from another picture or baseline.
+#[test]
+fn a_changed_image_or_rise_shapes_anew() {
+    let mut text = TextSystem::default();
+    let style = TextStyle::new(16.0, 400.0).lh(20.0);
+    let content = placeholder("x#y");
+    let at = content.find(OBJECT_REPLACEMENT).unwrap();
+    let image = |w: f32| InlineImage::new(pixels(8, 8), w, 8.0).ascent(10.0).descent(0.0);
+
+    let narrow = text.layout_rich(&content, &[Span::new(at, at + 3).image(image(10.0))], style, 1.0, None);
+    let wide = text.layout_rich(&content, &[Span::new(at, at + 3).image(image(30.0))], style, 1.0, None);
+    assert!((only_box(&wide).0.width - 30.0).abs() < 1e-3, "the wider image, not the cached layout");
+    assert!((only_box(&narrow).0.width - 10.0).abs() < 1e-3, "the first layout keeps its own room");
+    assert!(wide.full_width() > narrow.full_width() + 15.0, "and the line grew with it");
+
+    let low = text.layout_rich(&content, &[Span::new(at, at + 3).image(image(10.0))], style, 1.0, None);
+    let high = text.layout_rich(&content, &[Span::new(at, at + 3).image(image(10.0)).rise(4.0)], style, 1.0, None);
+    let (_, low_baseline, _) = only_box(&low);
+    let (_, high_baseline, _) = only_box(&high);
+    assert!(
+        (high_baseline - low_baseline - 4.0).abs() < 1e-3,
+        "the rise moved the line's baseline, not the cached layout: {low_baseline} vs {high_baseline}"
+    );
+}

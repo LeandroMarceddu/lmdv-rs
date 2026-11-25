@@ -83,10 +83,10 @@ fn caption_button(
         _ => (Color::TRANSPARENT, symbol),
     };
     let (key, label) = match button {
-        CaptionButton::Minimize => ("rune-caption-minimize", "Minimize"),
-        CaptionButton::Maximize if caption.maximized => ("rune-caption-maximize", "Restore"),
-        CaptionButton::Maximize => ("rune-caption-maximize", "Maximize"),
-        CaptionButton::Close => ("rune-caption-close", "Close"),
+        CaptionButton::Minimize => ("rune-caption-minimize", caption_label(crate::Label::Minimize)),
+        CaptionButton::Maximize if caption.maximized => ("rune-caption-maximize", caption_label(crate::Label::Restore)),
+        CaptionButton::Maximize => ("rune-caption-maximize", caption_label(crate::Label::Maximize)),
+        CaptionButton::Close => ("rune-caption-close", caption_label(crate::Label::Close)),
     };
     let mut e = el()
         .key(key)
@@ -103,10 +103,17 @@ fn caption_button(
         e.handlers.on_press = Some(Rc::new(move |_, tx: &mut crate::Tx| match button {
             CaptionButton::Minimize => tx.minimize(),
             CaptionButton::Maximize => tx.toggle_maximized(),
-            CaptionButton::Close => tx.close_window(),
+            CaptionButton::Close => tx.request_user_close(),
         }));
     }
     e
+}
+
+/// Resolves a caption button's accessible name through [`crate::set_labels`], falling back to
+/// English if the app returns `None` or a blank string so the button never becomes unnamed in
+/// assistive technology.
+fn caption_label(label: crate::Label<'_>) -> String {
+    crate::labels::named(label).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| crate::labels::english(label))
 }
 
 /// The symbol, laid out in device pixels so its strokes land on whole pixels: `scale` is device

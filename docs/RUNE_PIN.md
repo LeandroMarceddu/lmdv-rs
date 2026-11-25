@@ -1,12 +1,12 @@
 # Rune pin
 
 - Repository: https://github.com/anomalyco/rune
-- Snapshot commit: `cca5df6fafb4721d96fe105f126ebfd2ec351bb6`
+- Snapshot commit: `f4ec14ed32256ae0c36e73476825f9245437de5b`
 - Branch: `dev`
-- Snapshot date: 2026-11-17
-- Upstream head checked 2026-11-25: `f4ec14ed32256ae0c36e73476825f9245437de5b`
-  (927 commits ahead; `dev` is the default branch and there is no `main`; port
-  [OI-189](OPEN_ITEMS.md) queued, pin unchanged)
+- Snapshot date: 2026-11-25
+- Upstream head checked 2026-11-25: `c94de5574743478f19b87c3ee1c6e4b40d234d3d`
+  (5 commits past the pin; `dev` is the default branch and there is no `main`;
+  the pin is the measured rev for [OI-189](OPEN_ITEMS.md))
 - License: MIT
 - Toolchain pinned by upstream: Rust `1.99.1` (`rust-toolchain.toml`)
 

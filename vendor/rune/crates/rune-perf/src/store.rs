@@ -1,6 +1,7 @@
 use crate::{
     Config, LARGE_BYTES, SLOW_MS, Sample,
     incident::{Detector, Finding},
+    now, now_ms,
     recorder::Health,
     stats::Stats,
 };
@@ -14,7 +15,7 @@ use std::{
         atomic::Ordering::Relaxed,
         mpsc::{Receiver, RecvTimeoutError},
     },
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 const LOG_BYTES: u64 = 4 << 20;
@@ -27,6 +28,42 @@ const CHECK_EVERY: Duration = Duration::from_secs(2);
 const QUIET: Duration = Duration::from_secs(2);
 /// Memory lines kept while nothing else is to be written; they go out only beside a finding.
 const MEMORY_LINES: usize = 20;
+
+#[derive(Clone, Copy)]
+enum IdleTidy {
+    Parked { last: Option<Instant> },
+    Armed { last: Option<Instant>, due: Instant },
+}
+
+impl IdleTidy {
+    fn on_work(self, now: Instant, hooked: bool) -> Self {
+        let last = match self {
+            Self::Parked { last } | Self::Armed { last, .. } => last,
+        };
+        if !hooked {
+            return Self::Parked { last };
+        }
+        let due = last.map_or(now + crate::IDLE, |prev| (prev + crate::IDLE_MIN_GAP).max(now + crate::IDLE));
+        Self::Armed { last, due }
+    }
+
+    fn wait(self, now: Instant) -> Option<Duration> {
+        match self {
+            Self::Parked { .. } => None,
+            Self::Armed { due, .. } => Some(due.saturating_duration_since(now)),
+        }
+    }
+
+    fn take_due(&mut self, now: Instant) -> bool {
+        match *self {
+            Self::Armed { due, .. } if now >= due => {
+                *self = Self::Parked { last: Some(now) };
+                true
+            }
+            _ => false,
+        }
+    }
+}
 
 pub(crate) fn run(config: Config, rx: Receiver<Sample>, start: Instant, health: &Health) -> io::Result<()> {
     std::fs::create_dir_all(&config.directory)?;
@@ -41,17 +78,32 @@ pub(crate) fn run(config: Config, rx: Receiver<Sample>, start: Instant, health: 
     }
     let mut writer = Writer::new(&config, start, health);
     let mut checked: Option<Instant> = None;
+    let mut tidy = IdleTidy::Parked { last: None };
     loop {
         let got = match writer.due {
-            Some(due) => rx.recv_timeout(due.saturating_duration_since(Instant::now())),
-            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(due) => rx.recv_timeout(due.saturating_duration_since(now())),
+            // Nothing due to flush: when a hook is armed after samples, tidy once per idle spell
+            // (at least IDLE_MIN_GAP apart), then wait with no timer.
+            None => match (config.idle, tidy.wait(now())) {
+                (Some(idle), Some(wait)) => match rx.recv_timeout(wait) {
+                    Err(RecvTimeoutError::Timeout) => {
+                        if tidy.take_due(now()) {
+                            idle();
+                        }
+                        continue;
+                    }
+                    got => got,
+                },
+                _ => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            },
         };
         match got {
             Ok(s) => {
                 writer.accept(s);
+                tidy = tidy.on_work(now(), config.idle.is_some());
                 if checked.is_none_or(|at| at.elapsed() >= CHECK_EVERY) {
                     writer.check();
-                    checked = Some(Instant::now());
+                    checked = Some(now());
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
@@ -127,7 +179,7 @@ impl<'a> Writer<'a> {
     fn accept(&mut self, s: Sample) {
         if self.stats.accept(s) {
             self.lines.push(json!({"kind": "frame", "launch": self.launch, "frame": s.json()}));
-            self.due = Some(Instant::now() + QUIET);
+            self.due = Some(crate::now() + QUIET);
         }
         if let Some(f) = self.detector.frame(s, &self.stats) {
             self.incident(s.at_ms, f);
@@ -153,7 +205,7 @@ impl<'a> Writer<'a> {
             self.hook_dropped += 1;
         }
         self.found.push((name, value));
-        self.due = Some(Instant::now() + QUIET);
+        self.due = Some(crate::now() + QUIET);
     }
 
     /// Writes what was found since the last flush: the log lines, then each incident file and a
@@ -295,9 +347,6 @@ impl Log<'_> {
         self.size += line.len() as u64;
         Ok(())
     }
-}
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64
 }
 
 #[cfg(test)]

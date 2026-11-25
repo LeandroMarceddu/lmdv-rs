@@ -106,10 +106,10 @@ runner="$root/runner"
 mkdir -p "$work/dist/AppDir/usr/bin" "$runner"
 # The names follow the current release shape; the checksum step is version-agnostic.
 assets=(
-    "lmdv-0.10.0-x86_64"
-    "lmdv-0.10.0-x86_64.AppImage"
-    "lmdv-0.10.0-installer.exe"
-    "lmdv-0.10.0-windows-x86_64.exe"
+    "lmdv-0.11.0-x86_64"
+    "lmdv-0.11.0-x86_64.AppImage"
+    "lmdv-0.11.0-installer.exe"
+    "lmdv-0.11.0-windows-x86_64.exe"
     "lmdv-release-key.asc"
 )
 for asset in "${assets[@]}"; do

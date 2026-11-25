@@ -3,6 +3,10 @@
 Research against the pin in [`RUNE_PIN.md`](RUNE_PIN.md). Supersedes
 [`RUNE_DELTA_2026-11-22.md`](RUNE_DELTA_2026-11-22.md).
 
+> **Ported on 2026-11-25 into v0.11.0.** Patch 0002 was retired and
+> 0001/0003/0004/0005 were re-ported; the estimates below are the pre-port
+> measurements and are kept for the record.
+
 Two independent read-only probes were run: a source survey of the new APIs
 against our open rows, and a measured patch-port probe (`git apply --check`,
 reject counts, moved-file mapping). No build was run for this report; every

@@ -44,6 +44,7 @@ impl<'a, 'p> ActivePass<'a, 'p> {
     }
 
     /// A caller's pass whose scissors all stay inside `bound` (`[x, y, width, height]`).
+    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     pub(super) fn borrowed_within(pass: &'a mut wgpu::RenderPass<'p>, bound: [u32; 4]) -> Self {
         ActivePass::Borrowed { pass, scissor: None, bound: Some(bound) }
     }
@@ -142,6 +143,7 @@ impl<'a, 'p> ActivePass<'a, 'p> {
                 in_layer,
                 srgb_blend: renderer.srgb_blend,
                 backdrop: Some(&bd.view),
+                fade_stops: renderer.fade_stops,
             };
             hook(EffectPhase::Backdrop(encoder), &site);
         })?;
@@ -314,5 +316,19 @@ impl Renderer {
         } else {
             self.backdrops.push(Backdrop { format, texture, view });
         }
+    }
+}
+
+/// Restricts a root render pass to the top-left `viewport` sub-rectangle when rendering into a
+/// larger capacited target texture (such as the Windows drag-resize shared texture ring). No-op
+/// when the target texture matches `viewport`.
+pub(super) fn apply_subrect_viewport(pass: &mut wgpu::RenderPass<'_>, view: &wgpu::TextureView, viewport: [u32; 2]) {
+    let [vw, vh] = viewport;
+    let tex = view.texture();
+    if vw > 0 && vh > 0 && (vw != tex.width() || vh != tex.height()) {
+        let vw = vw.min(tex.width());
+        let vh = vh.min(tex.height());
+        pass.set_viewport(0.0, 0.0, vw as f32, vh as f32, 0.0, 1.0);
+        pass.set_scissor_rect(0, 0, vw, vh);
     }
 }

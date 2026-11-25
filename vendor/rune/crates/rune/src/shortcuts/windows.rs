@@ -1,4 +1,7 @@
 //! A message-only window receives WM_HOTKEY inside winit's event-loop thread.
+
+#![allow(unsafe_code)]
+
 use super::{Backend, Shortcut, ShortcutError, ShortcutId, Sink, native_status, parse::*};
 use std::{cell::RefCell, collections::HashMap, ptr};
 use windows_sys::Win32::{
@@ -30,7 +33,7 @@ unsafe extern "system" fn procedure(hwnd: HWND, message: u32, w: WPARAM, l: LPAR
             if let Some(context) = p.as_ref() {
                 let id = context.ids.borrow().get(&(w as i32)).copied();
                 if let Some(id) = id {
-                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (context.sink)(id, None)));
+                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (context.sink)(id, None))).ok();
                 }
             }
             return 0;
@@ -85,6 +88,22 @@ impl Native {
     }
 }
 
+fn virtual_key(shortcut: &Shortcut) -> Result<u32, ShortcutError> {
+    if shortcut.physical_key() == super::PhysicalKeyCode::PrintScreen {
+        return Ok(u32::from(VK_SNAPSHOT));
+    }
+    let scan =
+        shortcut.physical_key().to_scancode().ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
+    // RegisterHotKey takes a virtual key. Resolve the physical scan code in the
+    // current layout rather than assuming US letters. Re-register on layout changes.
+    // SAFETY: `MapVirtualKeyW` takes integer values only and reads the active keyboard layout.
+    let key = unsafe { MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX) };
+    if key == 0 {
+        return Err(ShortcutError::InvalidAccelerator(shortcut.to_string()));
+    }
+    Ok(key)
+}
+
 impl Backend for Native {
     fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError> {
         let local = (1..=0xbfff)
@@ -96,16 +115,7 @@ impl Backend for Native {
                 mods |= native;
             }
         }
-        let scan = shortcut
-            .physical_key()
-            .to_scancode()
-            .ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
-        // RegisterHotKey takes a virtual key. Resolve the physical scan code in the
-        // current layout rather than assuming US letters. Re-register on layout changes.
-        let key = unsafe { MapVirtualKeyW(scan, MAPVK_VSC_TO_VK_EX) };
-        if key == 0 {
-            return Err(ShortcutError::InvalidAccelerator(shortcut.to_string()));
-        }
+        let key = virtual_key(shortcut)?;
         // SAFETY: RegisterHotKey and its window run on the event-loop thread.
         if unsafe { RegisterHotKey(self.window, local, mods, key) } == 0 {
             return Err(last_error());
@@ -139,5 +149,20 @@ impl Drop for Native {
             }
             DestroyWindow(self.window);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn printscreen_resolves_to_vk_snapshot() {
+        for accel in ["printscreen", "print", "prtsc", "ctrl+printscreen", "alt+printscreen", "shift+printscreen"] {
+            let shortcut: Shortcut = accel.parse().unwrap();
+            assert_eq!(virtual_key(&shortcut), Ok(u32::from(VK_SNAPSHOT)), "{accel}");
+        }
+        let space: Shortcut = "ctrl+space".parse().unwrap();
+        assert_eq!(virtual_key(&space), Ok(u32::from(VK_SPACE)));
     }
 }

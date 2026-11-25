@@ -37,15 +37,16 @@ impl Scene {
         let dy = title.as_ref().map_or(0.0, |_| title_height + TITLE_GAP);
 
         let mut out = String::with_capacity(512 + self.svg_ops.len() * 56);
-        let _ = write!(
+        write!(
             out,
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
             num(width),
             num(height),
             num(width),
             num(height),
-        );
-        let _ = write!(out, r#"<rect x="0" y="0" width="{}" height="{}" rx="6""#, num(width), num(height));
+        )
+        .ok();
+        write!(out, r#"<rect x="0" y="0" width="{}" height="{}" rx="6""#, num(width), num(height)).ok();
         color_attr(&mut out, "fill", paint.surface);
         color_attr(&mut out, "stroke", paint.surface_border);
         out.push_str(r#" stroke-width="0.5"/>"#);
@@ -53,7 +54,7 @@ impl Scene {
             let at = [(width - measured.size[0]) / 2.0, 0.0];
             push_lines(&mut out, title, at, measured.size[0], *font, paint.text, Align::Center, measured.wrap);
         }
-        let _ = write!(out, r#"<g transform="translate({} {}) scale({})">"#, num(dx), num(dy), num(self.scale));
+        write!(out, r#"<g transform="translate({} {}) scale({})">"#, num(dx), num(dy), num(self.scale)).ok();
         for op in &self.svg_ops {
             push_op(&mut out, op);
         }
@@ -147,20 +148,20 @@ fn lines(text: &str, font: TextStyle, width: f32, wrap: bool) -> Vec<String> {
 }
 
 fn push_text(out: &mut String, text: &str, x: f32, y: f32, font: TextStyle, color: Color, anchor: &str) {
-    let _ = write!(out, r#"<text x="{}" y="{}""#, num(x), num(y));
-    let _ = write!(out, r#" font-family="{}""#, escape_attr(family(font)).as_str());
-    let _ = write!(out, r#" font-size="{}""#, num(font.size));
+    write!(out, r#"<text x="{}" y="{}""#, num(x), num(y)).ok();
+    write!(out, r#" font-family="{}""#, escape_attr(family(font))).ok();
+    write!(out, r#" font-size="{}""#, num(font.size)).ok();
     if (font.weight - 400.0).abs() > 0.5 {
-        let _ = write!(out, r#" font-weight="{}""#, (font.weight / 100.0).round() * 100.0);
+        write!(out, r#" font-weight="{}""#, (font.weight / 100.0).round() * 100.0).ok();
     }
     if font.italic {
         out.push_str(r#" font-style="italic""#);
     }
     if font.tracking.abs() > 0.001 {
-        let _ = write!(out, r#" letter-spacing="{}""#, num(font.tracking));
+        write!(out, r#" letter-spacing="{}""#, num(font.tracking)).ok();
     }
     if anchor != "start" {
-        let _ = write!(out, r#" text-anchor="{anchor}""#);
+        write!(out, r#" text-anchor="{anchor}""#).ok();
     }
     color_attr(out, "fill", color);
     out.push('>');
@@ -188,12 +189,13 @@ fn push_op(out: &mut String, op: &Op) {
             path(out, points, *closed);
             out.push_str(r#"" fill="none""#);
             color_attr(out, "stroke", *color);
-            let _ = write!(
+            write!(
                 out,
                 r#" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="round"/>"#,
                 num(*width),
                 if *cap == LineCap::Round { "round" } else { "butt" },
-            );
+            )
+            .ok();
         }
     }
 }
@@ -201,7 +203,7 @@ fn push_op(out: &mut String, op: &Op) {
 fn path(out: &mut String, points: &[[f32; 2]], closed: bool) {
     for (index, point) in points.iter().enumerate() {
         let command = if index == 0 { 'M' } else { 'L' };
-        let _ = write!(out, "{command}{} {}", num(point[0]), num(point[1]));
+        write!(out, "{command}{} {}", num(point[0]), num(point[1])).ok();
     }
     if closed {
         out.push('Z');
@@ -211,9 +213,9 @@ fn path(out: &mut String, points: &[[f32; 2]], closed: bool) {
 /// `name="#rrggbb"` and, for translucent ink, `name-opacity`.
 fn color_attr(out: &mut String, name: &str, color: Color) {
     let hex = color.hex();
-    let _ = write!(out, r#" {name}="{}""#, &hex[..7]);
+    write!(out, r#" {name}="{}""#, &hex[..7]).ok();
     if color.a < 0.999 {
-        let _ = write!(out, r#" {name}-opacity="{}""#, num(color.a));
+        write!(out, r#" {name}-opacity="{}""#, num(color.a)).ok();
     }
 }
 

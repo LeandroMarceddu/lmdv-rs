@@ -1,13 +1,13 @@
 //! What a live-edit reload reports about a running window: its scroll offsets and moving frames.
 use super::*;
 
-impl<S: 'static> Runtime<S> {
-    pub(crate) fn hot_scrolls(&self) -> Vec<(String, f64)> {
-        self.nodes.iter().filter_map(|n| self.scrolls.get(&n.id).map(|s| (n.path.clone(), s.offset))).collect()
+impl types::TreeState {
+    pub(super) fn hot_scrolls(&self, scrolls: &HashMap<NodeId, ScrollState>) -> Vec<(String, f64)> {
+        self.nodes.iter().filter_map(|n| scrolls.get(&n.id).map(|s| (n.path.clone(), s.offset))).collect()
     }
 
-    pub(crate) fn hot_motion(&self) -> Vec<(String, [f32; 4], [f32; 4])> {
-        let store = self.scene.store();
+    pub(crate) fn hot_motion(&self, scene: &Scene) -> Vec<(String, [f32; 4], [f32; 4])> {
+        let store = scene.store();
         self.nodes
             .iter()
             .filter_map(|n| {
@@ -21,5 +21,12 @@ impl<S: 'static> Runtime<S> {
                 ))
             })
             .collect()
+    }
+}
+
+impl RuntimeCore {
+    #[inline]
+    pub(crate) fn hot_scrolls(&self) -> Vec<(String, f64)> {
+        self.tree.hot_scrolls(&self.scroll.scrolls)
     }
 }

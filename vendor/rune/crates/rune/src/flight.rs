@@ -137,9 +137,9 @@ pub(crate) fn selects(selector: &str, path: &str, key: Option<&str>) -> bool {
         return true;
     }
     let Some(scope) = selector.strip_suffix(key).and_then(|s| s.strip_suffix('/')) else { return false };
-    let Some(above) = path.strip_suffix(key).and_then(|s| s.strip_suffix('/')) else { return false };
-    let mut keyed = above.rsplit('/').filter(|seg| !seg.starts_with('#'));
-    scope.rsplit('/').all(|seg| keyed.next() == Some(seg))
+    let Some((above, own)) = path.rsplit_once('/') else { return false };
+    crate::runtime::element_path::segment_matches_key(own, key)
+        && crate::runtime::element_path::keyed_suffix_matches(above, scope)
 }
 
 /// Whether `selector` names a highlight keyed `key` in the text at `path`: [`selects`] for
@@ -149,8 +149,7 @@ pub(crate) fn selects_under(selector: &str, path: &str, key: &str) -> bool {
         return true;
     }
     let Some(scope) = selector.strip_suffix(key).and_then(|s| s.strip_suffix('/')) else { return false };
-    let mut keyed = path.rsplit('/').filter(|seg| !seg.starts_with('#'));
-    scope.rsplit('/').all(|seg| keyed.next() == Some(seg))
+    crate::runtime::element_path::keyed_suffix_matches(path, scope)
 }
 
 /// Transform glyph geometry without changing its atlas footprint. Clip edges share the same
@@ -166,7 +165,7 @@ pub(crate) fn transformed(
 ) -> Instance {
     let zoom = to.w / from.w.max(0.01);
     let map = |v: f32, from: f32, to: f32| (to + (v / scale - from) * zoom) * scale;
-    if q.params[1] == crate::render::KIND_GLYPH && q.radii[3] > 0.0 {
+    if q.kind() == Some(crate::render::Kind::Glyph) && q.radii[3] > 0.0 {
         // An outline glyph (`text::Outline`) moves its pen and magnifies its pixel: crisp in flight.
         q.radii = [map(q.radii[0], from.x, to.x), map(q.radii[1], from.y, to.y), q.radii[2], q.radii[3] * zoom];
     } else {
@@ -181,7 +180,7 @@ pub(crate) fn transformed(
     ];
     q.fill = q.fill.map(|v| v * alpha);
     q.clip = clip.map(|v| v * scale);
-    q.fade = crate::render::pack_fade(fade.map(|v| v * scale), q.clip, q.clip);
+    q.fade = crate::render::pack_fade(fade.map(|v| (v * scale).clamp(-65504.0, 65504.0)), q.clip, q.clip);
     q
 }
 

@@ -16,6 +16,7 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod mac {
     use crate::macos_support::{activate_helper, app_active, frontmost_pid, on_main, wait};
     use objc2::{class, msg_send, runtime::AnyObject};
@@ -23,7 +24,7 @@ mod mac {
     use rune::*;
     use std::process::Command;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     const HELPER: &str = "RUNE_OPEN_ACTIVATES_HELPER";
     const MAIN_TITLE: &str = "open activates main";
@@ -35,6 +36,7 @@ mod mac {
 
     /// The key window's title, if this app has a key window.
     fn key_title() -> Option<String> {
+        // SAFETY: invoked on the AppKit main thread (`on_main`); `window` and `title` are checked non-null before use.
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let window: *mut AnyObject = msg_send![app, keyWindow];
@@ -56,7 +58,7 @@ mod mac {
 
     fn expect_active(handle: &AppHandle<()>, title: &'static str, what: &str) {
         let me = std::process::id() as i32;
-        let start = Instant::now();
+        let start = rune::time::now();
         loop {
             let (active, front, key) = on_main(handle, || (app_active(), frontmost_pid(), key_title()));
             if active && front == me && key.as_deref() == Some(title) {
@@ -143,8 +145,8 @@ mod mac {
             main.quit();
         });
         app.run();
-        let _ = child.kill();
-        let _ = child.wait();
+        child.kill().ok();
+        child.wait().ok();
         assert_eq!(*result.lock().unwrap(), Some(true), "open_activates failed");
         println!("open_activates: ok");
     }

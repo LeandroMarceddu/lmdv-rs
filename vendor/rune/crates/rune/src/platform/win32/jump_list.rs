@@ -2,6 +2,8 @@
 //! a thread of its own: made on the first list, asleep on its channel in between, its own COM
 //! apartment. Each entry is a shell link to this executable with the entry's argument.
 
+#![allow(unsafe_code)]
+
 use std::collections::HashSet;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
@@ -43,7 +45,7 @@ pub(crate) fn set(list: JumpList) {
         return;
     }
     w.last = Some(list.clone());
-    let _ = w.to.send(list);
+    w.to.send(list).ok();
 }
 
 fn run(from: Receiver<JumpList>) {
@@ -58,7 +60,7 @@ fn run(from: Receiver<JumpList>) {
         while let Ok(newer) = from.try_recv() {
             list = newer;
         }
-        let started = std::time::Instant::now();
+        let started = crate::time::now();
         // SAFETY: shell COM calls in this thread's apartment.
         match unsafe { commit(&list, &exe) } {
             Ok(n) => eprintln!(

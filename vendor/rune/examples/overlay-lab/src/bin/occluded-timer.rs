@@ -7,6 +7,9 @@
 //! timer in a regular window instead. `OCCLUDED_TIMER_UPDATE=1` replaces the repeating timer
 //! with one 100 ms `wake_after` that an update from another thread sets each second, and also
 //! prints the latest that timer fired.
+
+#![forbid(unsafe_code)]
+
 use rune::{
     App, AppSpec, Color, Cx, El, OverlayInput, OverlayOptions, OverlaySpec, RunOptions, ScreenEdge, Tx, WindowOptions,
     WindowSpec, el, text,
@@ -57,7 +60,7 @@ fn poll_armed(s: &mut State) -> bool {
 }
 
 fn arm(s: &mut State, tx: &mut Tx) {
-    s.armed = Some(Instant::now());
+    s.armed = Some(rune::time::now());
     tx.wake_after(ARMED);
 }
 
@@ -108,9 +111,9 @@ fn main() {
 }
 
 fn report(handle: rune::AppHandle<State>, arm: impl Fn() + Send + 'static) {
-    let quit = std::env::var("OCCLUDED_TIMER_SECONDS").ok().and_then(|s| s.parse::<u64>().ok());
+    let quit = rune::env::var("OCCLUDED_TIMER_SECONDS").and_then(|s| s.parse::<u64>().ok());
     std::thread::spawn(move || {
-        let start = Instant::now();
+        let start = rune::time::now();
         loop {
             std::thread::sleep(Duration::from_secs(1));
             let elapsed = start.elapsed().as_secs();

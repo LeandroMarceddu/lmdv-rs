@@ -4,8 +4,6 @@
 //!
 //!     cargo run -p rune-light --profile perf --example frame_bench
 
-use std::time::Instant;
-
 use rune_fx::{Fx, FxFrame, FxOptions, FxRenderer, GlowParams, LensParams, Shape};
 use rune_light::{Gi, Glass, GlassRenderer, GlassSettings, Light, LightRenderer, Prim, Scene, Settings};
 
@@ -61,7 +59,7 @@ fn main() {
         light.render(&device, &queue, &mut encoder, &scene(&small, None), &base, &text, &target);
         finish(encoder);
         let mut encoder = device.create_command_encoder(&Default::default());
-        let t = Instant::now();
+        let t = rune::time::now();
         light.render(&device, &queue, &mut encoder, &scene(&big, None), &base, &text, &target);
         grow.push(t.elapsed().as_secs_f64() * 1e6);
         finish(encoder);
@@ -81,11 +79,11 @@ fn main() {
         let (mut l, mut g) = (Vec::new(), Vec::new());
         for frame in 0..320 {
             let mut encoder = device.create_command_encoder(&Default::default());
-            let t = Instant::now();
+            let t = rune::time::now();
             light.render(&device, &queue, &mut encoder, &scene(&small, gi), &base, &text, &target);
             let lit = t.elapsed().as_secs_f64() * 1e6;
             let fluence = light.inspect().fluence.clone();
-            let t = Instant::now();
+            let t = rune::time::now();
             glass.render(&device, &queue, &mut encoder, &panes, &[], GlassSettings::default(), &target, &fluence, &out);
             let glassed = t.elapsed().as_secs_f64() * 1e6;
             finish(encoder);
@@ -114,7 +112,7 @@ fn main() {
     let mut f = Vec::new();
     for frame in 0..320 {
         let mut encoder = device.create_command_encoder(&Default::default());
-        let t = Instant::now();
+        let t = rune::time::now();
         fx.prepare(
             &device,
             &queue,

@@ -239,6 +239,14 @@ fn unit_at(text: &str, i: usize, unit: U) -> (usize, usize) {
     }
 }
 
+/// `with_trailing_space`, transcribed: on Windows a double-click's word takes the spaces after it.
+fn with_trailing_space(text: &str, (a, b): (usize, usize)) -> (usize, usize) {
+    if !cfg!(target_os = "windows") || b > text.len() || text[a..b].trim().is_empty() {
+        return (a, b);
+    }
+    (a, text.len() - text[b..].trim_start_matches([' ', '\t']).len())
+}
+
 /// `extend`, transcribed.
 fn extend(origin: (usize, usize), at: (usize, usize)) -> (usize, usize) {
     if at.0 < origin.0 { (origin.1, at.0) } else { (origin.0, at.1.max(origin.1)) }
@@ -472,6 +480,7 @@ impl Dev {
                     _ => U::Paragraph,
                 };
                 let origin = unit_at(&content, at, unit);
+                let origin = if unit == U::Word { with_trailing_space(&content, origin) } else { origin };
                 (self.unit, self.origin) = (unit, origin);
                 (self.anchor, self.focus) = origin;
                 self.path = Some(path);
@@ -661,9 +670,9 @@ impl Walk {
     /// selected on the unedited document.
     fn reset(&mut self) {
         self.rt.cancel_pointer();
-        self.rt.selectable = Default::default();
-        self.rt.held_mods = Mods::default();
-        self.rt.queue.retain(|_| false);
+        self.rt.edit.selectable = Default::default();
+        self.rt.kbd.held_mods = Mods::default();
+        self.rt.frame.queue.retain(|_| false);
         self.rt.clock = 0.0;
         self.now = 0.0;
         if self.rt.state != Doc::default() {
@@ -746,7 +755,7 @@ impl Walk {
                 let (x, y) = point(Spot::Start(T::A));
                 self.rt.secondary_down(x, y);
                 self.rt.secondary_up(x, y);
-                self.rt.popups = Default::default();
+                self.rt.host.popups = Default::default();
                 self.dev.menu(&self.doc);
             }
             Letter::SelectAll => {
@@ -771,7 +780,7 @@ impl Walk {
 
     fn compare(&self, letter: Letter) -> Result<(), String> {
         let dev = &self.dev;
-        let ours = &self.rt.selectable;
+        let ours = &self.rt.edit.selectable;
         if ours.shift != dev.shift {
             return Err(format!("after {letter:?}: shift {}, dev {}", ours.shift, dev.shift));
         }
@@ -795,7 +804,7 @@ impl Walk {
                 }
                 if sel.anchor_end.is_some()
                     || sel.far.as_ref().is_some_and(|f| f.end.is_some())
-                    || !self.rt.selectable.mounted_between.is_empty()
+                    || !self.rt.edit.selectable.mounted_between.is_empty()
                 {
                     return Err(format!("after {letter:?}: virtual ends outside a virtual list"));
                 }
@@ -914,7 +923,7 @@ fn the_reference_knows_where_each_spot_lands() {
     walk.rt.frame(0.0);
     for t in [T::A, T::M, T::B, T::C] {
         let doc = Doc { remounted: true, ..Doc::default() };
-        assert!(walk.rt.nodes.iter().any(|n| n.path == doc.path(t)), "{t:?} at {}", doc.path(t));
+        assert!(walk.rt.tree.nodes.iter().any(|n| n.path == doc.path(t)), "{t:?} at {}", doc.path(t));
     }
-    assert!(walk.rt.nodes.iter().any(|n| n.path == "root/#1" && n.selection_group));
+    assert!(walk.rt.tree.nodes.iter().any(|n| n.path == "root/#1" && n.selection_group));
 }

@@ -46,7 +46,7 @@ fn main() {
     if !std::env::args().any(|a| a == "--tree") {
         std::thread::spawn(move || {
             let mut line = String::new();
-            let _ = std::io::stdin().read_line(&mut line);
+            std::io::stdin().read_line(&mut line).ok();
             handle.quit();
         });
     }

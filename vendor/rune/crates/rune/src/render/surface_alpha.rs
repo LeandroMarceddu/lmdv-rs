@@ -1,14 +1,37 @@
 //! Convert Rune's premultiplied composition to the straight alpha required by
 //! wgpu's straight-alpha surfaces and PNG exports. Metal's CAMetalLayer stays premultiplied.
 /// The pass's shader (`surface_alpha.wgsl`).
-pub(crate) const WGSL: &str = include_str!("../surface_alpha.wgsl");
+pub(crate) const WGSL: &str = include_str!("../shaders/surface_alpha.wgsl");
+
+/// Render targets of `*Srgb` formats hold sRGB-encoded premultiplied linear colour. PNG uses
+/// straight sRGB colour, so un-premultiply in linear light, not in the encoded byte domain.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn straight_alpha(pixels: &mut [u8]) {
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = f32::from(pixel[3]) / 255.0;
+        if alpha == 0.0 {
+            pixel[..3].fill(0);
+        } else if alpha < 1.0 {
+            for c in &mut pixel[..3] {
+                *c = (crate::color::srgb_encode(
+                    (crate::color::srgb_decode(f32::from(*c) / 255.0) / alpha).clamp(0.0, 1.0),
+                ) * 255.0)
+                    .round() as u8;
+            }
+        }
+    }
+}
 
 pub(crate) struct AlphaSurface {
     pub view: wgpu::TextureView,
+    // Keeps the backing texture alive for view/bind; resize() reads its extent on non-wasm32.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     texture: wgpu::Texture,
     pipeline: wgpu::RenderPipeline,
+    #[cfg(not(target_arch = "wasm32"))]
     layout: wgpu::BindGroupLayout,
     bind: wgpu::BindGroup,
+    #[cfg(not(target_arch = "wasm32"))]
     format: wgpu::TextureFormat,
 }
 
@@ -16,10 +39,10 @@ pub(crate) struct AlphaSurface {
 mod tests {
     #[test]
     fn gpu_straight_alpha_matches_cpu_reference() {
-        use crate::render::{Gpu, OFFSCREEN_FORMAT, Offscreen};
-        let gpu = Gpu::new(Gpu::instance(), None);
-        let alpha = super::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT, (4, 4));
-        let target = Offscreen::new(&gpu.device, 4, 4);
+        use crate::render::{Gpu, OFFSCREEN_FORMAT_LINEAR, Offscreen};
+        let Some(gpu) = Gpu::test_headless() else { return };
+        let alpha = super::AlphaSurface::new(&gpu.device, OFFSCREEN_FORMAT_LINEAR, (4, 4));
+        let target = Offscreen::with_format(&gpu.device, 4, 4, OFFSCREEN_FORMAT_LINEAR);
         for color in [[0.125_f32, 0.25, 0.375, 0.5], [0.0; 4], [0.4, 0.6, 0.1, 1.0]] {
             let mut enc = gpu.device.create_command_encoder(&Default::default());
             {
@@ -128,7 +151,16 @@ impl AlphaSurface {
             |(_, pipeline)| pipeline,
         );
         let (texture, view, bind) = Self::target(device, &layout, format, size);
-        Self { texture, view, bind, pipeline, layout, format }
+        Self {
+            texture,
+            view,
+            bind,
+            pipeline,
+            #[cfg(not(target_arch = "wasm32"))]
+            layout,
+            #[cfg(not(target_arch = "wasm32"))]
+            format,
+        }
     }
     fn target(
         device: &wgpu::Device,
@@ -156,6 +188,7 @@ impl AlphaSurface {
         });
         (texture, view, bind)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         if (self.texture.width(), self.texture.height()) == (size.0.max(1), size.1.max(1)) {
             return;

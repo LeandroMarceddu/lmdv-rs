@@ -22,7 +22,7 @@ pub fn composite(mode: Separable, src: [f32; 4], dst: [f32; 4]) -> [f32; 4] {
             Separable::Overlay => 1.0 - 2.0 * (1.0 - b) * (1.0 - s),
             Separable::SoftLight if s <= 0.5 => b - (1.0 - 2.0 * s) * b * (1.0 - b),
             Separable::SoftLight => {
-                let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { libm::sqrtf(b) };
+                let d = if b <= 0.25 { ((16.0 * b - 12.0) * b + 4.0) * b } else { libm::sqrtf(b.max(0.0)) };
                 b + (2.0 * s - 1.0) * (d - b)
             }
         };

@@ -14,6 +14,10 @@
 //!
 //! Zero lights and no emitters: [`LightRenderer::render`] records nothing and returns `false`; draw the UI as usual.
 
+#![forbid(unsafe_code)]
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod abi_tests;
 pub mod cpu;
 pub mod glass;
 mod gpu;
@@ -35,6 +39,8 @@ pub const FLAG_EMISSIVE: u32 = 2;
 pub const FLAG_RAISED: u32 = 4;
 /// Seen only by the GI tracer's distance field: marks where [`Scene::emission`] may glow. Never a surface.
 pub const FLAG_GI_HINT: u32 = 8;
+/// Its own pixels skip lighting and show the designed colour; it still casts, occludes and glows into the GI.
+pub const FLAG_UNLIT: u32 = 16;
 
 /// One lit primitive, in device pixels. Mirrors Rune's `Instance` rect/radii plus lighting fields.
 #[repr(C)]
@@ -53,6 +59,16 @@ pub struct Prim {
     /// albedo rgb for bounce, unused
     pub albedo: [f32; 4],
 }
+
+const _: () = {
+    assert!(std::mem::size_of::<Prim>() == 96);
+    assert!(std::mem::offset_of!(Prim, rect) == 0);
+    assert!(std::mem::offset_of!(Prim, radii) == 16);
+    assert!(std::mem::offset_of!(Prim, z) == 32);
+    assert!(std::mem::offset_of!(Prim, mat) == 48);
+    assert!(std::mem::offset_of!(Prim, emit) == 64);
+    assert!(std::mem::offset_of!(Prim, albedo) == 80);
+};
 
 impl Prim {
     /// A flat surface (receives light, casts nothing).
@@ -117,6 +133,22 @@ impl Prim {
         self.set(FLAG_EMISSIVE, on)
     }
 
+    /// Draw this surface at its designed colour: no ambient, direct light, GI or specular on its own pixels (text
+    /// on it too); exposure and the air in front (shafts, bulbs) still apply. With `emissive`, a glowing element
+    /// that lights its neighbours but keeps its hue under a lamp.
+    ///
+    /// ```
+    /// use rune_light::{FLAG_EMISSIVE, FLAG_UNLIT, Prim};
+    ///
+    /// let glow = Prim::rect(16.0, 16.0, 80.0, 32.0)
+    ///     .emissive([0.06, 0.32, 1.7])
+    ///     .unlit();
+    /// assert_eq!(glow.flags() & (FLAG_EMISSIVE | FLAG_UNLIT), FLAG_EMISSIVE | FLAG_UNLIT);
+    /// ```
+    pub fn unlit(self) -> Prim {
+        self.set(FLAG_UNLIT, true)
+    }
+
     /// Turn this rect into a GI hint: the region where the extra emission texture may glow (around an electric
     /// border, say), so the cascades' sphere tracing slows down there instead of stepping over it.
     pub fn gi_hint(mut self) -> Prim {
@@ -158,6 +190,14 @@ pub struct Light {
     /// shafts, bulb glow, specular, softness
     pub extra: [f32; 4],
 }
+
+const _: () = {
+    assert!(std::mem::size_of::<Light>() == 64);
+    assert!(std::mem::offset_of!(Light, pos) == 0);
+    assert!(std::mem::offset_of!(Light, color) == 16);
+    assert!(std::mem::offset_of!(Light, axis) == 32);
+    assert!(std::mem::offset_of!(Light, extra) == 48);
+};
 
 impl Light {
     pub fn point(x: f32, y: f32, z: f32) -> Light {
@@ -367,6 +407,33 @@ struct FrameU {
     ext: [f32; 4],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct Cascade {
+    n: u32,
+    count: u32,
+    merge: u32,
+    pad1: u32,
+}
+
+const _: () = {
+    assert!(std::mem::size_of::<FrameU>() == 144);
+    assert!(std::mem::offset_of!(FrameU, sf) == 0);
+    assert!(std::mem::offset_of!(FrameU, gs) == 16);
+    assert!(std::mem::offset_of!(FrameU, ambient) == 32);
+    assert!(std::mem::offset_of!(FrameU, counts) == 48);
+    assert!(std::mem::offset_of!(FrameU, misc) == 64);
+    assert!(std::mem::offset_of!(FrameU, text) == 80);
+    assert!(std::mem::offset_of!(FrameU, gi) == 96);
+    assert!(std::mem::offset_of!(FrameU, bg) == 112);
+    assert!(std::mem::offset_of!(FrameU, ext) == 128);
+    assert!(std::mem::size_of::<Cascade>() == 16);
+    assert!(std::mem::offset_of!(Cascade, n) == 0);
+    assert!(std::mem::offset_of!(Cascade, count) == 4);
+    assert!(std::mem::offset_of!(Cascade, merge) == 8);
+    assert!(std::mem::offset_of!(Cascade, pad1) == 12);
+};
+
 pub const CASCADES: u32 = 5;
 const QUERIES: u32 = 12 + 2 * CASCADES;
 const GI_SCALE: f32 = 0.125;
@@ -377,8 +444,7 @@ pub struct LightRenderer {
     field_size: (u32, u32),
     gi_size: (u32, u32),
     frame: wgpu::Buffer,
-    prims: wgpu::Buffer,
-    prim_cap: usize,
+    prims: rune_staging::GrowBuffer,
     lights: wgpu::Buffer,
     cascade_u: Vec<wgpu::Buffer>,
     own_u: Vec<wgpu::Buffer>,
@@ -463,8 +529,14 @@ impl LightRenderer {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let prim_cap = 256;
-        let prims = Self::prim_buffer(device, prim_cap);
+        let prims = rune_staging::GrowBuffer::new(
+            device,
+            "light prims",
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            std::mem::size_of::<Prim>(),
+            256,
+            0,
+        );
         let lights = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("lights"),
             size: (MAX_LIGHTS * std::mem::size_of::<Light>()) as u64,
@@ -474,11 +546,12 @@ impl LightRenderer {
         let cascade_buf = |n: u32, merge: u32| {
             let b = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("cascade"),
-                size: 16,
+                size: std::mem::size_of::<Cascade>() as u64,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
-            queue.write_buffer(&b, 0, bytemuck::cast_slice(&[n, CASCADES, merge, 0]));
+            let c = Cascade { n, count: CASCADES, merge, pad1: 0 };
+            queue.write_buffer(&b, 0, bytemuck::bytes_of(&c));
             b
         };
         let cascade_u: Vec<wgpu::Buffer> = (0..CASCADES).map(|n| cascade_buf(n, 1)).collect();
@@ -715,7 +788,7 @@ impl LightRenderer {
             height,
             field_size,
             &frame,
-            &prims,
+            prims.buffer(),
             &lights,
             &sampler,
             [&field_bgl, &shadow_bgl],
@@ -727,7 +800,6 @@ impl LightRenderer {
             gi_size,
             frame,
             prims,
-            prim_cap,
             lights,
             cascade_u,
             own_u,
@@ -763,21 +835,14 @@ impl LightRenderer {
         }
     }
 
-    fn prim_buffer(device: &wgpu::Device, cap: usize) -> wgpu::Buffer {
-        device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("light prims"),
-            size: (cap * std::mem::size_of::<Prim>()) as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        })
-    }
-
     /// Blocking read of the last submitted frame's pass times. Call after the encoder from `render` was submitted.
     pub fn read_timings(&self, device: &wgpu::Device) -> Option<Timings> {
         let (_, _, read) = self.query.as_ref()?;
         let slice = read.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |r| r.expect("map timestamps"));
-        device.poll(wgpu::PollType::wait_indefinitely()).ok()?;
+        // A map that failed (a lost device) shows as `get_mapped_range`'s error below; a lost or
+        // removed device reads as no timings.
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        rune_staging::health::poll(device, wgpu::PollType::wait_indefinitely()).ok()?;
         let ticks: Vec<u64> = {
             let data = slice.get_mapped_range().ok()?;
             bytemuck::cast_slice(&data).to_vec()

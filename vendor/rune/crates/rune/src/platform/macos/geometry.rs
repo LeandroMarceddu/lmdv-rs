@@ -2,16 +2,18 @@
 
 use super::ns_window;
 use crate::{DisplayTarget, OverlayOptions};
-use objc2::msg_send;
+use objc2::{MainThreadMarker, msg_send};
 use objc2_app_kit::{NSEvent, NSScreen};
-use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 #[link(name = "CoreGraphics", kind = "framework")]
+#[allow(unsafe_code)]
 unsafe extern "C" {
     fn CGDisplayBounds(display: u32) -> NSRect;
 }
 
 /// CoreGraphics queries are thread-safe; snapshot the display before queuing a UI request.
+#[allow(unsafe_code)]
 pub(crate) fn pointer_display() -> Option<u32> {
     #[link(name = "CoreGraphics", kind = "framework")]
     unsafe extern "C" {
@@ -93,10 +95,8 @@ pub(crate) fn backing_scale(window: &winit::window::Window) -> Option<f32> {
 /// The outer size of a window whose content is `content` points.
 pub(crate) fn outer_size(window: &winit::window::Window, (w, h): (f32, f32)) -> Option<(f32, f32)> {
     let ns = ns_window(window)?;
-    // SAFETY: plain geometry on a live window.
-    let frame = unsafe {
-        ns.frameRectForContentRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(f64::from(w), f64::from(h))))
-    };
+    let frame =
+        ns.frameRectForContentRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(f64::from(w), f64::from(h))));
     Some((frame.size.width as f32, frame.size.height as f32))
 }
 
@@ -114,7 +114,9 @@ pub(crate) fn set_window_frame(window: &winit::window::Window, [x, y, w, h]: [f3
     }
 }
 
+#[allow(unsafe_code)]
 pub(crate) fn display_bounds(id: u32) -> [f64; 4] {
+    // SAFETY: `CGDisplayBounds` is a pure CoreGraphics query accepting any `CGDirectDisplayID` (zero rect if invalid).
     let r = unsafe { CGDisplayBounds(id) };
     [r.origin.x, r.origin.y, r.size.width, r.size.height]
 }
@@ -123,7 +125,10 @@ pub(crate) fn overlay_rect(at: crate::overlay::Placement, options: &OverlayOptio
     overlay_rect_on(at, options, None)
 }
 
+#[allow(unsafe_code)]
 pub(super) fn screen_id(screen: &NSScreen) -> u32 {
+    // SAFETY: `screen` is a live `NSScreen` on the main thread; `deviceDescription` returns an `NSDictionary`,
+    // and messaging a possibly-nil `NSNumber` with `unsignedIntValue` returns 0 in ObjC.
     unsafe {
         let description: *mut objc2::runtime::AnyObject = msg_send![screen, deviceDescription];
         let key = objc2_foundation::NSString::from_str("NSScreenNumber");
@@ -143,22 +148,17 @@ fn contains_appkit_rect(r: NSRect, pointer: NSPoint) -> bool {
         && pointer.y <= r.origin.y + r.size.height
 }
 
-pub(super) fn overlay_rect_on(
-    at: crate::overlay::Placement,
-    options: &OverlayOptions,
-    previous: Option<u32>,
-) -> Option<NSRect> {
+fn target_screen(options: &OverlayOptions, previous: Option<u32>) -> Option<objc2::rc::Retained<NSScreen>> {
     use winit::platform::macos::MonitorHandleExtMacOS;
     let mtm = MainThreadMarker::new()?;
-    // SAFETY: AppKit screen and pointer queries on the event thread.
     let screens = NSScreen::screens(mtm);
-    let pointer = unsafe { NSEvent::mouseLocation() };
-    let screen = screens
+    let pointer = NSEvent::mouseLocation();
+    screens
         .iter()
         .find(|screen| match &options.display {
-            DisplayTarget::UnderPointer => contains_pointer(screen, pointer),
+            DisplayTarget::UnderPointer => contains_pointer(&screen, pointer),
             DisplayTarget::Id(_) | DisplayTarget::Native(_) => {
-                let native = screen_id(screen);
+                let native = screen_id(&screen);
                 match options.display {
                     DisplayTarget::Id(ref id) => native == id.0.native_id(),
                     DisplayTarget::Native(crate::NativeDisplayId::MacOS(id)) => native == id,
@@ -168,12 +168,41 @@ pub(super) fn overlay_rect_on(
             DisplayTarget::Primary => false,
         })
         .or_else(|| {
-            screens.iter().find(|s| options.display == DisplayTarget::UnderPointer && previous == Some(screen_id(s)))
+            screens.iter().find(|s| options.display == DisplayTarget::UnderPointer && previous == Some(screen_id(&s)))
         })
-        .or_else(|| screens.iter().next())?;
-    let frame = screen.frame();
-    let [x, y, w, h] =
-        crate::overlay::options::local_rect(at, options.placement, (frame.size.width as f32, frame.size.height as f32));
+        .or_else(|| screens.iter().next())
+}
+
+pub(crate) fn overlay_screen_area(options: &OverlayOptions) -> Option<(f32, f32)> {
+    overlay_screen_area_on(options, None)
+}
+
+pub(super) fn overlay_screen_area_on(options: &OverlayOptions, previous: Option<u32>) -> Option<(f32, f32)> {
+    let frame = target_screen(options, previous)?.frame();
+    Some((frame.size.width as f32, frame.size.height as f32))
+}
+
+pub(super) fn overlay_rect_on(
+    at: crate::overlay::Placement,
+    options: &OverlayOptions,
+    previous: Option<u32>,
+) -> Option<NSRect> {
+    overlay_rect_on_sized(at, options, previous, crate::ContentSizing::Fixed)
+}
+
+pub(super) fn overlay_rect_on_sized(
+    at: crate::overlay::Placement,
+    options: &OverlayOptions,
+    previous: Option<u32>,
+    sizing: crate::ContentSizing,
+) -> Option<NSRect> {
+    let frame = target_screen(options, previous)?.frame();
+    let [x, y, w, h] = crate::overlay::sizing::local_rect_for(
+        at,
+        options.placement,
+        (frame.size.width as f32, frame.size.height as f32),
+        sizing,
+    );
     Some(NSRect::new(
         NSPoint::new(frame.origin.x + x as f64, frame.origin.y + frame.size.height - (y + h) as f64),
         NSSize::new(w as f64, h as f64),

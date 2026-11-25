@@ -1,306 +1,61 @@
 //! Text inside the accessibility tree: a text field's lines as text runs with each
 //! character's place, so a reader moves by character, word and line and a magnifier follows
-//! the caret; a selectable text's lines likewise; and a text's inline links as link nodes.
+//! the caret; a selectable text's lines likewise; a text's inline links as link nodes; and its
+//! named inline icons as images.
 
-use accesskit::{Action as Ak, Node as AkNode, NodeId as AkId, Rect as AkRect, Role, TextPosition, TextSelection};
+use accesskit::{
+    Action as Ak, Node as AkNode, NodeId as AkId, Rect as AkRect, Role, TextDirection, TextPosition, TextSelection,
+};
 use std::borrow::Cow;
 
-use super::a11y_tree::{element_id, line_id, link_id, round};
-use super::*;
-use crate::text::{OBJECT_REPLACEMENT, TextFlow};
+use super::tree::{LINK_BASE, Walk, element_id, icon_id, line_id, lines_box_id, link_id, round};
+use crate::el::TextSpec;
+use crate::runtime::{RuntimeCore, caret_index, text_origin};
+use crate::text::TextFlow;
+
+mod long_field;
+mod runs;
+
+pub(super) use runs::{Line, byte_at, lines};
 
 /// Text longer than this gets no per-character runs (a reader still gets its whole value). A field
-/// past it marks its selection on itself, and the vendored adapters answer its lines from its value.
+/// past it marks its selection on itself, publishes only its drawn visual lines under an
+/// intermediate container, and lets the vendored adapters answer its ranges and boxes on demand.
 const RUN_MAX_BYTES: usize = 64 * 1024;
+/// Whether a field without runs marks its selection on itself, in its value's bytes. Only the
+/// vendored Windows and macOS adapters read that. AccessKit's AT-SPI adapter takes every
+/// selection end to be a `TextRun` and panics on any other node, so on Linux such a field
+/// publishes no selection.
+const FIELD_SELECTION: bool = cfg!(any(target_os = "windows", target_os = "macos"));
 
-/// One laid-out line: its bytes in the drawn text and each character's place in points.
-pub(crate) struct Line {
-    pub range: std::ops::Range<usize>,
-    pub rect: [f32; 4],
-    pub lengths: Vec<u8>,
-    pub positions: Vec<f32>,
-    pub widths: Vec<f32>,
-    pub word_starts: Vec<u8>,
-    /// The line's words as a screen reader reads them, when an image placeholder in it speaks
-    /// ([`InlineImage::label`](crate::text::InlineImage::label)); `None` is `range` of the
-    /// drawn text as it is.
-    pub spoken: Option<String>,
-}
-
-/// `content`'s lines from `layout` (device px at `s`), placed from `origin` in points. A
-/// by-paragraph field's newline is the last character of the line it ends, as in one layout.
-/// An image placeholder speaks its image's label (`labels`, sorted by byte), so a reader
-/// hears the formula or picture instead of an object marker.
-pub(crate) fn lines(
-    layout: TextFlow<'_>,
-    content: &str,
-    labels: &[(usize, &str)],
-    s: f32,
-    origin: [f32; 2],
-) -> Vec<Line> {
-    let mut out = Vec::new();
-    for p in layout.pieces() {
-        let first = out.len();
-        piece_lines(p, content, s, origin, &mut out);
-        if p.is_whole() {
-            continue;
-        }
-        if out.len() == first {
-            out.push(Line {
-                range: p.start..p.start,
-                rect: [origin[0], origin[1] + p.y / s, 0.0, p.height / s],
-                lengths: Vec::new(),
-                positions: Vec::new(),
-                widths: Vec::new(),
-                word_starts: Vec::new(),
-                spoken: None,
-            });
-        }
-        if content.as_bytes().get(p.end) == Some(&b'\n')
-            && let Some(l) = out.last_mut()
-        {
-            l.range.end += 1;
-            l.lengths.push(1);
-            l.positions.push(l.rect[2]);
-            l.widths.push(0.0);
-        }
-    }
-    speak_images(&mut out, content, labels);
-    out
-}
-
-fn piece_lines(p: crate::text::Piece<'_>, content: &str, s: f32, origin: [f32; 2], out: &mut Vec<Line>) {
-    for line in p.layout.lines() {
-        let m = line.metrics();
-        let range = p.content(line.text_range().start)..p.content(line.text_range().end);
-        if range.end > content.len() {
-            break;
-        }
-        let (mut lengths, mut positions, mut widths, mut word_starts) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-        let mut x = m.offset;
-        let mut at = range.start;
-        for run in line.runs() {
-            for cluster in run.clusters() {
-                let r = cluster.text_range();
-                // A pill's isolate marks hold no content bytes.
-                let r = p.content(r.start)..p.content(r.end);
-                if r.start < at || r.end > range.end || r.is_empty() {
-                    continue;
-                }
-                // Bytes a cluster skipped (an ignorable) join the character before.
-                if r.start > at
-                    && let Some(last) = lengths.last_mut()
-                {
-                    *last = (*last as usize + r.start - at).min(255) as u8;
-                }
-                if cluster.is_word_boundary() && !lengths.is_empty() && lengths.len() < 256 {
-                    word_starts.push(lengths.len() as u8);
-                }
-                let adv = cluster.advance();
-                lengths.push((r.end - r.start).min(255) as u8);
-                positions.push((x - m.offset) / s);
-                widths.push(adv / s);
-                x += adv;
-                at = r.end;
-            }
-        }
-        if at < range.end {
-            match lengths.last_mut() {
-                Some(last) => *last = (*last as usize + range.end - at).min(255) as u8,
-                None => {
-                    lengths.push((range.end - at).min(255) as u8);
-                    positions.push(0.0);
-                    widths.push(0.0);
-                }
-            }
-        }
-        // AccessKit indexes word starts by u8: a line past 255 characters keeps the first ones.
-        word_starts.retain(|&w| (w as usize) < lengths.len());
-        let top = (p.y + m.block_min_coord) / s;
-        let height = (m.block_max_coord - m.block_min_coord) / s;
-        let rect = [origin[0] + m.offset / s, origin[1] + top, (x - m.offset) / s, height];
-        out.push(Line { range, rect, lengths, positions, widths, word_starts, spoken: None });
-    }
-}
-
-/// The line and character index of drawn byte `byte`.
-fn position(lines: &[Line], byte: usize) -> Option<(usize, usize)> {
-    let last = lines.len().checked_sub(1)?;
-    let k = lines.iter().position(|l| byte < l.range.end).unwrap_or(last);
-    let l = &lines[k];
-    let mut at = l.range.start;
-    for (c, len) in l.lengths.iter().enumerate() {
-        if byte < at + *len as usize {
-            return Some((k, c));
-        }
-        at += *len as usize;
-    }
-    Some((k, l.lengths.len()))
-}
-
-/// Drawn byte at line `k`'s character `c`.
-pub(crate) fn byte_at(lines: &[Line], k: usize, c: usize) -> Option<usize> {
-    let l = lines.get(k)?;
-    Some(l.range.start + l.lengths.iter().take(c).map(|&n| n as usize).sum::<usize>())
-}
-
-/// The image spans' placeholders in `content`, each with the words its image speaks: its
-/// label, or empty when it has none, so the object marker never reaches a reader.
-pub(super) fn image_labels<'a>(spec: &'a crate::el::TextSpec, content: &str) -> Vec<(usize, &'a str)> {
-    let mut out: Vec<(usize, &str)> = spec
-        .spans
-        .iter()
-        .filter_map(|span| {
-            let image = span.image.as_deref()?;
-            let (a, b) = ((span.start as usize).min(content.len()), (span.end as usize).min(content.len()));
-            let at = a + content.get(a..b)?.find(OBJECT_REPLACEMENT)?;
-            Some((at, image.label.as_deref().unwrap_or("")))
-        })
-        .collect();
-    out.sort_unstable_by_key(|(at, _)| *at);
-    out.dedup_by_key(|(at, _)| *at);
-    out
-}
-
-/// `text` with each placeholder in `labels` (sorted by byte) replaced by its words.
-fn speak(text: &str, labels: &[(usize, &str)]) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut at = 0;
-    for &(byte, words) in labels {
-        let end = byte + OBJECT_REPLACEMENT.len_utf8();
-        if byte < at || text.get(byte..end).is_none_or(|s| !s.starts_with(OBJECT_REPLACEMENT)) {
-            continue;
-        }
-        out.push_str(&text[at..byte]);
-        out.push_str(words);
-        at = end;
-    }
-    out.push_str(&text[at..]);
-    out
-}
-
-/// Rewrites the lines that hold an image placeholder: the value a reader hears has the
-/// image's words where the marker was, and its character lengths, positions and widths match
-/// it. A line without one keeps its drawn text as it is.
-fn speak_images(lines: &mut [Line], content: &str, labels: &[(usize, &str)]) {
-    if labels.is_empty() {
-        return;
-    }
-    for line in lines {
-        let inside: Vec<(usize, &str)> = labels
-            .iter()
-            .copied()
-            .filter(|&(at, _)| line.range.start <= at && at + OBJECT_REPLACEMENT.len_utf8() <= line.range.end)
-            .collect();
-        if inside.is_empty() {
-            continue;
-        }
-        let Some(raw) = content.get(line.range.clone()) else { continue };
-        let local: Vec<(usize, &str)> = inside.iter().map(|&(at, words)| (at - line.range.start, words)).collect();
-        let spoken = speak(raw, &local);
-        // Where each replacement's words land in `spoken`, and whether they start a word.
-        let mut plans: Vec<(usize, &str, bool)> = Vec::with_capacity(local.len());
-        let mut shift = 0isize;
-        for &(byte, words) in &local {
-            let at = (byte as isize + shift).max(0) as usize;
-            let before = spoken.get(..at).and_then(|s| s.chars().next_back());
-            let first = words.chars().next();
-            let starts_word = first.is_some_and(|c| !c.is_whitespace()) && before.is_none_or(char::is_whitespace);
-            plans.push((byte, words, starts_word));
-            shift += words.len() as isize - OBJECT_REPLACEMENT.len_utf8() as isize;
-        }
-        // The placeholder's cluster becomes one entry per character of its words, zero-width
-        // at the place the image draws; every other cluster keeps its own room.
-        let mut lengths: Vec<u8> = Vec::with_capacity(line.lengths.len() + spoken.len());
-        let mut positions: Vec<f32> = Vec::with_capacity(lengths.capacity());
-        let mut widths: Vec<f32> = Vec::with_capacity(lengths.capacity());
-        let mut places: Vec<usize> = Vec::with_capacity(line.lengths.len());
-        let mut words_at: Vec<usize> = Vec::new();
-        let mut at = 0usize;
-        let mut next = 0usize;
-        for (k, &len) in line.lengths.iter().enumerate() {
-            let start = at;
-            at += usize::from(len);
-            let pos = line.positions.get(k).copied().unwrap_or(0.0);
-            let width = line.widths.get(k).copied().unwrap_or(0.0);
-            places.push(lengths.len());
-            while next < plans.len() && plans[next].0 < start {
-                next += 1;
-            }
-            if next < plans.len() && plans[next].0 == start {
-                let (_, words, starts_word) = plans[next];
-                next += 1;
-                let mut prev: Option<char> = None;
-                for (i, ch) in words.chars().enumerate() {
-                    let starts = if i == 0 { starts_word } else { prev.is_some_and(char::is_whitespace) };
-                    if starts && !ch.is_whitespace() && lengths.len() < 256 {
-                        words_at.push(lengths.len());
-                    }
-                    lengths.push(ch.len_utf8() as u8);
-                    positions.push(pos);
-                    widths.push(0.0);
-                    prev = Some(ch);
-                }
-            } else {
-                lengths.push(len);
-                positions.push(pos);
-                widths.push(width);
-            }
-        }
-        let mut starts: Vec<usize> =
-            line.word_starts.iter().filter_map(|&w| places.get(usize::from(w)).copied()).collect();
-        starts.extend(words_at);
-        starts.sort_unstable();
-        starts.dedup();
-        starts.retain(|&i| i < lengths.len() && i < 256);
-        if lengths.iter().map(|&n| usize::from(n)).sum::<usize>() == spoken.len() {
-            line.word_starts = starts.into_iter().map(|i| i as u8).collect();
-        } else {
-            // A cluster merged the marker with its neighbours: keep the words a reader hears and
-            // one entry per character, rather than places that disagree with the value.
-            lengths = spoken.chars().map(|c| c.len_utf8() as u8).collect();
-            positions = vec![line.positions.first().copied().unwrap_or(0.0); lengths.len()];
-            widths = vec![0.0; lengths.len()];
-            let mut starts = Vec::new();
-            let mut prev: Option<char> = None;
-            for (i, ch) in spoken.chars().enumerate() {
-                if !ch.is_whitespace() && prev.is_none_or(char::is_whitespace) && i < 256 {
-                    starts.push(i as u8);
-                }
-                prev = Some(ch);
-            }
-            line.word_starts = starts;
-        }
-        line.spoken = Some(spoken);
-        line.lengths = lengths;
-        line.positions = positions;
-        line.widths = widths;
-    }
-}
-
-impl<S: 'static> Runtime<S> {
+impl RuntimeCore {
     /// Node `i`'s text as AccessKit sees it: the lines of a field or selectable text, and the
-    /// links of any text, pushed after it as its children.
-    pub(super) fn a11y_text_nodes(&self, i: usize, w: &a11y_tree::Walk, out: &mut Vec<(AkId, AkNode)>) {
-        let n = &self.nodes[i];
+    /// links and named inline icons of any text, pushed after it as its children.
+    pub(super) fn a11y_text_nodes(&self, i: usize, w: &Walk, out: &mut Vec<(AkId, AkNode)>) {
+        let n = &self.tree.nodes[i];
+        if n.is_secure() {
+            return;
+        }
         if let Some(g) = n.vis.grid.as_deref() {
             return self.a11y_grid_rows(i, g, w, out);
         }
         let Some(spec) = n.text.as_deref() else { return };
         let me = out.len() - 1;
-        let runs = n.input.is_some() || (spec.selectable && !n.is_secure());
-        let found = self.a11y_lines(i).filter(|_| runs);
-        // A field's rows that wait to be shaped have no lines yet: runs for only the shaped ones
-        // would be a shorter document, so the field answers from its value instead, below.
-        let found = found.filter(|(content, lines)| {
-            n.input.is_none() || lines.iter().map(|l| l.range.len()).sum::<usize>() == content.len()
-        });
+        let runs = (n.input.is_some() || spec.selectable) && !n.is_secure();
+        let long_field = self.a11y_uses_long_field(i);
+        let found = (!long_field && runs).then(|| self.a11y_lines(i)).flatten();
         if let Some((content, lines)) = found {
             for (k, l) in lines.iter().enumerate() {
                 let id = line_id(n.id, k);
                 let mut run = AkNode::new(Role::TextRun);
                 run.set_value(l.spoken.as_deref().unwrap_or_else(|| content.get(l.range.clone()).unwrap_or_default()));
+                run.set_text_direction(if l.rtl { TextDirection::RightToLeft } else { TextDirection::LeftToRight });
+                if l.continues_line && k > 0 {
+                    run.set_previous_on_line(line_id(n.id, k - 1));
+                }
+                if lines.get(k + 1).is_some_and(|next| next.continues_line) {
+                    run.set_next_on_line(line_id(n.id, k + 1));
+                }
                 run.set_bounds(AkRect {
                     x0: round(l.rect[0] + w.shift[0]),
                     y0: round(l.rect[1] + w.shift[1]),
@@ -317,16 +72,26 @@ impl<S: 'static> Runtime<S> {
             if let Some(sel) = self.a11y_selection(i, &content, &lines) {
                 out[me].1.set_text_selection(sel);
             }
-        } else if let Some(input) = n.input.as_deref()
+        } else if long_field && let Some(input) = n.input.as_deref() {
+            // A long field (past `RUN_MAX_BYTES`, waiting paragraphs, or clipped lines): its
+            // selection in its value's bytes on the field itself, and one stable child container
+            // (`lines_box_id`) holding its drawn visual lines so scrolling updates only that
+            // container without rebuilding or copying the field's value.
+            if FIELD_SELECTION {
+                let at = |character_index| TextPosition { node: element_id(n.id), character_index };
+                out[me]
+                    .1
+                    .set_text_selection(TextSelection { anchor: at(input.edit.anchor), focus: at(input.edit.focus) });
+            }
+            out[me].1.push_child(lines_box_id(n.id));
+        } else if FIELD_SELECTION
+            && let Some(input) = n.input.as_deref()
             && !input.edit.is_secure()
         {
-            // A field with no runs (past `RUN_MAX_BYTES`, or rows still unshaped): its selection in its value's bytes,
-            // on the field itself. The vendored adapters answer its lines from the value when a
-            // reader asks (`vendor/accesskit_windows.patch`, `vendor/accesskit_macos.patch`).
             let at = |character_index| TextPosition { node: element_id(n.id), character_index };
             out[me].1.set_text_selection(TextSelection { anchor: at(input.edit.anchor), focus: at(input.edit.focus) });
         }
-        if spec.cold.links.is_empty() || spec.redacted {
+        if spec.redacted {
             return;
         }
         let boxes = self.link_boxes(i, self.drawn_box(i));
@@ -367,14 +132,18 @@ impl<S: 'static> Runtime<S> {
                 x1: round(r[2] + w.shift[0]),
                 y1: round(r[3] + w.shift[1]),
             });
+            let disabled = self.node_disabled(i) || n.inert;
+            if disabled {
+                link.set_disabled();
+            }
             if self.allowed(i) {
-                if spec.cold.on_link.is_some() {
+                if !disabled && spec.cold.on_link.is_some() {
                     link.add_action(Ak::Click);
                 }
                 if self.can_focus(i) {
                     link.add_action(Ak::Focus);
                 }
-                if spec.cold.on_link_secondary.is_some() {
+                if !disabled && spec.cold.on_link_secondary.is_some() {
                     link.add_action(Ak::ShowContextMenu);
                 }
             }
@@ -382,15 +151,35 @@ impl<S: 'static> Runtime<S> {
             out[me].1.push_child(id);
             out.push((id, link));
         }
+        // An inline icon with a name (`InlineIcon::label`): an image where it draws, as
+        // `<span role="img" aria-label>` is on a web page.
+        for (k, r) in self.inline_icon_boxes(i, self.drawn_box(i)) {
+            let Some(b) = spec.cold.pills.get(k).and_then(|p| p.bare.as_deref()) else { continue };
+            let Some(label) = b.label.as_deref() else { continue };
+            let mut icon = AkNode::new(Role::Image);
+            icon.set_label(label);
+            if let Some(help) = b.help.as_deref().filter(|h| *h != label) {
+                icon.set_description(help);
+            }
+            icon.set_bounds(AkRect {
+                x0: round(r[0] + w.shift[0]),
+                y0: round(r[1] + w.shift[1]),
+                x1: round(r[2] + w.shift[0]),
+                y1: round(r[3] + w.shift[1]),
+            });
+            let id = icon_id(n.id, k);
+            out[me].1.push_child(id);
+            out.push((id, icon));
+        }
     }
 
     /// A terminal grid's rows as its text lines, top to bottom: each row's text (its pinned
     /// cells in their columns) with every character's place on the cell grid, so a reader moves
     /// through the screen by character, word and line.
-    fn a11y_grid_rows(&self, i: usize, g: &crate::el::grid::Grid, w: &a11y_tree::Walk, out: &mut Vec<(AkId, AkNode)>) {
-        let n = &self.nodes[i];
+    fn a11y_grid_rows(&self, i: usize, g: &crate::el::grid::Grid, w: &Walk, out: &mut Vec<(AkId, AkNode)>) {
+        let n = &self.tree.nodes[i];
         let me = out.len() - 1;
-        let r = self.drawn[i];
+        let r = self.paint.drawn[i];
         let [cw, ch] = g.cell;
         let shown = g.rows.len().min((r[3] / ch.max(1.0)).ceil() as usize);
         for (k, row) in g.rows.iter().take(shown).enumerate() {
@@ -440,66 +229,108 @@ impl<S: 'static> Runtime<S> {
         }
     }
 
-    /// What node `i` draws as text: a field's display text (its mask when secure), else its
-    /// content.
+    /// What node `i` draws as text: none for a secure node, else a field's display text or the
+    /// element's content.
     fn a11y_drawn_text(&self, i: usize) -> Option<Cow<'_, str>> {
-        let n = &self.nodes[i];
+        let n = &self.tree.nodes[i];
+        if n.is_secure() {
+            return None;
+        }
         match n.input.as_deref() {
-            Some(input) if !input.edit.is_secure() && input.edit.preedit().is_none() => {
-                Some(Cow::Borrowed(input.edit.text.as_str()))
-            }
+            Some(input) if input.edit.preedit().is_none() => Some(Cow::Borrowed(input.edit.text.as_str())),
             Some(input) => Some(Cow::Owned(input.edit.display().0)),
             None => n.text.as_deref().map(|t| Cow::Borrowed(t.content.as_str())),
         }
+    }
+
+    fn a11y_drawn_len(&self, i: usize) -> Option<usize> {
+        let n = &self.tree.nodes[i];
+        if n.is_secure() {
+            return None;
+        }
+        match n.input.as_deref() {
+            Some(input) => match input.edit.preedit() {
+                None => Some(input.edit.text.len()),
+                Some((pre, _)) => {
+                    let (a, b) = input.edit.range();
+                    Some(input.edit.text.len().saturating_sub(b.saturating_sub(a)) + pre.len())
+                }
+            },
+            None => n.text.as_deref().map(|t| t.content.len()),
+        }
+    }
+
+    /// Node `i`'s text origin in drawn points and its layout-px-per-drawn-point scale `s / z`,
+    /// using the same `text_x` and single-line scroll rule as paint and `links::origin`.
+    pub(super) fn a11y_text_origin(&self, i: usize, spec: &TextSpec, layout: TextFlow<'_>) -> ([f32; 2], f32) {
+        let n = &self.tree.nodes[i];
+        let s = self.env.scale;
+        let z = self.paint.drawn_scale.get(i).copied().unwrap_or(1.0).max(1e-4);
+        let r = self.paint.drawn[i];
+        let [mut x, y] = text_origin(n, spec, layout, [r[0], r[1], r[0] + r[2], r[1] + r[3]], s, z);
+        if n.input.as_deref().is_some_and(|inp| inp.single_line) {
+            x -= self.edit.input_scroll.get(&n.path).copied().unwrap_or(0.0) * z;
+        }
+        ([x, y], s / z)
+    }
+
+    /// Node `i`'s laid-out lines, in points in its scroll viewport's content space (before the
+    /// walk's shift).
+    pub(super) fn a11y_lines(&self, i: usize) -> Option<(Cow<'_, str>, Vec<Line>)> {
+        if self.a11y_uses_long_field(i) {
+            return None;
+        }
+        let n = &self.tree.nodes[i];
+        let (spec, tl) = (n.text.as_deref()?, n.text_layout.as_ref()?);
+        if n.elided.is_some() {
+            return None;
+        }
+        if !spec.by_line && matches!(tl, crate::text::TextLayout::Paragraphs(p) if p.waiting()) {
+            return None;
+        }
+        let layout = tl.view();
+        let content = self.a11y_drawn_text(i)?;
+        if (!spec.by_line && content.len() > RUN_MAX_BYTES)
+            || runs::layout_end_byte(layout, &content) != Some(content.len())
+        {
+            return None;
+        }
+        let (origin, px) = self.a11y_text_origin(i, spec, layout);
+        // A field's text is its own edit buffer: prose spans, the only ones with images, would
+        // map the wrong bytes.
+        let labels = if n.input.is_some() { Vec::new() } else { runs::image_labels(spec, &content) };
+        let lines = lines(layout, &content, &labels, px, origin);
+        // `line_id` holds up to `LINK_BASE - 2` (`32,766`) runs per node; if a block exceeds that
+        // or its runs don't cover `content`, publish its whole value/label without `TextRun`s.
+        if lines.len() > (LINK_BASE as usize - 2) || lines.iter().map(|l| l.range.len()).sum::<usize>() != content.len()
+        {
+            return None;
+        }
+        Some((content, lines))
     }
 
     /// Node `i`'s text as a screen reader reads it: an image placeholder is the words its
     /// [`InlineImage`](crate::text::InlineImage) speaks, and leaves no character without them.
     /// Fields keep their own text.
     pub(super) fn a11y_spoken_text(&self, i: usize) -> Cow<'_, str> {
-        let n = &self.nodes[i];
+        let n = &self.tree.nodes[i];
         let Some(spec) = n.text.as_deref().filter(|_| n.input.is_none()) else {
             return Cow::Borrowed("");
         };
         let text = spec.source_text();
-        let labels = image_labels(spec, text);
+        let labels = runs::image_labels(spec, text);
         if labels.is_empty() {
             return Cow::Borrowed(text);
         }
-        Cow::Owned(speak(text, &labels))
-    }
-
-    /// Node `i`'s laid-out lines, in points in its scroll viewport's content space (before the
-    /// walk's shift).
-    pub(super) fn a11y_lines(&self, i: usize) -> Option<(Cow<'_, str>, Vec<Line>)> {
-        let n = &self.nodes[i];
-        let (spec, layout) = (n.text.as_deref()?, n.text_layout.as_ref()?.view());
-        if n.elided.is_some() {
-            return None;
-        }
-        let content = self.a11y_drawn_text(i)?;
-        if content.len() > RUN_MAX_BYTES {
-            return None;
-        }
-        let s = self.env.scale;
-        let r = self.drawn[i];
-        let (x0, x1) = (r[0] + n.inset[0], r[0] + r[2] - n.inset[2]);
-        let mut x = text_x(spec, x0, x1, layout.full_width() / s, layout.flow());
-        if let Some(input) = n.input.as_deref()
-            && input.single_line
-        {
-            x -= self.input_scroll.get(&n.path).copied().unwrap_or(0.0);
-        }
-        // A field's text is its own edit buffer: prose spans, the only ones with images, would
-        // map the wrong bytes.
-        let labels = if n.input.is_some() { Vec::new() } else { image_labels(spec, &content) };
-        let lines = lines(layout, &content, &labels, s, [x, r[1] + n.inset[1]]);
-        Some((content, lines))
+        Cow::Owned(runs::speak(text, &labels))
     }
 
     /// A field's caret or selection, in its lines.
     fn a11y_selection(&self, i: usize, content: &str, lines: &[Line]) -> Option<TextSelection> {
-        let n = &self.nodes[i];
+        let n = &self.tree.nodes[i];
+        if n.is_secure() {
+            return None;
+        }
         let input = n.input.as_deref()?;
         let edit = &input.edit;
         let (anchor, focus) = if edit.preedit().is_some() {
@@ -509,20 +340,35 @@ impl<S: 'static> Runtime<S> {
             (edit.display_index(edit.anchor), edit.display_index(edit.focus))
         };
         let at = |byte: usize| {
-            position(lines, byte).map(|(k, c)| TextPosition { node: line_id(n.id, k), character_index: c })
+            runs::position(lines, byte).map(|(k, c)| TextPosition { node: line_id(n.id, k), character_index: c })
         };
         Some(TextSelection { anchor: at(anchor)?, focus: at(focus)? })
     }
 
+    /// Active caret or selection for focused caret-browsing host `host`, referencing the
+    /// mounted `Role::TextRun` children of its anchor and focus text nodes.
+    pub(super) fn a11y_caret_selection(&self, host: usize) -> Option<TextSelection> {
+        let (h, ai, a_byte, fi, f_byte) = self.caret_browse_endpoints()?;
+        if h != host || !self.a11y_in_tree(ai) || !self.a11y_in_tree(fi) {
+            return None;
+        }
+        let pos_in = |ni: usize, byte: usize| -> Option<TextPosition> {
+            let (_, lines) = self.a11y_lines(ni)?;
+            let (k, c) = runs::position(&lines, byte)?;
+            Some(TextPosition { node: line_id(self.tree.nodes[ni].id, k), character_index: c })
+        };
+        Some(TextSelection { anchor: pos_in(ai, a_byte)?, focus: pos_in(fi, f_byte)? })
+    }
+
     /// The value and state a text field adds to its node.
-    pub(super) fn a11y_input(&self, _i: usize, input: &crate::el::InputSpec, node: &mut AkNode) {
+    pub(super) fn a11y_input(&self, i: usize, input: &crate::el::InputSpec, node: &mut AkNode) {
         if !input.placeholder.is_empty() {
             node.set_placeholder(input.placeholder.as_str());
         }
-        if !input.edit.is_secure() {
+        if !self.tree.nodes[i].is_secure() {
             node.set_value(input.edit.text.as_str());
         }
-        if input.access.is_none() {
+        if input.access.is_none() || self.is_node_read_only(i) {
             node.set_read_only();
         }
     }

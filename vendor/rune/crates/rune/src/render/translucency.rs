@@ -14,7 +14,15 @@ pub(crate) fn mode(surface: &wgpu::Surface<'_>, adapter: &wgpu::Adapter) -> Opti
     if cfg!(target_os = "windows") && adapter.get_info().backend != wgpu::Backend::Dx12 {
         return None;
     }
-    let caps = surface.get_capabilities(adapter);
+    mode_of(&surface.get_capabilities(adapter), adapter)
+}
+
+/// `mode`, for a surface whose capabilities through `adapter` (`caps`) the caller already asked
+/// for: asking is a round of calls into the driver, and on Wayland into the compositor.
+pub(crate) fn mode_of(caps: &wgpu::SurfaceCapabilities, adapter: &wgpu::Adapter) -> Option<wgpu::CompositeAlphaMode> {
+    if cfg!(target_os = "windows") && adapter.get_info().backend != wgpu::Backend::Dx12 {
+        return None;
+    }
     [
         wgpu::CompositeAlphaMode::PreMultiplied,
         wgpu::CompositeAlphaMode::PostMultiplied,

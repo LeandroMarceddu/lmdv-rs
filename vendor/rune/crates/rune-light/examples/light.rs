@@ -289,7 +289,7 @@ fn render_demo(ctx: &mut Ctx, demo: &mut dyn Demo, out: &Path, frames: Option<u3
     let stdin = ff.stdin.as_mut().unwrap();
     let strip_at: Vec<u32> = (0..5).map(|i| (i * n) / 5 + n / 10).collect();
     let mut strip: Vec<Vec<u8>> = Vec::new();
-    let t0 = std::time::Instant::now();
+    let t0 = rune::time::now();
     for f in 0..n {
         let t = f as f32 / FPS as f32;
         let (prims, base, text, clear, lights, mut s) = demo.frame(&mut ctx.ts, t);
@@ -420,7 +420,7 @@ fn bench(ctx: &mut Ctx, out: &Path) {
             };
             ctx.light_frame(&p, &lights, s, false);
             ctx.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
-            let t0 = std::time::Instant::now();
+            let t0 = rune::time::now();
             for _ in 0..120 {
                 ctx.light_frame(&p, &lights, s, false);
             }
@@ -493,7 +493,7 @@ fn verify(ctx: &mut Ctx) {
     );
     ctx.queue.submit([enc.finish()]);
     let slice = buf.slice(..);
-    slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+    slice.map_async(wgpu::MapMode::Read, |_| {});
     ctx.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
     let data = slice.get_mapped_range().unwrap().to_vec();
     let gpu = |x: u32, y: u32| {

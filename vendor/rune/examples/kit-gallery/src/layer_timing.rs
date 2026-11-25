@@ -1,6 +1,6 @@
 //! Manual, headless disabled-control timing and legacy per-instance pixel comparison.
 use super::*;
-use rune::render::{Gpu, Instance, KIND_GRADIENT, KIND_LAYER, KIND_LAYER_END, OFFSCREEN_FORMAT, Offscreen, Renderer};
+use rune::render::{Gpu, Instance, KIND_LAYER, KIND_LAYER_END, OFFSCREEN_FORMAT, Offscreen, Renderer};
 
 fn disabled_controls(_: &G, _: &mut Cx<G>) -> El {
     let mut s = init();
@@ -31,11 +31,7 @@ fn legacy(instances: &[Instance]) -> Vec<Instance> {
             alpha = stack.pop().unwrap();
         } else {
             let mut i = *i;
-            i.fill = i.fill.map(|v| v * alpha);
-            i.border = i.border.map(|v| v * alpha);
-            if i.params[1] == KIND_GRADIENT {
-                i.uv = i.uv.map(|v| v * alpha);
-            }
+            i.scale_opacity(alpha);
             out.push(i);
         }
     }
@@ -51,7 +47,7 @@ fn disabled_controls_match_legacy_pixels() {
     let directory = std::path::PathBuf::from(std::env::var_os("RUNE_KIT_PIXEL_BASELINE").unwrap());
     let record = std::env::var_os("RUNE_KIT_RECORD_BASELINE").is_some();
     std::fs::create_dir_all(&directory).unwrap();
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     let mut renderer = Renderer::new(&gpu.device, OFFSCREEN_FORMAT);
     for dark in [false, true] {
         for scale in [1.0, 2.0] {
@@ -114,7 +110,7 @@ fn disabled_controls_match_legacy_pixels() {
 #[test]
 #[ignore = "manual disabled-controls GPU comparison; run on a build worker"]
 fn disabled_controls_gpu_cost() {
-    let gpu = Gpu::headless();
+    let Some(gpu) = Gpu::test_headless() else { return };
     assert!(gpu.device.features().contains(wgpu::Features::TIMESTAMP_QUERY));
     eprintln!("adapter: {:?}", gpu.adapter.get_info());
     let text = rune::text::TextSystem::new(rune_theme_opencode::FONTS, rune_theme_opencode::FAMILIES);

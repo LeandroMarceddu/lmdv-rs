@@ -9,6 +9,8 @@
 //! run. A button Explorer makes again (it restarted) announces itself with
 //! `TaskbarButtonCreated`; each window's subclass hears it and sends its state again.
 
+#![allow(unsafe_code)]
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -70,7 +72,7 @@ pub(crate) fn set(window: &winit::window::Window, state: Taskbar) {
 }
 
 fn send(job: Job) {
-    let _ = worker().lock().unwrap_or_else(|e| e.into_inner()).send(job);
+    worker().lock().unwrap_or_else(|e| e.into_inner()).send(job).ok();
 }
 
 fn run(from: Receiver<Job>) {
@@ -78,7 +80,7 @@ fn run(from: Receiver<Job>) {
     if unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_err() {
         return;
     }
-    let started = std::time::Instant::now();
+    let started = crate::time::now();
     let Some(list) = list() else { return };
     eprintln!("rune: taskbar: the shell's object in {} µs off the UI thread", started.elapsed().as_micros());
     let mut icons = HashMap::new();
@@ -141,15 +143,15 @@ fn apply(list: &ITaskbarList3, icons: &mut HashMap<(u32, i32), isize>, hwnd: HWN
             };
             // A paused or failed bar shows its value: full.
             if matches!(state.progress, TaskbarProgress::Paused | TaskbarProgress::Error) {
-                let _ = list.SetProgressValue(hwnd, 1, 1);
+                list.SetProgressValue(hwnd, 1, 1).ok();
             }
-            let _ = list.SetProgressState(hwnd, flag);
+            list.SetProgressState(hwnd, flag).ok();
         }
         if before.badge != state.badge {
             let (count, description) = &state.badge;
             let icon = if *count == 0 { HICON::default() } else { HICON(badge_icon(icons, hwnd, *count) as *mut _) };
             let description: Vec<u16> = description.encode_utf16().chain([0]).collect();
-            let _ = list.SetOverlayIcon(hwnd, icon, PCWSTR(description.as_ptr()));
+            list.SetOverlayIcon(hwnd, icon, PCWSTR(description.as_ptr())).ok();
         }
     }
 }

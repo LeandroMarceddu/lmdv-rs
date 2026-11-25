@@ -40,6 +40,7 @@ fn reply_error(e: ReplyError) -> ShortcutError {
 }
 
 impl Native {
+    #[allow(unsafe_code)]
     pub(super) fn new(sink: Sink) -> Result<Self, ShortcutError> {
         let (connection, _) = x11rb::connect(None).map_err(|_| ShortcutError::Unsupported)?;
         let connection = Arc::new(connection);
@@ -130,6 +131,15 @@ impl Native {
     }
 }
 
+fn x11_keycode(shortcut: &Shortcut, min_keycode: u8, max_keycode: u8) -> Result<u8, ShortcutError> {
+    shortcut
+        .physical_key()
+        .to_scancode()
+        .and_then(|c| u8::try_from(c + 8).ok())
+        .filter(|c| (min_keycode..=max_keycode).contains(c))
+        .ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))
+}
+
 impl Backend for Native {
     fn register(&mut self, id: ShortcutId, shortcut: &Shortcut) -> Result<(), ShortcutError> {
         let conn = &self.connection;
@@ -139,12 +149,7 @@ impl Backend for Native {
             .map_err(error)?
             .reply()
             .map_err(reply_error)?;
-        let code = shortcut
-            .physical_key()
-            .to_scancode()
-            .and_then(|c| u8::try_from(c + 8).ok())
-            .filter(|c| (setup.min_keycode..=setup.max_keycode).contains(c))
-            .ok_or_else(|| ShortcutError::InvalidAccelerator(shortcut.to_string()))?;
+        let code = x11_keycode(shortcut, setup.min_keycode, setup.max_keycode)?;
         let mut numcodes = Vec::new();
         for (index, syms) in mapping.keysyms.chunks(mapping.keysyms_per_keycode as usize).enumerate() {
             let code = setup.min_keycode + index as u8;
@@ -205,9 +210,9 @@ impl Backend for Native {
 }
 impl Drop for Native {
     fn drop(&mut self) {
-        let _ = self.stop.write_all(&[0]);
+        self.stop.write_all(&[0]).ok();
         if let Some(listener) = self.listener.take() {
-            let _ = listener.join();
+            listener.join().ok();
         }
         // Closing this dedicated connection releases every passive grab, including a partial failure.
     }
@@ -229,5 +234,15 @@ mod tests {
             request_name: None,
         };
         assert_eq!(reply_error(ReplyError::X11Error(native)), ShortcutError::Conflict);
+    }
+
+    #[test]
+    fn printscreen_resolves_to_evdev_x11_keycode() {
+        for accel in ["printscreen", "print", "prtsc", "ctrl+printscreen", "alt+printscreen"] {
+            let shortcut: Shortcut = accel.parse().unwrap();
+            // Linux evdev KEY_SYSRQ (99) + X11 offset (8) = 107.
+            assert_eq!(x11_keycode(&shortcut, 8, 255), Ok(107), "{accel}");
+            assert!(matches!(x11_keycode(&shortcut, 8, 100), Err(ShortcutError::InvalidAccelerator(_))), "{accel}");
+        }
     }
 }

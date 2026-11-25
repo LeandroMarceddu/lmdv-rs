@@ -1,15 +1,15 @@
 # Status
 
 **Updated:** 2026-11-25
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (257 done, 54 substitutes, 13 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.10.0 is released. Remaining: 7 P0 partials (kit patches, two small Rune patches or app-side wiring), six P1/P2 clauses, the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (257 done, 54 substitutes, 13 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 7 P0 partials (kit patches, two small Rune patches or app-side wiring), six P1/P2 clauses, post-bump app-side work, reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
 
 - Git repo and baseline commits.
-- Full pinned Rune vendored at `vendor/rune/` (`cca5df6`, 2026-11-17, Rust 1.99.1); root repeats the five `[patch.crates-io]` entries (including `accesskit_macos`).
+- Full pinned Rune vendored at `vendor/rune/` (`f4ec14e`, 2026-11-25, Rust 1.99.1); root repeats the eight `[patch.crates-io]` entries (including `naga`, `sctk-adwaita` and `accesskit_atspi_common`).
 - Patch 0001 (`0001-text-inline-object.patch`): `Span::image` + `Span::rise`, `InlineImage::label`, independent inline image size/ascent/descent, zero-width placeholders, drawing, caching and selection behavior. Layout and live-scene tests pass; the app's `--scene proof-math` draws an inline image on the text baseline.
-- Patch 0002 (`0002-close-request-veto.patch`): `App::on_close_request`/`WindowSpec::on_close_request`, native-close veto before hiding; programmatic closes stay force-close. Three tests pass.
+- Close veto is upstream as of Rune `f4ec14e`: `App::on_close_request -> CloseResponse` runs before hiding; programmatic closes stay force-close. lmdv carries no patch for it; `crates/lmdv-app/src/app.rs` returns `Defer` while a document is dirty.
 - Patch 0003 (`0003-a11y-inline-object.patch`): the accessibility text speaks an inline image's label instead of U+FFFC in node names, values and text runs, keeping character lengths and word starts consistent. Two Rune a11y tests and a renderer tree test pass; `scripts/test-rune-patches.sh` covers the other two patches.
 - `lmdv-core`: IDs, `SourceBuffer`, `Document`, `DocumentRegistry`, edit lease, prefs, nav/draft/session types; 53 tests pass.
 - `scripts/run-gates.sh` is green: parity checklist, vendor check, formatting (own crates only), workspace check/test/clippy. Vendor patch proof tests are separate (`scripts/test-rune-patches.sh`, after a vendor bump or patch edit) so the gate does not rebuild `vendor/rune/target` every time.
@@ -528,26 +528,27 @@
 - Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
 - UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
-- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 36 open OIs. Post-0.10.0; no new tag.
+- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 35 open OIs. v0.11.0.
 
-## Rune upstream — 2026-11-25
+## Rune f4ec14e — ported (v0.11.0)
 
-- Two read-only probes measured the delta from pin `cca5df6` to `f4ec14e`:
-  **927 commits** (764 since the last survey, ~250/day); `dev` is the default
-  branch and there is no `main`.
-- Patch 0002 (close veto) is now upstream (`CloseResponse` /
-  `on_close_request`); delete it. 0001/0003/0004 move into `rune-text`; 0005
-  moves into `rune-mermaid/canvas/`. 0001 has two new traps: `1 << 61` is now
-  `SPAN_BOX`, and layout hashing gates on `affects_layout`.
-- The bump makes L-12 SVG vectors (`Path::from_svg`/`El::shape`/`El::inline`),
-  C-01 (`TextEdit::is_composing`), O-14's Alt+arrows (`on_key_preview`),
-  A-05/A-06 (`controls`/`owns`/`position_in_set`), V-02 pinch and D-08
-  drag-cancel app-side. T-01/T-03/D-04/I-10 still need kit patches; E-29 stays
-  large.
-- The vendor bump adds `naga`, `sctk-adwaita`, `accesskit_atspi_common` to
-  `[patch.crates-io]` and moves `tiny-skia-path`; `check-vendor.sh` needs the
-  new path. Estimate 25–39 h. Details:
-  `docs/RUNE_DELTA_2026-11-25.md`.
+- Vendor moved from `cca5df6` to `f4ec14e` (927 commits). The root repeats
+  eight `[patch.crates-io]` entries; `check-vendor.sh` passes with four
+  patches.
+- Patch 0002 is retired: upstream `on_close_request -> CloseResponse` runs
+  before hiding; the app returns `Defer` while a document is dirty.
+- 0001/0003/0004/0005 are re-ported to `rune-text`, `a11y` and the modular
+  `rune-mermaid`. Applying the four patches to a pristine formatted `f4ec14e`
+  tree reproduces `vendor/rune` exactly.
+- Patch proof: 7 inline-layout, 2 inline-scene, 2 a11y, 1 highlight and 9
+  Mermaid SVG tests pass.
+- Bump regression fixed: Rune also routes the synthetic Shift+F10/Menu press
+  to the row. `by_keys()` presses now take the keyboard anchor, so the menu
+  follows the focused row again.
+- Pre-existing, not ours: `cargo test -p rune-text` fails
+  `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on a
+  pristine `f4ec14e`; it is outside the workspace gate.
+- Version 0.11.0; release notes in `docs/releases/v0.11.0.md`.
 
 ## Next up
 
@@ -555,10 +556,10 @@
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
 2. Close or accept the 7 remaining P0 rows: T-01/T-03/D-04/I-10 need rune-kit patches (OI-190); O-14's browser-key half and L-11's middle-drag release need small Rune patches; C-01 is app-side (`TextEdit::is_composing`). After the bump, L-12 (SVG vectors), A-05/A-06, O-14's Alt+arrows, V-02 and D-08 become app-side work; E-29 stays a large Rune patch or an accepted gap.
-3. The Rune port (OI-189) to a rev pinned at the start — measured at `f4ec14ed` (2026-11-25): 927 commits past the pin, 0002 now upstream, four patches to port, 25–39 h (~3–5 days). See `docs/RUNE_DELTA_2026-11-25.md`. Queued, **not started**.
+3. Use the new Rune APIs for the app-side rows: L-12 SVG vectors (`Path::from_svg`/`El::shape`), C-01 (`TextEdit::is_composing`), O-14's Alt+arrows (`on_key_preview`), A-05/A-06 (`controls`/`owns`/`position_in_set`), V-02 pinch and D-08 drag-cancel. OI-189 is done.
 4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime is implemented but needs the manual checklist in OI-155.
 
-**Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
+**Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on pristine `f4ec14e` too, and an unrelated macOS Rune smoothing test fails on Linux.
 
 **Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. Record any repeat with the run id.
 

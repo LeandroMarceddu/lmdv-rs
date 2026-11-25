@@ -158,6 +158,10 @@ impl Slot {
     fn state(&self) -> SecretState {
         lock(&self.secret).report().shown()
     }
+    #[cfg(test)]
+    pub(super) fn snapshot(&self) -> Secret {
+        lock(&self.secret).clone()
+    }
 }
 
 /// Settles a secret write that was dropped before reaching a clipboard (replaced in its
@@ -232,6 +236,7 @@ pub(super) enum Hold {
         slot: Weak<Slot>,
         notify: Option<Notify>,
         /// `None` only when the delay is too long for the clock to represent.
+        #[cfg(not(target_arch = "wasm32"))]
         due: Option<Instant>,
         /// The clipboard's change count after the write, where it has one.
         revision: Option<u64>,
@@ -253,6 +258,7 @@ impl Hold {
     pub(super) fn armed(&self, alarm: Attempt) -> bool {
         matches!(self, Self::Holding { attempt, .. } if *attempt == alarm)
     }
+    #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn next_check(&self, watch: Instant) -> Option<Instant> {
         let Self::Holding { due, .. } = self else { return None };
         Some(due.map_or(watch, |d| d.min(watch)))
@@ -288,8 +294,15 @@ pub(super) fn step_hold(seq: &mut Seq, hold: &mut Hold, event: HoldEvent) -> Eff
         HoldEvent::Written { slot, notify, due, revision, print } => {
             let mut effects = release(hold, said(SecretState::Replaced));
             let attempt = seq.next();
-            *hold =
-                Hold::Holding { attempt, slot: Arc::downgrade(&slot), notify: notify.clone(), due, revision, print };
+            *hold = Hold::Holding {
+                attempt,
+                slot: Arc::downgrade(&slot),
+                notify: notify.clone(),
+                #[cfg(not(target_arch = "wasm32"))]
+                due,
+                revision,
+                print,
+            };
             effects.push(HoldEffect::Arm(due.map(|due| Alarm { attempt, due })));
             if let Some(notify) = notify {
                 effects.push(HoldEffect::Notify(notify));

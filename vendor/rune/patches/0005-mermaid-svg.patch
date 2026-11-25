@@ -1,19 +1,17 @@
-diff -ruN a/crates/rune-kit/src/mermaid.rs b/crates/rune-kit/src/mermaid.rs
---- a/crates/rune-kit/src/mermaid.rs	2026-11-25 15:30:42.087863545 +0100
-+++ b/crates/rune-kit/src/mermaid.rs	2026-11-25 15:42:30.341690897 +0100
+--- a/crates/rune-kit/src/mermaid.rs
++++ b/crates/rune-kit/src/mermaid.rs
 @@ -23,7 +23,7 @@
  use crate::markdown::{DiagramPaint, MarkdownStyle};
  
  pub use rune_mermaid::DrawingModel;
--pub use rune_mermaid::{DiagramStyle, Drawing, Hover, may_draw, supported};
-+pub use rune_mermaid::{DiagramStyle, Drawing, Hover, may_draw, render_svg, supported};
+-pub use rune_mermaid::{DiagramStyle, Drawing, Hover, may_draw, supported, supported_with};
++pub use rune_mermaid::{DiagramStyle, Drawing, Hover, may_draw, render_svg, supported, supported_with};
  
  /// Prepare the drawn label runs for a viewer that searches and highlights a diagram.
  pub fn prepare(src: &str, style: &MarkdownStyle, max_width: f32) -> Option<DrawingModel> {
-diff -ruN a/crates/rune-mermaid/src/canvas.rs b/crates/rune-mermaid/src/canvas.rs
---- a/crates/rune-mermaid/src/canvas.rs	2026-11-25 15:30:42.085730509 +0100
-+++ b/crates/rune-mermaid/src/canvas.rs	2026-11-25 15:42:30.340869428 +0100
-@@ -275,22 +275,26 @@
+--- a/crates/rune-mermaid/src/canvas/mod.rs
++++ b/crates/rune-mermaid/src/canvas/mod.rs
+@@ -282,22 +282,26 @@
          let (pieces, label_keys) = pieces(&self, map);
          let hovers = self.hovers(map, paint);
          let labels = self.labels.into_iter().map(|l| Label { at: map(l.at), ..l }).collect();
@@ -53,7 +51,7 @@ diff -ruN a/crates/rune-mermaid/src/canvas.rs b/crates/rune-mermaid/src/canvas.r
      }
  }
  
-@@ -311,9 +315,9 @@
+@@ -318,9 +322,9 @@
      pub(crate) hovers: Vec<Spot>,
      /// The hover colour.
      lit: Color,
@@ -66,7 +64,7 @@ diff -ruN a/crates/rune-mermaid/src/canvas.rs b/crates/rune-mermaid/src/canvas.r
  }
  
  impl Scene {
-@@ -447,9 +451,9 @@
+@@ -454,9 +458,9 @@
  }
  
  /// Points between a diagram's title and its drawing.
@@ -78,10 +76,9 @@ diff -ruN a/crates/rune-mermaid/src/canvas.rs b/crates/rune-mermaid/src/canvas.r
      TextStyle { size: paint.font.size + 1.0, line_height: paint.font.line_height + 2.0, weight: 600.0, ..paint.font }
  }
  
-diff -ruN a/crates/rune-mermaid/src/drawing.rs b/crates/rune-mermaid/src/drawing.rs
---- a/crates/rune-mermaid/src/drawing.rs	2026-11-25 15:30:42.086330911 +0100
-+++ b/crates/rune-mermaid/src/drawing.rs	2026-11-25 15:42:30.340893330 +0100
-@@ -36,6 +36,18 @@
+--- a/crates/rune-mermaid/src/canvas/drawing.rs
++++ b/crates/rune-mermaid/src/canvas/drawing.rs
+@@ -37,6 +37,18 @@
      /// [`Self::labels`]. A hover copy uses the same marks as the label underneath it.
      pub fn draw(&self, marks: impl Fn(&str) -> Vec<TextHighlight>) -> Drawing {
          let (el, size) = self.scene.drawing(&self.style, Some(&marks));
@@ -101,9 +98,8 @@ diff -ruN a/crates/rune-mermaid/src/drawing.rs b/crates/rune-mermaid/src/drawing
 +        self.scene.svg(&self.style)
      }
  }
-diff -ruN a/crates/rune-mermaid/src/ink_tests.rs b/crates/rune-mermaid/src/ink_tests.rs
---- a/crates/rune-mermaid/src/ink_tests.rs	2026-11-25 15:30:42.087373521 +0100
-+++ b/crates/rune-mermaid/src/ink_tests.rs	2026-11-25 15:42:30.340932196 +0100
+--- a/crates/rune-mermaid/src/canvas/ink_tests.rs
++++ b/crates/rune-mermaid/src/canvas/ink_tests.rs
 @@ -52,7 +52,7 @@
  #[test]
  fn a_line_is_no_brighter_at_its_joints_under_its_head_or_round_a_corner() {
@@ -122,16 +118,13 @@ diff -ruN a/crates/rune-mermaid/src/ink_tests.rs b/crates/rune-mermaid/src/ink_t
              for op in &ops {
                  match op {
                      Op::Stroke { color, .. } => assert_eq!(color.a, 1.0, "a translucent stroke in {src:?}"),
-diff -ruN a/crates/rune-mermaid/src/lib.rs b/crates/rune-mermaid/src/lib.rs
---- a/crates/rune-mermaid/src/lib.rs	2026-11-25 15:30:42.086912550 +0100
-+++ b/crates/rune-mermaid/src/lib.rs	2026-11-25 15:42:30.340913348 +0100
-@@ -134,11 +134,13 @@
- mod shape;
- mod state;
- mod steady;
+--- a/crates/rune-mermaid/src/lib.rs
++++ b/crates/rune-mermaid/src/lib.rs
+@@ -111,9 +111,11 @@
+ mod graph;
+ mod layout;
+ mod sequence;
 +mod svg;
- mod timeline;
- mod xychart;
  
  use std::collections::HashMap;
  use std::hash::{Hash, Hasher};
@@ -139,7 +132,7 @@ diff -ruN a/crates/rune-mermaid/src/lib.rs b/crates/rune-mermaid/src/lib.rs
  
  use rune::{Color, El, TextStyle, oklch, oklcha, tok};
  
-@@ -260,14 +262,35 @@
+@@ -253,14 +255,35 @@
      /// The fill and border of the card it would draw in, for the viewer's frame.
      pub surface: Color,
      pub surface_border: Color,
@@ -177,10 +170,9 @@ diff -ruN a/crates/rune-mermaid/src/lib.rs b/crates/rune-mermaid/src/lib.rs
  }
  
  #[derive(Clone, Copy, PartialEq, Eq)]
-diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
---- a/crates/rune-mermaid/src/svg.rs	1970-01-01 01:00:00.000000000 +0100
-+++ b/crates/rune-mermaid/src/svg.rs	2026-11-25 15:42:30.340946756 +0100
-@@ -0,0 +1,258 @@
+--- a/crates/rune-mermaid/src/svg.rs
++++ b/crates/rune-mermaid/src/svg.rs
+@@ -0,0 +1,260 @@
 +//! Static SVG for a laid-out scene.
 +//!
 +//! The scene's finished fills and strokes become paths, its labels become
@@ -220,15 +212,16 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +        let dy = title.as_ref().map_or(0.0, |_| title_height + TITLE_GAP);
 +
 +        let mut out = String::with_capacity(512 + self.svg_ops.len() * 56);
-+        let _ = write!(
++        write!(
 +            out,
 +            r#"<svg xmlns="http://www.w3.org/2000/svg" width="{}" height="{}" viewBox="0 0 {} {}">"#,
 +            num(width),
 +            num(height),
 +            num(width),
 +            num(height),
-+        );
-+        let _ = write!(out, r#"<rect x="0" y="0" width="{}" height="{}" rx="6""#, num(width), num(height));
++        )
++        .ok();
++        write!(out, r#"<rect x="0" y="0" width="{}" height="{}" rx="6""#, num(width), num(height)).ok();
 +        color_attr(&mut out, "fill", paint.surface);
 +        color_attr(&mut out, "stroke", paint.surface_border);
 +        out.push_str(r#" stroke-width="0.5"/>"#);
@@ -236,7 +229,7 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +            let at = [(width - measured.size[0]) / 2.0, 0.0];
 +            push_lines(&mut out, title, at, measured.size[0], *font, paint.text, Align::Center, measured.wrap);
 +        }
-+        let _ = write!(out, r#"<g transform="translate({} {}) scale({})">"#, num(dx), num(dy), num(self.scale));
++        write!(out, r#"<g transform="translate({} {}) scale({})">"#, num(dx), num(dy), num(self.scale)).ok();
 +        for op in &self.svg_ops {
 +            push_op(&mut out, op);
 +        }
@@ -330,20 +323,20 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +}
 +
 +fn push_text(out: &mut String, text: &str, x: f32, y: f32, font: TextStyle, color: Color, anchor: &str) {
-+    let _ = write!(out, r#"<text x="{}" y="{}""#, num(x), num(y));
-+    let _ = write!(out, r#" font-family="{}""#, escape_attr(family(font)).as_str());
-+    let _ = write!(out, r#" font-size="{}""#, num(font.size));
++    write!(out, r#"<text x="{}" y="{}""#, num(x), num(y)).ok();
++    write!(out, r#" font-family="{}""#, escape_attr(family(font))).ok();
++    write!(out, r#" font-size="{}""#, num(font.size)).ok();
 +    if (font.weight - 400.0).abs() > 0.5 {
-+        let _ = write!(out, r#" font-weight="{}""#, (font.weight / 100.0).round() * 100.0);
++        write!(out, r#" font-weight="{}""#, (font.weight / 100.0).round() * 100.0).ok();
 +    }
 +    if font.italic {
 +        out.push_str(r#" font-style="italic""#);
 +    }
 +    if font.tracking.abs() > 0.001 {
-+        let _ = write!(out, r#" letter-spacing="{}""#, num(font.tracking));
++        write!(out, r#" letter-spacing="{}""#, num(font.tracking)).ok();
 +    }
 +    if anchor != "start" {
-+        let _ = write!(out, r#" text-anchor="{anchor}""#);
++        write!(out, r#" text-anchor="{anchor}""#).ok();
 +    }
 +    color_attr(out, "fill", color);
 +    out.push('>');
@@ -371,12 +364,13 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +            path(out, points, *closed);
 +            out.push_str(r#"" fill="none""#);
 +            color_attr(out, "stroke", *color);
-+            let _ = write!(
++            write!(
 +                out,
 +                r#" stroke-width="{}" stroke-linecap="{}" stroke-linejoin="round"/>"#,
 +                num(*width),
 +                if *cap == LineCap::Round { "round" } else { "butt" },
-+            );
++            )
++            .ok();
 +        }
 +    }
 +}
@@ -384,7 +378,7 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +fn path(out: &mut String, points: &[[f32; 2]], closed: bool) {
 +    for (index, point) in points.iter().enumerate() {
 +        let command = if index == 0 { 'M' } else { 'L' };
-+        let _ = write!(out, "{command}{} {}", num(point[0]), num(point[1]));
++        write!(out, "{command}{} {}", num(point[0]), num(point[1])).ok();
 +    }
 +    if closed {
 +        out.push('Z');
@@ -394,9 +388,9 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +/// `name="#rrggbb"` and, for translucent ink, `name-opacity`.
 +fn color_attr(out: &mut String, name: &str, color: Color) {
 +    let hex = color.hex();
-+    let _ = write!(out, r#" {name}="{}""#, &hex[..7]);
++    write!(out, r#" {name}="{}""#, &hex[..7]).ok();
 +    if color.a < 0.999 {
-+        let _ = write!(out, r#" {name}-opacity="{}""#, num(color.a));
++        write!(out, r#" {name}-opacity="{}""#, num(color.a)).ok();
 +    }
 +}
 +
@@ -439,9 +433,8 @@ diff -ruN a/crates/rune-mermaid/src/svg.rs b/crates/rune-mermaid/src/svg.rs
 +#[cfg(test)]
 +#[path = "svg_tests.rs"]
 +mod tests;
-diff -ruN a/crates/rune-mermaid/src/svg_tests.rs b/crates/rune-mermaid/src/svg_tests.rs
---- a/crates/rune-mermaid/src/svg_tests.rs	1970-01-01 01:00:00.000000000 +0100
-+++ b/crates/rune-mermaid/src/svg_tests.rs	2026-11-25 15:42:30.340957896 +0100
+--- a/crates/rune-mermaid/src/svg_tests.rs
++++ b/crates/rune-mermaid/src/svg_tests.rs
 @@ -0,0 +1,143 @@
 +//! The static SVG serializer: size, title, text, escaping and self-containment.
 +

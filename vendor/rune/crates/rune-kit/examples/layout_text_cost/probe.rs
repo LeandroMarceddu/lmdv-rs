@@ -6,6 +6,9 @@
 //!
 //! Stack capture needs frame pointers and Mach thread calls: macOS on Apple silicon only.
 //! Elsewhere the probes count allocations and record nothing.
+
+#![allow(unsafe_code)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
@@ -26,8 +29,23 @@ thread_local! {
     static BUSY: Cell<bool> = const { Cell::new(false) };
 }
 
-unsafe extern "C" {
-    fn pthread_self() -> usize;
+/// This thread's id for `on_main`: `pthread_self` on Unix, `GetCurrentThreadId` on Windows.
+#[cfg(unix)]
+fn thread_id() -> usize {
+    unsafe extern "C" {
+        fn pthread_self() -> usize;
+    }
+    // SAFETY: pthread_self has no preconditions.
+    unsafe { pthread_self() }
+}
+
+#[cfg(windows)]
+fn thread_id() -> usize {
+    unsafe extern "system" {
+        fn GetCurrentThreadId() -> u32;
+    }
+    // SAFETY: GetCurrentThreadId has no preconditions.
+    unsafe { GetCurrentThreadId() as usize }
 }
 
 /// Data touched only by the main thread with `BUSY` set, or after its measured work ends.
@@ -64,8 +82,7 @@ impl Book {
 static BOOK: Only<Option<Book>> = Only(UnsafeCell::new(None));
 
 fn on_main() -> bool {
-    // SAFETY: pthread_self has no preconditions.
-    MAIN.load(Relaxed) == unsafe { pthread_self() }
+    MAIN.load(Relaxed) == thread_id()
 }
 
 /// Runs `f` on the book with the reentrancy guard set (its own allocations go untracked).
@@ -80,6 +97,7 @@ fn with_book<R>(f: impl FnOnce(&mut Book) -> R) -> R {
 
 pub struct Probe;
 
+// SAFETY: forwards every allocation call to `System`, recording main-thread allocation statistics.
 unsafe impl GlobalAlloc for Probe {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: forwarded unchanged.
@@ -168,8 +186,7 @@ pub fn live_bytes() -> i64 {
 /// Marks the calling thread as the one measured, and starts recording allocation stacks when
 /// `heap`. Call first thing in `main`.
 pub fn init(heap: bool) {
-    // SAFETY: pthread_self has no preconditions.
-    MAIN.store(unsafe { pthread_self() }, Relaxed);
+    MAIN.store(thread_id(), Relaxed);
     BUSY.set(false);
     if heap && cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         TRACK.store(true, Relaxed);
@@ -229,11 +246,11 @@ impl Sampler {
                 let mut buf = [0u64; DEPTH];
                 let mut taken: Vec<(u32, Vec<u64>)> = Vec::with_capacity(1 << 16);
                 let period = std::time::Duration::from_micros(micros);
-                let mut due = std::time::Instant::now();
+                let mut due = rune::time::now();
                 while !stop.load(Relaxed) {
                     // Spin rather than sleep: macOS stretches short sleeps to a millisecond or more.
                     due += period;
-                    while std::time::Instant::now() < due {
+                    while rune::time::now() < due {
                         std::thread::yield_now();
                     }
                     let tag = TAG.load(Relaxed);
@@ -402,8 +419,7 @@ mod mac {
         pub fn current() -> Target {
             // SAFETY: no preconditions; the send right is kept for the process's lifetime.
             let port = unsafe { mach_thread_self() };
-            // SAFETY: pthread_self has no preconditions.
-            let (lo, hi) = stack_bounds(unsafe { super::pthread_self() });
+            let (lo, hi) = stack_bounds(super::thread_id());
             Target { port, lo, hi }
         }
 
@@ -446,6 +462,7 @@ mod mac {
         }
         // SAFETY: dladdr returned C strings owned by the loader.
         let image = unsafe { CStr::from_ptr(info.fname) }.to_string_lossy().into_owned();
+        // SAFETY: `info.sname` is checked non-null and points to a loader-owned NUL-terminated C string.
         let sym = if info.sname.is_null() {
             "?".into()
         } else {

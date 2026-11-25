@@ -7,9 +7,9 @@ use super::{
     hold::{self, Effect, Event, Hold, Point},
 };
 use crate::{OverlayInput, OverlaySupport};
-use objc2::{ClassType, msg_send, msg_send_id, rc::Retained};
+use objc2::{ClassType, MainThreadMarker, msg_send, rc::Retained};
 use objc2_app_kit::{NSEvent, NSPanel, NSScreen, NSWindow};
-use objc2_foundation::{MainThreadMarker, NSObject, NSPoint};
+use objc2_foundation::{NSObject, NSPoint};
 use std::{
     cell::{Cell, RefCell},
     time::{Duration, Instant},
@@ -33,6 +33,7 @@ pub(crate) struct PointerState {
     recovered_release: Cell<Option<(f32, f32)>>,
     /// The cursor the overlay shows while the pointer is over its hit area.
     cursor: Cell<Option<crate::el::Cursor>>,
+    poll: Cell<Option<Instant>>,
 }
 
 impl PointerState {
@@ -40,24 +41,28 @@ impl PointerState {
         Self { input: Cell::new(input), follow: Cell::new(follow), ..Default::default() }
     }
 
+    #[allow(unsafe_code)]
     fn trace(&self, panel: &NSPanel, source: &str, event: Option<&NSEvent>) {
         static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if !*ENABLED.get_or_init(|| std::env::var_os("RUNE_OVERLAY_TRACE_INPUT").is_some()) {
             return;
         }
-        let cursor = unsafe { NSEvent::mouseLocation() };
+        let cursor = NSEvent::mouseLocation();
         let frame = panel.frame();
         let local = (cursor.x - frame.origin.x, frame.origin.y + frame.size.height - cursor.y);
+        // SAFETY: `event` is a live `NSEvent` on the main thread; `type` returns `NSEventType` (`usize`).
         let kind: usize = event.map_or(0, |event| unsafe { msg_send![event, type] });
+        // SAFETY: `event` is a live `NSEvent` on the main thread; `locationInWindow` returns `NSPoint`.
         let event_point: NSPoint =
             event.map_or(NSPoint::new(0.0, 0.0), |event| unsafe { msg_send![event, locationInWindow] });
+        // SAFETY: class property read on `NSEvent` on the main thread; returns a bitmask (`usize`).
         let buttons: usize = unsafe { msg_send![NSEvent::class(), pressedMouseButtons] };
         eprintln!(
             "overlay-input source={source} window={} kind={kind} event={event_point:?} cursor={cursor:?} local={local:?} frame={frame:?} input={:?} buttons={buttons} captured={} ignore={} regions={:?}",
-            unsafe { panel.windowNumber() },
+            panel.windowNumber(),
             self.input.get(),
             self.captured(),
-            unsafe { panel.ignoresMouseEvents() },
+            panel.ignoresMouseEvents(),
             self.regions.borrow()
         );
     }
@@ -144,8 +149,7 @@ impl PointerState {
     /// rects replace it. The arrow once the pointer is off the hit area.
     fn reapply_cursor(&self, panel: &NSPanel) {
         let Some(cursor) = self.cursor.get() else { return };
-        // SAFETY: monitors run on AppKit's main thread.
-        let pointer = unsafe { NSEvent::mouseLocation() };
+        let pointer = NSEvent::mouseLocation();
         let frame = panel.frame();
         let (x, y) = ((pointer.x - frame.origin.x) as f32, (frame.origin.y + frame.size.height - pointer.y) as f32);
         let inside = x >= 0.0 && y >= 0.0 && x < frame.size.width as f32 && y < frame.size.height as f32;
@@ -161,9 +165,47 @@ impl PointerState {
     fn wanted(&self) -> bool {
         self.input.get() != OverlayInput::None || self.follow.get() || self.captured() || self.cursor.get().is_some()
     }
+    /// Whether a visible overlay needs the 120 Hz pointer poll. Only `OverlayInput::Regions`
+    /// polls to flip `ignoresMouseEvents` as the pointer crosses hit regions; without any hit
+    /// region, held press or active cursor, the `NSEvent` monitors alone handle hover and
+    /// pointer following, so an idle overlay can sleep.
+    pub(crate) fn needs_poll(&self) -> bool {
+        self.input.get() == OverlayInput::Regions
+            && (!self.regions.borrow().is_empty() || self.captured() || self.cursor.get().is_some())
+    }
+    /// Arms the poll when visible and needed; disarms it otherwise.
+    pub(crate) fn sync_poll(&self, visible: bool, now: Instant) {
+        if visible && self.needs_poll() {
+            if self.poll.get().is_none() {
+                self.poll.set(Some(now));
+            }
+        } else {
+            self.poll.set(None);
+        }
+    }
+    /// Replaces the hit regions and updates the poll state; true if the regions changed.
+    pub(crate) fn set_regions(&self, regions: &[[f32; 4]], visible: bool, now: Instant) -> bool {
+        if self.regions.borrow().as_slice() == regions {
+            return false;
+        }
+        *self.regions.borrow_mut() = regions.to_vec();
+        self.sync_poll(visible, now);
+        true
+    }
+    pub(crate) fn poll_due(&self, now: Instant) -> bool {
+        self.poll.get().is_some_and(|at| at <= now)
+    }
+    /// Schedules the next poll tick if still needed, or disarms it.
+    pub(crate) fn rearm_poll(&self, now: Instant) {
+        self.poll.set(self.needs_poll().then(|| now + Duration::from_secs_f64(1.0 / 120.0)));
+    }
+    pub(crate) fn poll_deadline(&self, occluded: bool) -> Option<Instant> {
+        self.deadline(self.poll.get(), occluded)
+    }
+    #[allow(unsafe_code)]
     pub(super) fn observe(&self, panel: &NSPanel, wake: Option<&crate::Waker>) {
-        // SAFETY: monitors and frame publication run on AppKit's main thread.
-        let pointer = unsafe { NSEvent::mouseLocation() };
+        let pointer = NSEvent::mouseLocation();
+        // SAFETY: class property read on `NSEvent` on AppKit's main thread; returns a bitmask (`usize`).
         let buttons: usize = unsafe { msg_send![NSEvent::class(), pressedMouseButtons] };
         let frame = panel.frame();
         let (x, y) = ((pointer.x - frame.origin.x) as f32, (frame.origin.y + frame.size.height - pointer.y) as f32);
@@ -173,11 +215,11 @@ impl PointerState {
                 NSScreen::screens(mtm)
                     .iter()
                     .find(|s| contains_pointer(s, pointer))
-                    .is_some_and(|s| self.display.replace(Some(screen_id(s))) != Some(screen_id(s)))
+                    .is_some_and(|s| self.display.replace(Some(screen_id(&s))) != Some(screen_id(&s)))
             });
-        let moved = self.read(buttons, Instant::now(), (x, y), inside, display_changed);
+        let moved = self.read(buttons, crate::time::now(), (x, y), inside, display_changed);
         let ignore = !self.hit(x, y);
-        if unsafe { panel.ignoresMouseEvents() } != ignore {
+        if panel.ignoresMouseEvents() != ignore {
             panel.setIgnoresMouseEvents(ignore);
             self.trace(panel, "flip", None);
         }
@@ -192,6 +234,7 @@ pub(super) struct MouseMonitors {
 }
 
 impl Drop for MouseMonitors {
+    #[allow(unsafe_code)]
     fn drop(&mut self) {
         for token in &self.tokens {
             // SAFETY: each token was returned by NSEvent and is removed exactly once on main.
@@ -226,14 +269,14 @@ impl Panel {
         }
     }
     pub fn pointer_deadline(&self, occluded: bool) -> Option<Instant> {
-        self.pointer.deadline(self.pointer_poll.get(), occluded)
+        self.pointer.poll_deadline(occluded)
     }
     /// Samples the pointer if its poll is due; true if it did.
     fn poll_pointer(&self, now: Instant) -> bool {
-        if self.pointer_poll.get().is_some_and(|at| at <= now) {
-            self.pointer_poll.set(Some(now + Duration::from_secs_f64(1.0 / 120.0)));
+        if self.pointer.poll_due(now) {
             self.pointer.trace(&self.panel, "poll", None);
             self.pointer.observe(&self.panel, None);
+            self.pointer.rearm_poll(now);
             return true;
         }
         false
@@ -242,9 +285,11 @@ impl Panel {
     /// samples the pointer, through the timed poll when it is due and `poll` allows it.
     pub fn observe_pointer(&self, now: Instant, poll: bool) {
         self.keep_view();
-        if self.presence.get().visible() && self.pointer.wanted() && !(poll && self.poll_pointer(now)) {
+        let visible = self.presence.get().visible();
+        if visible && self.pointer.wanted() && !(poll && self.poll_pointer(now)) {
             self.pointer.observe(&self.panel, None);
         }
+        self.pointer.sync_poll(visible, now);
     }
     pub fn set_input(&self, input: OverlayInput) {
         self.pointer.input.set(input);
@@ -276,13 +321,7 @@ impl Panel {
         if !self.presence.get().visible() {
             return;
         }
-        if self.pointer.input.get() == OverlayInput::Regions {
-            if self.pointer_poll.get().is_none() {
-                self.pointer_poll.set(Some(Instant::now()));
-            }
-        } else {
-            self.pointer_poll.set(None);
-        }
+        self.pointer.sync_poll(true, crate::time::now());
         if self.needs_monitors() {
             self.start_monitors();
         } else {
@@ -290,12 +329,12 @@ impl Panel {
         }
     }
     pub fn set_regions(&self, regions: &[[f32; 4]]) {
-        if self.pointer.regions.borrow().as_slice() == regions {
+        let visible = self.presence.get().visible();
+        if !self.pointer.set_regions(regions, visible, crate::time::now()) {
             return;
         }
-        *self.pointer.regions.borrow_mut() = regions.to_vec();
         self.pointer.trace(&self.panel, "regions", None);
-        if self.presence.get().visible() {
+        if visible {
             self.pointer.observe(&self.panel, None);
         }
     }
@@ -307,6 +346,7 @@ impl Panel {
             || self.pointer.cursor.get().is_some()
     }
 
+    #[allow(unsafe_code)]
     fn start_monitors(&self) {
         if self.monitors.borrow().is_some() || !self.needs_monitors() {
             return;
@@ -317,6 +357,7 @@ impl Panel {
         let mask = movement | (1 << 1) | (1 << 2);
         let (pointer, panel, wake) = (self.pointer.clone(), self.panel.clone(), self.wake.clone());
         let global = block2::RcBlock::new(move |event: *mut NSEvent| {
+            // SAFETY: AppKit passes a valid `NSEvent` pointer (or null) for the monitor callback on the main thread.
             pointer.trace(&panel, "global", unsafe { event.as_ref() });
             pointer.reapply_cursor(&panel);
             if let Some(wake) = &wake {
@@ -325,8 +366,10 @@ impl Panel {
         });
         let (pointer, panel, wake) = (self.pointer.clone(), self.panel.clone(), self.wake.clone());
         let local = block2::RcBlock::new(move |event: *mut NSEvent| -> *mut NSEvent {
+            // SAFETY: AppKit passes a valid `NSEvent` pointer (or null) for the monitor callback on the main thread.
             pointer.trace(&panel, "local", unsafe { event.as_ref() });
             pointer.reapply_cursor(&panel);
+            // SAFETY: `event` is a live `NSEvent` on AppKit's main thread; `type`, `window`, and `locationInWindow` match `NSEvent`'s signatures.
             unsafe {
                 let kind: usize = msg_send![event, type];
                 let window: *mut NSWindow = msg_send![event, window];
@@ -343,12 +386,14 @@ impl Panel {
             event
         });
         let mut tokens = Vec::new();
+        // SAFETY: main-thread AppKit calls; `global` and `local` are valid `RcBlock`s copied by AppKit,
+        // and the returned monitor tokens are removed in `MouseMonitors::drop`.
         unsafe {
             let token: Option<Retained<NSObject>> =
-                msg_send_id![NSEvent::class(), addGlobalMonitorForEventsMatchingMask: mask, handler: &*global];
+                msg_send![NSEvent::class(), addGlobalMonitorForEventsMatchingMask: mask, handler: &*global];
             tokens.extend(token);
             let token: Option<Retained<NSObject>> =
-                msg_send_id![NSEvent::class(), addLocalMonitorForEventsMatchingMask: mask, handler: &*local];
+                msg_send![NSEvent::class(), addLocalMonitorForEventsMatchingMask: mask, handler: &*local];
             tokens.extend(token);
         }
         *self.monitors.borrow_mut() = Some(MouseMonitors { tokens });
@@ -356,7 +401,7 @@ impl Panel {
     }
 
     pub(super) fn stop_pointer(&self) {
-        self.pointer_poll.set(None);
+        self.pointer.poll.set(None);
         self.monitors.borrow_mut().take();
         self.pointer.step(Event::Stopped);
         self.pointer.pending.set(None);

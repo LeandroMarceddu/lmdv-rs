@@ -7,8 +7,8 @@
 use std::cell::{Cell, RefCell};
 use std::io::Write;
 
-use super::host_clock::{cpu_ns, now_ns, thread_cpu};
-use super::profile::PHASES;
+use super::host_clock::now_ns;
+use super::profile::{PHASES, ThreadCpuMark, thread_cpu_mark};
 
 thread_local! {
     static OUT: RefCell<Option<Option<std::io::BufWriter<std::fs::File>>>> = const { RefCell::new(None) };
@@ -20,10 +20,43 @@ thread_local! {
     /// Tx::wake_after and wake_at callers since the last logged frame, with the shortest wait.
     static WAKERS: RefCell<Vec<(&'static std::panic::Location<'static>, std::time::Duration)>> = const { RefCell::new(Vec::new()) };
     static ASKED: RefCell<Vec<&'static std::panic::Location<'static>>> = const { RefCell::new(Vec::new()) };
+    /// Frames missed since the last drawn one (occluded, timeout, outdated, unconfigured), and
+    /// surfaces `acquire` reconfigured and got a drawable from.
+    static MISSED: Cell<([u32; 4], u32)> = const { Cell::new(([0; 4], 0)) };
+    /// Test-only in-memory capture sink for asserting logged frame records without touching disk.
+    #[cfg(test)]
+    static CAPTURED: RefCell<Option<Vec<serde_json::Value>>> = const { RefCell::new(None) };
+}
+
+/// Captures every JSON frame line emitted to [`frame`] on the current thread during `f`.
+#[cfg(test)]
+pub(crate) fn capture_frames<R>(f: impl FnOnce() -> R) -> (R, Vec<serde_json::Value>) {
+    struct Guard(Option<Vec<serde_json::Value>>);
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            CAPTURED.with_borrow_mut(|slot| {
+                *slot = self.0.take();
+            });
+        }
+    }
+    let prev = CAPTURED.with_borrow_mut(|slot| slot.replace(Vec::new()));
+    let mut guard = Guard(prev);
+    let result = f();
+    let captured = CAPTURED.with_borrow_mut(|slot| {
+        let out = slot.take().unwrap_or_default();
+        *slot = guard.0.take();
+        out
+    });
+    std::mem::forget(guard);
+    (result, captured)
 }
 
 /// Whether frames are logged in this process.
 pub(crate) fn on() -> bool {
+    #[cfg(test)]
+    if CAPTURED.with_borrow(|c| c.is_some()) {
+        return true;
+    }
     OUT.with_borrow_mut(|out| {
         out.get_or_insert_with(|| {
             let path = std::env::var_os("RUNE_FRAME_LOG")?;
@@ -54,6 +87,19 @@ pub(crate) fn asked(at: &'static std::panic::Location<'static>) {
     });
 }
 
+/// A frame that got no drawable: `kind` 0 occluded, 1 timeout, 2 outdated, 3 unconfigured.
+pub(crate) fn missed(kind: usize) {
+    let (mut m, r) = MISSED.get();
+    m[kind.min(3)] += 1;
+    MISSED.set((m, r));
+}
+
+/// `acquire` found its surface outdated, reconfigured it, and went on.
+pub(crate) fn reconfigured() {
+    let (m, r) = MISSED.get();
+    MISSED.set((m, r + 1));
+}
+
 /// A timer asked for at t, due after wait.
 pub(crate) fn waker(at: &'static std::panic::Location<'static>, wait: std::time::Duration) {
     WAKERS.with_borrow_mut(|w| match w.iter_mut().find(|(l, _)| *l == at) {
@@ -67,17 +113,23 @@ pub(crate) fn now() -> u64 {
     now_ns()
 }
 
-/// The clocks at a stage boundary: monotonic and this thread's CPU, in ns.
+/// The clocks at a stage boundary: monotonic in ns and this thread's raw CPU mark, converted
+/// when the frame is logged so stamps taken before Windows knows the cycles' rate still measure
+/// from that boundary once it does.
 #[derive(Clone, Copy)]
 pub(crate) struct Stamp {
     pub(crate) wall: u64,
-    pub(crate) cpu: u64,
+    pub(crate) cpu: Option<ThreadCpuMark>,
 }
 
 impl Stamp {
     pub(crate) fn now() -> Self {
-        Stamp { wall: now_ns(), cpu: cpu_ns(thread_cpu()) as u64 }
+        Stamp { wall: now_ns(), cpu: thread_cpu_mark() }
     }
+}
+
+fn cpu_delta(a: Stamp, b: Stamp) -> Option<u64> {
+    a.cpu.zip(b.cpu).and_then(|(a, b)| a.delta_ns(b)).map(|ns| ns as u64)
 }
 
 /// One drawn frame's stage boundaries and counts.
@@ -112,6 +164,13 @@ pub(crate) struct Frame {
     pub(crate) whole: Option<&'static str>,
     /// The bounds of what changed (`[x0, y0, x1, y1]`), however much it drew.
     pub(crate) change: Option<[u32; 4]>,
+    /// Only its loops stepped (`Runtime::loop_step`): the instances it wrote, else None.
+    pub(crate) looped: Option<usize>,
+    /// Why it wasn't loop-only, when only its loops might have asked for it.
+    pub(crate) loop_why: Option<&'static str>,
+    /// `RUNE_LOOP_CHECK=1`: the instances that differ from what the loop-only step would have
+    /// drawn, and the largest difference.
+    pub(crate) loop_check: Option<(usize, f32)>,
 }
 
 pub(crate) fn frame(f: Frame) {
@@ -140,15 +199,35 @@ pub(crate) fn frame(f: Frame) {
         "view": ns(p[0]), "commit": ns(p[1]), "layout": ns(p[2]), "text": ns(p[3]), "paint": ns(p[4]), "apply": ns(p[5]),
         "upload": d(f.built, f.uploaded), "encode": d(f.uploaded, f.encoded), "submit": d(f.encoded, f.submitted),
         "present": d(f.submitted, f.presented), "total": d(f.entry, f.presented),
-        "cpu": f.presented.cpu.saturating_sub(f.entry.cpu), "build_cpu": f.built.cpu.saturating_sub(f.acquired.cpu), "acquire_cpu": f.acquired.cpu.saturating_sub(f.start.cpu), "encode_cpu": f.encoded.cpu.saturating_sub(f.uploaded.cpu), "submit_cpu": f.submitted.cpu.saturating_sub(f.encoded.cpu), "present_cpu": f.presented.cpu.saturating_sub(f.submitted.cpu),
+        "cpu": cpu_delta(f.entry, f.presented), "build_cpu": cpu_delta(f.acquired, f.built), "acquire_cpu": cpu_delta(f.start, f.acquired), "encode_cpu": cpu_delta(f.uploaded, f.encoded), "submit_cpu": cpu_delta(f.encoded, f.submitted), "present_cpu": cpu_delta(f.submitted, f.presented),
         "nodes": f.nodes, "shaped": f.shaped, "instances": f.instances, "animating": f.animating,
         "why": crate::runtime::CommitWhy::names(f.why),
         "next": next, "poll_due": f.poll_due, "loop_due": f.loop_due, "loops": f.loops, "damage": f.damage, "whole": f.whole, "change": f.change,
     });
+    // Apart from the rest: one more key there passes `json!`'s recursion limit.
+    let mut line = line;
+    line["looped"] = serde_json::json!(f.looped);
+    line["loop_why"] = serde_json::json!(f.loop_why);
+    let (missed, reconfigured) = MISSED.replace(([0; 4], 0));
+    if missed != [0; 4] || reconfigured > 0 {
+        line["missed"] = serde_json::json!({ "occluded": missed[0], "timeout": missed[1], "outdated": missed[2], "unconfigured": missed[3], "reconfigured": reconfigured });
+    }
+    line["loop_check"] =
+        serde_json::json!(f.loop_check.map(|(n, d)| [n as f64, if d.is_finite() { f64::from(d) } else { -1.0 }]));
+    #[cfg(test)]
+    CAPTURED.with_borrow_mut(|slot| {
+        if let Some(lines) = slot.as_mut() {
+            lines.push(line.clone());
+        }
+    });
     OUT.with_borrow_mut(|out| {
         if let Some(Some(w)) = out.as_mut() {
-            let _ = writeln!(w, "{line}");
-            let _ = w.flush();
+            writeln!(w, "{line}").ok();
+            w.flush().ok();
         }
     });
 }
+
+#[cfg(test)]
+#[path = "live_log_tests.rs"]
+mod tests;

@@ -24,10 +24,10 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 
 **Context:** Rune is pre-release, `dev` moves, upstream does not accept pull requests, and the app needs five things at the text/window layer. Rune's crates depend on siblings by path; patching the text system means owning the tree. A dependency's `[patch]` does not apply to the dependent workspace.
 
-**Decision:** Vendor the full pinned Rune workspace under `vendor/rune/`, depend on it by path, repeat Rune's five `[patch.crates-io]` entries in our root, and keep numbered patches in `vendor/rune/patches/`:
+**Decision:** Vendor the full pinned Rune workspace under `vendor/rune/`, depend on it by path, repeat Rune's eight `[patch.crates-io]` entries in our root, and keep numbered patches in `vendor/rune/patches/`:
 
 - `0001-text-inline-object` — `Span::image` + `Span::rise`, inline-box geometry (math).
-- `0002-close-request-veto` — `App::on_close_request` before hiding (unsaved-close guard).
+- `0002-close-request-veto` — superseded: upstream `App::on_close_request -> CloseResponse` (Rune `f4ec14e`) keeps the unsaved-close guard without a local patch.
 - `0003-text-hit` (only if needed) — rendered byte under the pointer.
 - `0004-window-theme` (optional) — native frame theme.
 - `0005-linux-frame` (deferred) — interactive resize/CSD.
@@ -251,6 +251,8 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 **Decision:** Patch `App::on_close_request -> bool`/`WindowSpec::on_close_request`; run before hiding; keep `Tx::close_window`/`AppHandle::close` force-close.
 
 **Consequences:** Alt+F4/WM close can show Save/Discard/Cancel. Programmatic close still works for tests and quit.
+
+**Update 2026-11-25:** upstream Rune `f4ec14e` now has `App::on_close_request -> CloseResponse::{Close, Defer}` with the same semantics. Patch 0002 is retired; the app returns `Defer` from its hook.
 
 ---
 

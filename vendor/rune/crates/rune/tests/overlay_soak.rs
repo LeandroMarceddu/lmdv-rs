@@ -8,7 +8,7 @@
 use rune::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 static STARTS: AtomicUsize = AtomicUsize::new(0);
 
@@ -25,7 +25,7 @@ fn plate(_: &(), _: &mut Cx<()>) -> El {
 }
 
 fn wait(limit: Duration, f: impl Fn() -> bool) -> bool {
-    let start = Instant::now();
+    let start = rune::time::now();
     while !f() {
         if start.elapsed() > limit {
             return false;
@@ -54,6 +54,7 @@ fn hide<T>(name: &str, overlay: &OverlayHandle<T>) {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(unsafe_code)]
 fn memory_mb() -> f64 {
     #[repr(C)]
     #[derive(Default)]
@@ -100,7 +101,7 @@ fn main() {
         return;
     }
     let cycles: usize =
-        std::env::var("RUNE_SOAK_CYCLES").ok().and_then(|n| n.parse().ok()).unwrap_or(2000).max(WARM_UP + 1);
+        rune::env::var("RUNE_SOAK_CYCLES").and_then(|n| n.parse().ok()).unwrap_or(2000).max(WARM_UP + 1);
     std::thread::spawn(|| {
         std::thread::sleep(Duration::from_secs(3600));
         eprintln!("timeout");
@@ -137,7 +138,7 @@ fn main() {
     let out = result.clone();
     std::thread::spawn(move || {
         let run = std::panic::catch_unwind(move || {
-            let started = Instant::now();
+            let started = rune::time::now();
             let mut baseline = 0.0;
             for cycle in 0..cycles {
                 show("hud", &hud);

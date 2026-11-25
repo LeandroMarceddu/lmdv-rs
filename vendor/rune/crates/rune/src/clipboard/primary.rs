@@ -19,9 +19,14 @@ enum Request {
 static WORKER: OnceLock<mpsc::Sender<Request>> = OnceLock::new();
 
 fn worker() -> &'static mpsc::Sender<Request> {
+    if cfg!(test) {
+        panic!(
+            "unit test reached the OS primary selection; install a test clipboard (`rt.use_clipboard` or `Client::use_memory`)"
+        );
+    }
     WORKER.get_or_init(|| {
         let (sender, requests) = mpsc::channel();
-        let _ = std::thread::Builder::new().name("rune-primary".into()).spawn(move || run(requests));
+        std::thread::Builder::new().name("rune-primary".into()).spawn(move || run(requests)).ok();
         sender
     })
 }
@@ -35,7 +40,7 @@ fn run(requests: mpsc::Receiver<Request>) {
         let Some(cb) = board.as_mut() else { continue };
         match request {
             Request::Write(text) => {
-                let _ = cb.set().clipboard(LinuxClipboardKind::Primary).text(text);
+                cb.set().clipboard(LinuxClipboardKind::Primary).text(text).ok();
             }
             Request::Read { target, reply, wake } => {
                 let text = cb.get().clipboard(LinuxClipboardKind::Primary).text().ok().filter(|t| !t.is_empty());
@@ -53,12 +58,12 @@ fn run(requests: mpsc::Receiver<Request>) {
 
 impl Client {
     /// Hands the worker what the runtime asked of the primary selection.
-    pub(super) fn flush_primary<S: 'static>(&self, rt: &mut Runtime<S>) {
-        if let Some(text) = rt.primary.write.take() {
-            let _ = worker().send(Request::Write(text));
+    pub(super) fn flush_primary(&self, rt: &mut crate::runtime::RuntimeCore) {
+        if let Some(text) = rt.edit.primary.write.take() {
+            worker().send(Request::Write(text)).ok();
         }
-        if let Some(target) = rt.primary.paste.take() {
-            let _ = worker().send(Request::Read { target, reply: self.sender.clone(), wake: self.wake.clone() });
+        if let Some(target) = rt.edit.primary.paste.take() {
+            worker().send(Request::Read { target, reply: self.sender.clone(), wake: self.wake.clone() }).ok();
         }
     }
 }

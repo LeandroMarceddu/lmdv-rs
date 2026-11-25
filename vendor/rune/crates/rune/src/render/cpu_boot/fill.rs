@@ -7,7 +7,6 @@
 //! upload: a renderer that arrives later uploads these texels and samples them, never filling
 //! them again, so text at the hand-over is the same texels on both sides.
 
-use crate::time::Instant;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -43,7 +42,7 @@ pub(super) const TEXELS_PER_THREAD: u64 = 1_500;
 
 /// `fill_masks` on the threads `exec` gives for this many.
 pub(super) fn fill_with<E: super::raster::Exec>(atlas: &mut Atlas, exec: &dyn Fn(usize) -> E) -> FillReport {
-    let started = Instant::now();
+    let started = crate::time::now();
     let fills: Vec<(usize, QueuedFill)> =
         atlas.take_cpu_fills().into_iter().flat_map(|(page, f)| f.into_iter().map(move |q| (page, q))).collect();
     let queued: Vec<QueuedFill> = fills.iter().map(|f| f.1).collect();
@@ -73,7 +72,7 @@ pub(super) fn fill_with<E: super::raster::Exec>(atlas: &mut Atlas, exec: &dyn Fn
     if !fills.is_empty() {
         exec.run(&worker);
     }
-    let covered = Instant::now();
+    let covered = crate::time::now();
     for (group, masks) in groups.iter().zip(done) {
         for (&i, mask) in group.iter().zip(masks.into_inner().unwrap_or_else(|e| e.into_inner())) {
             let (page, q) = &fills[i as usize];
@@ -93,7 +92,7 @@ pub(super) fn fill_with<E: super::raster::Exec>(atlas: &mut Atlas, exec: &dyn Fn
             *d = (d.0.min(rows.0), d.1.max(rows.1));
         }
     }
-    let end = Instant::now();
+    let end = crate::time::now();
     FillReport {
         threads,
         masks: fills.len(),

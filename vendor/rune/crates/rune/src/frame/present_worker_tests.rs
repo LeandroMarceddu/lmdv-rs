@@ -125,7 +125,7 @@ impl Drop for Old {
         }
         self.jobs = None;
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            thread.join().ok();
         }
     }
 }

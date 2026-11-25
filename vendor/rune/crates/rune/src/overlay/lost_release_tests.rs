@@ -358,9 +358,11 @@ impl Reference {
                 let released = if click.forgotten { self.runtime_at } else { click.at };
                 self.position(released, &mut expect);
                 if let Some(drag) = self.drag.take() {
-                    expect.extend([Heard::Up(released), Heard::Press]);
+                    expect.push(Heard::Up(released));
                     if drag.moved {
                         self.run = None;
+                    } else {
+                        expect.push(Heard::Press);
                     }
                 }
                 let holding = self.live().any(|click| click.down);
@@ -469,7 +471,7 @@ impl Reference {
                         format!("press {press} ended normally after losing its release"),
                     ));
                 }
-                dropped = true;
+                dropped = !moved;
             }
             self.open = None;
         }
@@ -563,7 +565,7 @@ fn run(overlay: &mut Overlay<u32>, plan: Plan, sequence: &[Letter]) -> Outcome {
     overlay.rt.pointer_move(start.0, start.1);
     overlay.rt.take_queued_pointer();
     let pointer = PointerState::new(OverlayInput::All, false);
-    let base = Instant::now();
+    let base = crate::time::now();
     let mut model = Reference::new(plan, start);
     let (buttons, at, clock) = model.read();
     pointer.read(buttons, base + clock, at, true, false);

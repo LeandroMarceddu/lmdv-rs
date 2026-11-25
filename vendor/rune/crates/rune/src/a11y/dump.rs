@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use crate::runtime::HashMap;
 
-const ACTIONS: [(Action, &str); 15] = [
+pub(super) const ACTIONS: [(Action, &str); 16] = [
     (Action::Click, "click"),
     (Action::Focus, "focus"),
     (Action::ShowContextMenu, "context-menu"),
@@ -22,6 +22,7 @@ const ACTIONS: [(Action, &str); 15] = [
     (Action::ScrollUp, "scroll-up"),
     (Action::ScrollDown, "scroll-down"),
     (Action::ScrollLeft, "scroll-left"),
+    (Action::ScrollRight, "scroll-right"),
     (Action::SetScrollOffset, "set-scroll-offset"),
 ];
 
@@ -51,7 +52,9 @@ fn super_root(update: &TreeUpdate) -> NodeId {
 impl Tree<'_> {
     fn node(&self, id: NodeId, origin: [f64; 2], root: bool) -> Option<Value> {
         let n = *self.nodes.get(&id.0)?;
-        if n.role() == Role::TextRun && !self.runs {
+        if (n.role() == Role::TextRun || matches!(n.class_name(), Some("\x1frune-lines" | "\x1frune-line")))
+            && !self.runs
+        {
             return None;
         }
         // The root's transform scales points to pixels; below it, offsets are points.
@@ -92,6 +95,18 @@ impl Tree<'_> {
         if let Some(s) = n.size_of_set() {
             v["setSize"] = s.into();
         }
+        if let Some(r) = n.row_count() {
+            v["rowCount"] = r.into();
+        }
+        if let Some(c) = n.column_count() {
+            v["columnCount"] = c.into();
+        }
+        if let Some(r) = n.row_index() {
+            v["rowIndex"] = (r + 1).into();
+        }
+        if let Some(c) = n.column_index() {
+            v["columnIndex"] = (c + 1).into();
+        }
         if let Some(k) = n.keyboard_shortcut() {
             v["shortcut"] = k.into();
         }
@@ -100,6 +115,53 @@ impl Tree<'_> {
         }
         if let Some(a) = n.active_descendant().and_then(|a| self.nodes.get(&a.0)) {
             v["activeDescendant"] = a.author_id().map_or(Value::Null, Into::into);
+        }
+        if !n.controls().is_empty() {
+            let ids: Vec<Value> = n
+                .controls()
+                .iter()
+                .filter_map(|c| self.nodes.get(&c.0))
+                .map(|c| c.author_id().map_or(Value::Null, Into::into))
+                .collect();
+            if !ids.is_empty() {
+                v["controls"] = Value::Array(ids);
+            }
+        }
+        if !n.owns().is_empty() {
+            let ids: Vec<Value> = n
+                .owns()
+                .iter()
+                .filter_map(|c| self.nodes.get(&c.0))
+                .map(|c| c.author_id().map_or(Value::Null, Into::into))
+                .collect();
+            if !ids.is_empty() {
+                v["owns"] = Value::Array(ids);
+            }
+        }
+        if let Some(hp) = n.has_popup() {
+            v["hasPopup"] = match hp {
+                accesskit::HasPopup::Menu => "menu",
+                accesskit::HasPopup::Listbox => "listbox",
+                accesskit::HasPopup::Tree => "tree",
+                accesskit::HasPopup::Grid => "grid",
+                accesskit::HasPopup::Dialog => "dialog",
+            }
+            .into();
+        }
+        if let Some(o) = n.orientation() {
+            v["orientation"] = match o {
+                accesskit::Orientation::Horizontal => "horizontal",
+                accesskit::Orientation::Vertical => "vertical",
+            }
+            .into();
+        }
+        if let Some(ac) = n.auto_complete() {
+            v["autoComplete"] = match ac {
+                accesskit::AutoComplete::Inline => "inline",
+                accesskit::AutoComplete::List => "list",
+                accesskit::AutoComplete::Both => "both",
+            }
+            .into();
         }
         match n.sort_direction() {
             Some(accesskit::SortDirection::Ascending) => v["sort"] = "ascending".into(),
@@ -115,6 +177,12 @@ impl Tree<'_> {
         }
         if n.is_read_only() {
             states.push("read-only");
+        }
+        if n.is_required() {
+            states.push("required");
+        }
+        if n.is_multiselectable() {
+            states.push("multiselectable");
         }
         if n.invalid().is_some() {
             states.push("invalid");

@@ -33,16 +33,20 @@ struct Counting;
 static ALLOCS: AtomicU64 = AtomicU64::new(0);
 
 // SAFETY: forwards to the system allocator, counting calls.
+#[allow(unsafe_code)]
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: delegates allocation with the caller's layout to `System`.
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: delegates deallocation of `ptr` and `layout` to `System`.
         unsafe { System.dealloc(ptr, layout) }
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         ALLOCS.fetch_add(1, Ordering::Relaxed);
+        // SAFETY: delegates reallocation of `ptr`, `layout` and `size` to `System`.
         unsafe { System.realloc(ptr, layout, size) }
     }
 }
@@ -55,7 +59,7 @@ fn view(_: &(), _: &mut Cx<()>) -> El {
 }
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(default)
+    rune::env::var(name).and_then(|s| s.parse().ok()).unwrap_or(default)
 }
 
 const WARMUP: Duration = Duration::from_secs(2);
@@ -232,7 +236,7 @@ impl Compositor<()> for Hud {
             self.from = Some(Start {
                 main: entered,
                 process: process_cpu_ms(),
-                wall: Instant::now(),
+                wall: rune::time::now(),
                 frames: self.frames,
                 allocs: ALLOCS.load(Ordering::Relaxed),
                 threads: side_threads(),
@@ -319,7 +323,7 @@ fn main() {
         let spec = AppSpec::new("Overlay HUD cost", (360.0, 80.0), || (), view);
         let mut app = App::new(spec).windowless();
         let hud = Hud {
-            start: Instant::now(),
+            start: rune::time::now(),
             seconds,
             frames: 0,
             from: None,

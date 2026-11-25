@@ -32,9 +32,14 @@ pub fn encode(scene: &Scene<'_>) -> Vec<u8> {
     out.extend_from_slice(&u32::from(scene.lcd).to_le_bytes());
     out.extend_from_slice(&(scene.instances.len() as u32).to_le_bytes());
     out.extend_from_slice(bytemuck::cast_slice(scene.instances));
+    let side = (ATLAS_SIZE * ATLAS_SIZE) as usize;
     out.extend_from_slice(&(scene.glyph_pages.len() as u32).to_le_bytes());
     for page in &scene.glyph_pages {
-        out.extend_from_slice(page);
+        let n = page.len().min(side);
+        out.extend_from_slice(&page[..n]);
+        if n < side {
+            out.resize(out.len() + (side - n), 0);
+        }
     }
     out.extend_from_slice(&(scene.images.len() as u32).to_le_bytes());
     for image in &scene.images {
@@ -87,6 +92,8 @@ impl Recording {
             smoothing: None,
             atlas_resets: 0,
             half: super::HalfRounding::default(),
+            fade_stops: [0.0; 2],
+            degraded: false,
         }
     }
 

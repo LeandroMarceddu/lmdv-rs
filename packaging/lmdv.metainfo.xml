@@ -52,6 +52,13 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.11.0" date="2026-11-25" type="development">
+      <description>
+        <p>A newer native Rune: faster text and link hit-testing on large
+          documents, Linux launch and GPU fallbacks, Windows input fixes, and
+          upstream unsaved-close deferral. No user-facing features removed.</p>
+      </description>
+    </release>
     <release version="0.10.0" date="2026-11-24" type="development">
       <description>
         <p>Editor and preview parity, Find in document, selection rich copy,

@@ -11,6 +11,40 @@ export async function writeClipboard(text, html, png) {
     return clipboard.write([new ClipboardItem(forms)]);
 }
 
+// Writes a PNG image inside the active user gesture by creating a `ClipboardItem` holding a
+// `Promise<Blob>` synchronously and invoking `makePng()` on a later turn (`setTimeout(0)`) so
+// PNG encoding never blocks the input handler. `makePng()` returns `{ png: Uint8Array }` on
+// success or `{ error: string }` to reject without writing.
+export function writeClipboardImage(makePng) {
+    const clipboard = navigator.clipboard;
+    if (!clipboard || typeof clipboard.write !== 'function') {
+        return Promise.reject(new Error('Clipboard image write requires HTTPS and Clipboard.write.'));
+    }
+    if (typeof ClipboardItem === 'undefined') {
+        return Promise.reject(new Error('ClipboardItem is unavailable in this browser.'));
+    }
+    const blobPromise = new Promise((resolve, reject) => {
+        setTimeout(() => {
+            try {
+                const out = makePng();
+                if (out && out.png && out.png.length) {
+                    resolve(new Blob([out.png], { type: 'image/png' }));
+                } else {
+                    reject(new Error((out && out.error) || 'Image copy aborted.'));
+                }
+            } catch (e) {
+                reject(e);
+            }
+        }, 0);
+    });
+    try {
+        return clipboard.write([new ClipboardItem({ 'image/png': blobPromise })]);
+    } catch (e) {
+        blobPromise.catch(() => {});
+        return Promise.reject(e);
+    }
+}
+
 // `{ text, html, png }`, each undefined when the clipboard lacks it; `html` only when `rich`,
 // and `png` (a Uint8Array of at most `maxImage` bytes) only when `image`. `read()` starts
 // before the first await, inside the input handler; where it fails, plain `readText()` is the
@@ -37,10 +71,17 @@ export async function pngBytes(blob, max) {
     return blob && blob.size <= max ? new Uint8Array(await blob.arrayBuffer()) : undefined;
 }
 
+// Opens `url` in a new tab with no opener or referrer. False when no click or key press was
+// active, which browsers block: with `noopener` the browser returns null whether or not the
+// tab opened, so the page's user activation, read before `window.open` spends it, is all there
+// is to go on. Browsers without `navigator.userActivation` say true.
 export function openLink(url) {
     const parsed = new URL(url);
     if (!['https:', 'http:', 'mailto:'].includes(parsed.protocol)) throw new Error('Unsupported link scheme.');
+    const activation = navigator.userActivation;
+    const active = !activation || activation.isActive;
     window.open(parsed.href, '_blank', 'noopener,noreferrer');
+    return active;
 }
 
 // `url` resolved against the page, and whether it stays on the page's origin.
@@ -52,48 +93,6 @@ export function resolveLink(url) {
 
 export function assignLink(href) {
     location.assign(href);
-}
-
-// `url` (relative to the page) decoded by the browser's own codecs, which run off the main
-// thread: `[width, height, rgba]` with straight-alpha sRGB RGBA bytes, upright by EXIF. SVG comes
-// back as `[0, 0, bytes]` for Rune to rasterize. Images over `maxSide` a side are refused
-// before their pixels are read. It resolves in a task of its own, so Rune's work on one image
-// (its mips) never runs in the same long task as another's or a frame's.
-export async function fetchImage(url, maxSide) {
-    const reply = await readImage(url, maxSide);
-    await nextTask();
-    return reply;
-}
-
-async function readImage(url, maxSide) {
-    const response = await fetch(new URL(url, document.baseURI));
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const blob = await response.blob();
-    const type = (response.headers.get('content-type') || blob.type).split(';')[0].trim().toLowerCase();
-    const path = response.url ? new URL(response.url).pathname : '';
-    if (type === 'image/svg+xml' || /\.svgz?$/i.test(path)) return [0, 0, new Uint8Array(await blob.arrayBuffer())];
-    return blobRgba(blob, maxSide);
-}
-
-export async function decodeImage(bytes, maxSide) {
-    const reply = await blobRgba(new Blob([bytes]), maxSide);
-    await nextTask();
-    return reply;
-}
-
-async function blobRgba(blob, maxSide) {
-    const bitmap = await createImageBitmap(blob, { imageOrientation: 'from-image', colorSpaceConversion: 'default' });
-    try {
-        const { width, height } = bitmap;
-        if (width > maxSide || height > maxSide) throw new Error(`${width}×${height} is over ${maxSide} pixels a side`);
-        const canvas = typeof OffscreenCanvas === 'function' ? new OffscreenCanvas(width, height)
-            : Object.assign(document.createElement('canvas'), { width, height });
-        const context = canvas.getContext('2d', { willReadFrequently: true });
-        context.drawImage(bitmap, 0, 0);
-        return [width, height, new Uint8Array(context.getImageData(0, 0, width, height).data.buffer)];
-    } finally {
-        bitmap.close();
-    }
 }
 
 export function objectUrl(bytes, type) {
@@ -112,19 +111,6 @@ export function setCursor(canvas, css) {
     if (!canvas.style.cursor) canvas.style.cursor = `-webkit-${css}`;
 }
 
-export function browserPlatform() {
-    const nav = globalThis.navigator;
-    return nav ? (nav.userAgentData?.platform || nav.platform || '') : undefined;
-}
-
-export function touchPoints() {
-    return globalThis.navigator?.maxTouchPoints || 0;
-}
-
-export function nextTask() {
-    return globalThis.scheduler?.yield ? globalThis.scheduler.yield() : new Promise((resolve) => setTimeout(resolve, 0));
-}
-
 // Resolves in the page's next idle time, or after `timeout` ms at the latest.
 export function nextIdle(timeout) {
     return new Promise((resolve) => globalThis.requestIdleCallback ? requestIdleCallback(() => resolve(), { timeout }) : setTimeout(resolve, timeout));
@@ -140,6 +126,14 @@ export function resolveUrl(url, base) {
     return new URL(url, base).href;
 }
 
+// Browser preferred languages as BCP 47 tags, most preferred first (`Cx::system_languages`).
+export function preferredLanguages() {
+    const nav = globalThis.navigator;
+    if (!nav) return [];
+    const raw = nav.languages?.length ? [...nav.languages] : (nav.language ? [nav.language] : []);
+    return raw.filter(tag => typeof tag === 'string' && tag.trim().length > 0);
+}
+
 export function viewport(canvas, callback, embedded) {
     const probe = document.createElement('div');
     probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)';
@@ -149,17 +143,27 @@ export function viewport(canvas, callback, embedded) {
     const largest = document.createElement('div');
     largest.style.cssText = 'position:fixed;top:0;left:0;width:0;height:100lvh;visibility:hidden;pointer-events:none';
     document.body.append(largest);
+    // Full-window canvases keep their layout-viewport CSS box (`position:fixed;inset:0;width:100%;height:100%`)
+    // instead of shrinking to `window.visualViewport`: iOS Safari and Chrome on Android (since
+    // Chrome 108's default `interactive-widget=resizes-visual`) resize only the visual viewport
+    // when the virtual keyboard opens. Leaving the canvas at the layout viewport prevents squash
+    // distortion and spurious relayouts; instead report the unzoomed visual viewport's vertical
+    // band so Rune can scroll or shift only the focused field into view.
     const update = () => {
-        if (!embedded) {
-            const v = window.visualViewport;
-            canvas.style.width = `${v?.width ?? innerWidth}px`;
-            canvas.style.height = `${v?.height ?? innerHeight}px`;
-            canvas.style.left = `${v?.offsetLeft ?? 0}px`;
-            canvas.style.top = `${v?.offsetTop ?? 0}px`;
-        }
         const s = getComputedStyle(probe);
+        const layoutH = Number.isFinite(innerHeight) && innerHeight > 0 ? innerHeight : 0;
+        const v = window.visualViewport;
+        const zoomed = v && typeof v.scale === 'number' && v.scale > 1.01;
+        let visual = null;
+        if (!embedded && v && !zoomed && layoutH > 0) {
+            const top = typeof v.offsetTop === 'number' && Number.isFinite(v.offsetTop) ? Math.max(0, v.offsetTop) : 0;
+            const vh = typeof v.height === 'number' && Number.isFinite(v.height) && v.height > 0 ? v.height : layoutH;
+            const bottom = Math.min(layoutH, top + vh);
+            if (bottom > top) visual = [top, bottom, layoutH];
+        }
         callback(JSON.stringify({ kind: 'viewport', h: largest.offsetHeight || innerHeight,
-            insets: embedded ? [0, 0, 0, 0] : [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft].map(parseFloat) }));
+            insets: embedded ? [0, 0, 0, 0] : [s.paddingTop, s.paddingRight, s.paddingBottom, s.paddingLeft].map(parseFloat),
+            visual }));
     };
     const motion = matchMedia('(prefers-reduced-motion: reduce)');
     const reduced = () => callback(JSON.stringify({ kind: 'motion', reduced: motion.matches }));
@@ -183,7 +187,8 @@ export function viewport(canvas, callback, embedded) {
         callback(JSON.stringify({ kind: 'contrast', colors }));
     };
     const focus = () => callback(JSON.stringify({ kind: 'focus', focused: document.hasFocus() }));
-    const visibility = () => callback(JSON.stringify({ kind: 'visibility', visible: !document.hidden }));
+    const languageChange = () => callback(JSON.stringify({ kind: 'languages', languages: preferredLanguages() }));
+    const visibility = () => callback(JSON.stringify({ kind: 'visibility', visible: !document.hidden, focused: document.hasFocus() }));
     let dprMedia = null;
     const watchDpr = () => {
         dprMedia?.removeEventListener('change', onDpr);
@@ -209,6 +214,7 @@ export function viewport(canvas, callback, embedded) {
     forced.addEventListener('change', contrast);
     window.addEventListener('focus', focus);
     window.addEventListener('blur', focus);
+    window.addEventListener('languagechange', languageChange);
     document.addEventListener('visibilitychange', visibility);
     // Mount is called while Rust is installing the shell; enter it only after installation.
     queueMicrotask(() => { update(); reduced(); pointer(); contrast(); focus(); visibility(); });
@@ -224,6 +230,7 @@ export function viewport(canvas, callback, embedded) {
         forced.removeEventListener('change', contrast);
         window.removeEventListener('focus', focus);
         window.removeEventListener('blur', focus);
+        window.removeEventListener('languagechange', languageChange);
         document.removeEventListener('visibilitychange', visibility);
         probe.remove();
         largest.remove();

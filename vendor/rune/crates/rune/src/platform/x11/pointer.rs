@@ -1,4 +1,7 @@
 //! XI2 raw motion on a private connection. Idle overlays have no polling deadline.
+
+#![allow(unsafe_code)]
+
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -102,11 +105,12 @@ impl Drop for MouseWatch {
         }
         // This private connection stays owned here until the reader exits. Shutdown wakes
         // wait_for_event without touching winit's display or waiting for another input event.
+        // SAFETY: `self.connection` owns a live open socket FD until `Drop` finishes (`SHUT_RDWR == 2`).
         unsafe {
             shutdown(self.connection.stream().as_raw_fd(), 2);
         }
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            thread.join().ok();
         }
     }
 }

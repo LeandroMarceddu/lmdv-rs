@@ -1,8 +1,8 @@
 # Rune capability map for lmdv (native Markdown viewer)
 
 **Audited source:** Rune rev `d6d04d3e64180ba34ed4a976bb5fec9ff6769ad0` (2026-11-12),
-`rust-toolchain.toml` = 1.99.1. **Current vendor pin:** `cca5df6fafb4721d96fe105f126ebfd2ec351bb6`
-(2026-11-17). `docs/RUNE_PIN.md` has the pin and vendor instructions. This file is a research
+`rust-toolchain.toml` = 1.99.1. **Current vendor pin:** `f4ec14ed32256ae0c36e73476825f9245437de5b`
+(2026-11-25). `docs/RUNE_PIN.md` has the pin and vendor instructions. This file is a research
 snapshot from the audited rev; re-check rows touched by the bump (text metrics, focus, a11y, wheel)
 before relying on them. `docs/ARCHITECTURE.md` and `docs/DECISIONS.md` are the current design.
 
@@ -633,21 +633,25 @@ this is **not** a display list you can serialise to SVG text/shapes. Use it only
 
 ### 9.3 Pin and patch (critical wiring)
 
-- Pin `rune`, `rune-kit`, `rune-mermaid`, `rune-i18n` to rev `cca5df6fafb4721d96fe105f126ebfd2ec351bb6`
-  (2026-11-17), toolchain `1.99.1` (`rust-toolchain.toml`), edition 2024.
-- Rune's workspace patches five crates: `wgpu-hal`, `winit`, `parley_engine`, `accesskit_windows`,
-  `accesskit_macos` (with `vendor/*.patch`). **A dependency's `[patch]` does not apply to the dependent
-  workspace**, so lmdv vendors those five dirs and repeats the `[patch.crates-io]` block, or it will build
-  against stock crates and lose fixes (bidi L1, text shaping cache, Wayland/Win32 window fixes, a11y).
-  `tiny-skia-path` is a path dependency of `crates/rune` itself, not a root patch.
+- Pin `rune`, `rune-kit`, `rune-mermaid`, `rune-i18n` to rev `f4ec14ed32256ae0c36e73476825f9245437de5b`
+  (2026-11-25), toolchain `1.99.1` (`rust-toolchain.toml`), edition 2024.
+- Rune's workspace patches eight crates: `wgpu-hal`, `naga`, `winit`, `sctk-adwaita`, `parley_engine`,
+  `accesskit_windows`, `accesskit_atspi_common`, `accesskit_macos` (with `vendor/*.patch`). **A
+  dependency's `[patch]` does not apply to the dependent workspace**, so lmdv vendors those dirs and
+  repeats the `[patch.crates-io]` block, or it will build against stock crates and lose fixes (bidi L1,
+  text shaping cache, Wayland/Win32 window fixes, a11y, naga constant folding).
+  `tiny-skia-path` is a path dependency of `crates/rune-text` itself, not a root patch.
 - Keep the `Cargo.lock`; Rune depends on pre-release-ish ranges: `wgpu ~30.0.1`, `winit 0.30.13`, `taffy 0.15`,
   `parley 0.12`, `accesskit 0.25.2`, `resvg 0.45`, `pulldown-cmark 0.13` (`crates/rune/Cargo.toml:60-130`;
   `crates/rune-kit/Cargo.toml:16`).
 - Patching Rune itself: keep each patch as a numbered `.patch` + rationale, and
   `scripts/apply-rune-patches.sh` makes a rev bump mechanical. The current local set is:
   1. `0001-text-inline-object` — non-square inline image box for math (§3).
-  2. `0002-close-request-veto` — native close asks before hiding.
-  Both rebased onto `cca5df6`; run `scripts/test-rune-patches.sh` after a vendor change.
+  2. `0003-a11y-inline-object` — the accessibility text speaks the image label.
+  3. `0004-text-highlight-inline-image` — a highlight keeps the image's box.
+  4. `0005-mermaid-svg` — static SVG for export/lightbox.
+  All re-ported onto `f4ec14e`; `0002` is upstream now. Run
+  `scripts/test-rune-patches.sh` after a vendor change.
 - **Do not** `[patch]` `rune` to a local copy and also consume it from crates.io; pick one source for all four
   Rune crates (git rev) and patch with path overrides in the same table.
 
@@ -655,7 +659,7 @@ this is **not** a display list you can serialise to SVG text/shapes. Use it only
 
 ```toml
 [workspace.dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "cca5df6fafb4721d96fe105f126ebfd2ec351bb6",
+rune = { git = "https://github.com/anomalyco/rune", rev = "f4ec14ed32256ae0c36e73476825f9245437de5b",
          default-features = false,
          features = ["accessibility", "dbus", "svg", "native-file-dialog", "tooling"] }
 rune-kit = { git = "…", rev = "…", features = ["markdown", "mermaid"] }

@@ -7,6 +7,8 @@
 //! when the list's or its own moves. With `scrollY = false` the list has no viewport of its own: it is a stack inside a scrolling
 //! column, under or among other content, and windows against that column's viewport.
 
+#![allow(unsafe_code)]
+
 use std::os::raw::c_int;
 use std::rc::{Rc, Weak};
 
@@ -70,6 +72,11 @@ pub(crate) unsafe extern "C-unwind" fn ui_virtual_list(state: *mut ffi::lua_Stat
                         (Ok(Atom::RenderRow), Value::Func) => render = Some(frame.env.reference(state, -1)),
                         (Ok(Atom::RowKey), Value::Func) => row_key = Some(frame.env.reference(state, -1)),
                         (Ok(Atom::OnVisibleRows), Value::Func) => visible = Some(frame.env.reference(state, -1)),
+                        (Ok(Atom::OnScroll), Value::Func) => p.on_scroll = Some(frame.env.reference(state, -1)),
+                        (Ok(Atom::OnScroll), Value::Nil) => {}
+                        (Ok(Atom::OnScroll), other) => {
+                            return Err(format!("onScroll must be a function, got {}", props::name(other)));
+                        }
                         (Ok(Atom::Gap), Value::Num(n)) => gap = n as f32,
                         (Ok(Atom::ScrollY), Value::Bool(b)) => own = b,
                         (Ok(Atom::Key), Value::Str(s)) => key = Some(s.to_owned()),
@@ -88,9 +95,9 @@ pub(crate) unsafe extern "C-unwind" fn ui_virtual_list(state: *mut ffi::lua_Stat
                         ) => {
                             return Err(format!("ui.virtualList {atom:?} can't be a {}", props::name(other)));
                         }
-                        (Ok(Atom::OnPress), _) => frame.env.warn_once("ui.virtualList takes no onPress".into()),
+                        (Ok(Atom::OnPress), _) => super::unknown_prop(&frame.env, Some("virtualList"), "onPress")?,
                         (Ok(atom), _) => p.decode_at(&mut list, state, atom, -1, &frame.env, false)?,
-                        (Err(name), _) => frame.env.warn_once(format!("unknown prop {name}")),
+                        (Err(name), _) => super::unknown_prop(&frame.env, Some("virtualList"), name)?,
                     }
                     ffi::lua_settop(state, -3);
                 }
@@ -114,8 +121,8 @@ pub(crate) unsafe extern "C-unwind" fn ui_virtual_list(state: *mut ffi::lua_Stat
                 if own {
                     p.scroll = Some((false, true));
                 }
+                p.key = Some(key);
                 p.finish(&mut list, env, false, None, frame.attach);
-                list.set_key(key);
                 let el = (frame.attach.rows)(list, spec);
                 let handle = frame.put(el)?;
                 ffi::lua_pushlightuserdata(state, handle);
@@ -188,6 +195,7 @@ pub(crate) fn attach<S: 'static>(list: El, spec: Spec) -> El {
                 mods: None,
                 rows: Some((range.start + 1, range.end)),
                 entered: None,
+                scroll: None,
                 fields: Rc::new([]),
             };
             script.around_write(s, None, |tx| script.handle(&cb, event, tx));

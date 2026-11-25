@@ -70,19 +70,22 @@ fn text_hash(text: &str) -> u64 {
 
 fn intent(n: &Node) -> bool {
     n.live.iter().any(|b| {
-        b.spring.is_none()
+        b.enter.is_none()
             && !b.property.is_color()
-            && !matches!(b.property, crate::live::Property::Blur | crate::live::Property::Trim)
+            && !matches!(
+                b.property,
+                crate::live::Property::Blur | crate::live::Property::Trim | crate::live::Property::RangeValue
+            )
     })
 }
 
-impl<S: 'static> Runtime<S> {
+impl RuntimeCore {
     /// Clears `out` and fills it with the presented elements of the last frame, in tree order,
     /// as [`Self::elements`] lists them but without flight sources, links and highlights, and
     /// without the instant-hover-group rule that marks a group-opacity swap as live.
     /// `out` keeps its capacity, so a caller that reuses it allocates nothing per frame.
     pub fn motion_elements(&self, out: &mut Vec<MotionElement>) {
-        self.motion_elements_into(out, &mut self.motion_scratch.borrow_mut());
+        self.motion_elements_into(out, &mut self.motion.motion_scratch.borrow_mut());
     }
 
     fn motion_elements_into(&self, out: &mut Vec<MotionElement>, down: &mut Vec<(u32, u16, bool)>) {
@@ -91,18 +94,41 @@ impl<S: 'static> Runtime<S> {
         // Per node: its index in `out` (or its nearest listed ancestor's), the flags it passes
         // to what's under it, and whether it or an ancestor is leaving.
         let s = self.env.scale;
-        for (i, node) in self.nodes.iter().enumerate() {
+        for (i, node) in self.tree.nodes.iter().enumerate() {
             // `elements` steps up to an `El::above` target before the parent.
-            let up = step_up(&self.nodes, i);
-            let mut flags = up.map_or(0, |u| down[u].1);
+            let up = step_up(&self.tree.nodes, i);
+            let mut flags = match up {
+                Some(u) if u < i => down[u].1,
+                Some(u) => {
+                    let mut f = 0u16;
+                    for a in anchor_ancestors(&self.tree.nodes, u) {
+                        if a < i {
+                            f |= down[a].1;
+                            break;
+                        }
+                        let an = &self.tree.nodes[a];
+                        if intent(an) || self.motion.landing_holds.holds(an.id) {
+                            f |= MotionElement::LIVE;
+                        }
+                        if self.scroll.scrolls.get(&an.id).is_some_and(ScrollState::moving) {
+                            f |= MotionElement::SCROLLING;
+                        }
+                        if self.motion.grows.get(&an.id).is_some_and(|g| g.moving()) {
+                            f |= MotionElement::GROWING;
+                        }
+                    }
+                    f
+                }
+                None => 0,
+            };
             let mut pass = flags;
-            if intent(node) || self.landing_holds.holds(node.id) {
+            if intent(node) || self.motion.landing_holds.holds(node.id) {
                 pass |= MotionElement::LIVE;
             }
-            if self.scrolls.get(&node.id).is_some_and(ScrollState::moving) {
+            if self.scroll.scrolls.get(&node.id).is_some_and(ScrollState::moving) {
                 pass |= MotionElement::SCROLLING;
             }
-            if self.grows.get(&node.id).is_some_and(|g| g.moving()) {
+            if self.motion.grows.get(&node.id).is_some_and(|g| g.moving()) {
                 pass |= MotionElement::GROWING;
             }
             let parent = node.parent.map(|p| down[p].0).filter(|&p| p != u32::MAX);
@@ -112,25 +138,25 @@ impl<S: 'static> Runtime<S> {
                 flags |= MotionElement::EXITING;
             }
             let Some(p) = self.scene.presented(node.id) else { continue };
-            let flight = if self.flights.is_empty() {
+            let flight = if self.motion.flights.is_empty() {
                 None
             } else {
-                self.flights.iter().find(|f| f.lands(&node.path, node.key.as_deref()))
+                self.motion.flights.iter().find(|f| f.lands(&node.path, node.key.as_deref()))
             };
-            if flight.is_some() || self.reveals.get(&node.id).is_some_and(|r| r.fading()) {
+            if flight.is_some() || self.motion.reveals.get(&node.id).is_some_and(|r| r.fading()) {
                 flags |= MotionElement::GROWING;
             }
-            if intent(node) || self.landing_holds.holds(node.id) {
+            if intent(node) || self.motion.landing_holds.holds(node.id) {
                 flags |= MotionElement::LIVE;
             }
-            let drawn = self.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]);
+            let drawn = self.paint.drawn.get(i).copied().unwrap_or([p.rect.x, p.rect.y, p.rect.w, p.rect.h]);
             let rect = flight.map_or(drawn, |f| {
                 let (d, c) = (f.destination, f.presented);
                 let (zx, zy) = (c.w / d.w.max(1e-3), c.h / d.h.max(1e-3));
                 [c.x + (drawn[0] - d.x) * zx, c.y + (drawn[1] - d.y) * zy, drawn[2] * zx, drawn[3] * zy]
             });
             // O(1): the parent's clip and turn were worked out when the frame drew.
-            let clip = if self.launches.flying(node.id) {
+            let clip = if self.motion.launches.flying(node.id) {
                 NO_CLIP
             } else {
                 flight.map_or_else(|| self.screen_clip_of_parent(node.parent), |f| f.clip.map(|v| v * s))
@@ -158,22 +184,20 @@ impl<S: 'static> Runtime<S> {
                 && v.shadows.is_empty()
                 && node.text.is_none()
                 && v.icon.is_none()
-                && !self.virtuals.is_empty()
-                && self.virtuals.contains_key(&node.path)
+                && !self.commit.virtuals.is_empty()
+                && self.commit.virtuals.contains_key(&node.path)
             {
                 flags |= MotionElement::VIRTUAL;
             }
-            let loop_phase = self.loops.get(&node.id).map_or(f32::NAN, |l| {
+            let loop_phase = self.motion.loops.get(&node.id).map_or(f32::NAN, |l| {
                 flags |= MotionElement::LOOP;
-                if self.reduced_motion
-                    && !matches!(node.looping.as_ref().map(|s| s.kind), Some(rune_motion::LoopKind::Sequence(_)))
-                {
+                if self.reduced_motion && !l.is_finite() {
                     0.0
                 } else {
                     l.phase(self.scene.store().node_time(node.id)) as f32
                 }
             });
-            let inh = self.inh_scratch.get(i);
+            let inh = self.paint.inh_scratch.get(i);
             down[i].0 = out.len() as u32;
             out.push(MotionElement {
                 id: node.id,
@@ -193,6 +217,6 @@ impl<S: 'static> Runtime<S> {
     /// [`ElementInfo::key`]. An id names one path for the runtime's life, so a watcher can cache
     /// them.
     pub fn element_path(&self, id: NodeId) -> Option<(&str, Option<&str>)> {
-        self.node_index.get(&id).map(|&i| (self.nodes[i].path.as_str(), self.nodes[i].key.as_deref()))
+        self.tree.node_index.get(&id).map(|&i| (self.tree.nodes[i].path.as_str(), self.tree.nodes[i].key.as_deref()))
     }
 }

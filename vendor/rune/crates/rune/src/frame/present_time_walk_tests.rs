@@ -76,7 +76,7 @@ impl Old {
             }
             let p = self.pending.pop_front().unwrap();
             let line = self.finish(p);
-            let _ = writeln!(out, "{line}");
+            writeln!(out, "{line}").ok();
         }
     }
 
@@ -87,9 +87,9 @@ impl Old {
         }
         match (p.seq, p.present) {
             (Some(_), Some(Some(at))) => {
-                let _ = write!(line, r#","present_ms":{at}"#);
+                write!(line, r#","present_ms":{at}"#).ok();
                 if let Some(last) = self.last_present {
-                    let _ = write!(line, r#","present_dt_ms":{}"#, old_r3(at - last));
+                    write!(line, r#","present_dt_ms":{}"#, old_r3(at - last)).ok();
                 }
                 self.last_present = Some(at);
             }
@@ -145,7 +145,7 @@ const ALPHABET: [Ev; 9] = [
 ];
 
 fn walk(events: &[Ev]) {
-    let start = Instant::now();
+    let start = crate::time::now();
     let fake = Arc::new(Fake::default());
     let mut new = Presents::new(fake.clone(), start);
     let mut old = Old::new(start);

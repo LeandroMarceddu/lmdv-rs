@@ -11,6 +11,8 @@
 //! - Speeds never multiply raw time inside a shader without going through `Phase` on the caller side
 //!   when the speed animates; otherwise the phase jumps (no phase jump on speed change).
 
+#![forbid(unsafe_code)]
+
 mod binds;
 mod catalog;
 mod cpu;
@@ -20,6 +22,7 @@ mod params;
 mod pipes;
 mod renderer;
 mod sim;
+mod support;
 #[cfg(test)]
 mod tests;
 
@@ -77,6 +80,8 @@ pub use renderer::FxRenderer;
 pub use renderer::FxStats;
 pub use renderer::MaskPyramid;
 pub use rune_motion::Rect;
+pub use support::FxUnsupported;
+pub use support::fx_support;
 
 pub(crate) use pack::*;
 pub(crate) use params::corners;
@@ -277,14 +282,16 @@ impl<T: Copy> OneShots<T> {
 
 // ---------------------------------------------------------------- Fx / layers
 
-#[derive(Clone, Copy, Debug)]
+/// Not `Copy`: motion blur's samples (`MotionSamples`, about 2 KiB) are boxed so every other
+/// effect, and every `FxLayer`, stays small.
+#[derive(Clone, Debug)]
 pub enum Fx {
     Glow(GlowParams),
     Pulse(PulseParams),
     Electric(ElectricParams),
     Fire(FireParams),
     Distort(DistortParams),
-    MotionBlur(MotionBlurParams, MotionSamples),
+    MotionBlur(MotionBlurParams, Box<MotionSamples>),
     Shimmer(ShimmerParams),
     Sparkles(SparkleParams),
     Aurora(AuroraParams),
@@ -309,7 +316,7 @@ pub struct Source {
 /// Default unclipped rectangle for [`FxSlot::clip`], matching `rune::render::NO_CLIP`.
 pub const NO_CLIP: [f32; 4] = [-1e6, -1e6, 1e6, 1e6];
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct FxLayer {
     pub fx: Fx,
     pub shape: Shape,
@@ -321,6 +328,9 @@ pub struct FxLayer {
     /// 0..1, scales the layer's whole output (a retiring one-shot fades out with it).
     pub opacity: f32,
 }
+
+const _: () = assert!(std::mem::size_of::<Fx>() <= 168);
+const _: () = assert!(std::mem::size_of::<FxLayer>() <= 256);
 
 /// How an effect layer composites onto the target beneath it (`FxSlot::blend`).
 ///
@@ -433,7 +443,7 @@ impl Fx {
         Fx::Distort(DistortParams::Lens(p))
     }
     pub fn motion_blur(p: MotionBlurParams, s: MotionSamples) -> Fx {
-        Fx::MotionBlur(p, s)
+        Fx::MotionBlur(p, Box::new(s))
     }
     pub fn shimmer(p: ShimmerParams) -> Fx {
         Fx::Shimmer(p)

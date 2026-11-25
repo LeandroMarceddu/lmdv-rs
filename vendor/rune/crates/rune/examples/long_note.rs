@@ -32,7 +32,6 @@
 //! phases are thread CPU and overlap: commit includes view, layout and apply, layout includes
 //! text (shaping). `shaped` counts layouts shaped that frame and `glyphs` glyph quads painted.
 //! `--gpu` adds `encode_ms`: renderer prepare, draw and submit on a headless GPU.
-use std::time::Instant;
 
 use rune::render::{Gpu, OFFSCREEN_FORMAT, Offscreen, Renderer};
 use rune::text::TextSystem;
@@ -181,7 +180,7 @@ struct Draw {
 
 impl Draw {
     fn draw(&mut self, rt: &mut Runtime<State>) -> f64 {
-        let t = Instant::now();
+        let t = rune::time::now();
         self.renderer.upload_images(&self.gpu.device, &self.gpu.queue, &mut rt.images);
         self.renderer.prepare(
             &self.gpu.device,

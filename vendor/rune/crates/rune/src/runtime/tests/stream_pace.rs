@@ -70,7 +70,7 @@ fn climb(at: &[f64], width: f32) -> (Vec<f32>, Vec<f32>) {
         rt.frame(1.0 / 120.0);
     }
     let top = |rt: &Runtime<Chat>| rt.elements().into_iter().find(|e| e.key.as_deref() == Some("r0")).unwrap().rect[1];
-    let reply = rt.nodes.iter().find(|n| n.key.as_deref() == Some("reply")).unwrap().id;
+    let reply = rt.tree.nodes.iter().find(|n| n.key.as_deref() == Some("reply")).unwrap().id;
     let (mut ys, mut lags, mut next, mut t) = (Vec::new(), Vec::new(), 0, 0.0);
     let end = at.last().copied().unwrap_or(0.0) + 1.5;
     while t < end {
@@ -86,7 +86,7 @@ fn climb(at: &[f64], width: f32) -> (Vec<f32>, Vec<f32>) {
         }
         rt.frame(1.0 / 120.0);
         ys.push(top(&rt));
-        lags.push(rt.grows.get(&reply).map_or(0.0, |g| g.target - g.h));
+        lags.push(rt.motion.grows.get(&reply).map_or(0.0, |g| g.target - g.h));
     }
     (ys, lags)
 }

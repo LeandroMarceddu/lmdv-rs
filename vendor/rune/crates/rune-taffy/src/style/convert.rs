@@ -97,7 +97,14 @@ impl CompactStyle {
             needs_extra = true;
         }
 
-        let box_flags = pack_box_flags(s.flex_direction, s.flex_wrap, s.overflow.x, s.overflow.y);
+        let wrap_code = match encode_wrap(s.flex_wrap) {
+            Some(c) => c,
+            None => {
+                needs_extra = true;
+                0b11
+            }
+        };
+        let box_flags = pack_box_flags(s.flex_direction, wrap_code, s.overflow.x, s.overflow.y);
         let align_items_u8 = pack_align_items(s.align_items);
         let align_self_u8 = pack_align_self(s.align_self);
         let justify_content_u8 = pack_align_content(s.justify_content);
@@ -159,16 +166,23 @@ impl CompactStyle {
 
     #[inline(always)]
     pub fn eq_style(&self, other: &Style) -> bool {
+        !self.whole_rows() && self.eq_style_ignoring_whole(other)
+    }
+
+    #[inline(always)]
+    fn eq_style_ignoring_whole(&self, other: &Style) -> bool {
         if let Some(extra) = &self.extra {
             return &**extra == other;
         }
+        let Some(wrap_code) = encode_wrap(other.flex_wrap) else {
+            return false;
+        };
         self.display() == other.display
             && self.position() == other.position
-            && self.box_flags
-                == pack_box_flags(other.flex_direction, other.flex_wrap, other.overflow.x, other.overflow.y)
+            && self.box_flags == pack_box_flags(other.flex_direction, wrap_code, other.overflow.x, other.overflow.y)
             && self.align_items_u8 == pack_align_items(other.align_items)
             && self.align_self_u8 == pack_align_self(other.align_self)
-            && self.justify_content_u8 == pack_align_content(other.justify_content)
+            && (self.justify_content_u8 & !JUSTIFY_WHOLE_ROWS) == pack_align_content(other.justify_content)
             && self.align_content_u8 == pack_align_content(other.align_content)
             && FlexboxItemStyle::flex_grow(self) == other.flex_grow
             && FlexboxItemStyle::flex_shrink(self) == other.flex_shrink
@@ -239,10 +253,19 @@ impl CompactStyle {
     #[cold]
     #[inline(never)]
     fn eq_cold(&self, other: &Self) -> bool {
+        if self.whole_rows() != other.whole_rows() {
+            return false;
+        }
         match (&self.extra, &other.extra) {
             (Some(a), Some(b)) => a == b,
-            (Some(a), None) => other.eq_style(a),
-            (None, Some(b)) => self.eq_style(b),
+            (Some(a), None) => {
+                (other.justify_content_u8 & !JUSTIFY_WHOLE_ROWS) == pack_align_content(a.justify_content)
+                    && other.eq_style_ignoring_whole(a)
+            }
+            (None, Some(b)) => {
+                (self.justify_content_u8 & !JUSTIFY_WHOLE_ROWS) == pack_align_content(b.justify_content)
+                    && self.eq_style_ignoring_whole(b)
+            }
             (None, None) => unreachable!(),
         }
     }

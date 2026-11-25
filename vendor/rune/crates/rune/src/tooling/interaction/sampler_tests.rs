@@ -116,7 +116,7 @@ mod mac {
         std::thread::sleep(std::time::Duration::from_millis(30));
         let raw = target.sample(|| true, |_| {}).expect("sampled");
         stop.store(true, Ordering::Relaxed);
-        let _ = release.send(());
+        release.send(()).ok();
         worker.join().unwrap();
         let frames = frames(&raw);
         let names = frames.iter().map(|f| f.name.to_string()).collect();
@@ -138,7 +138,7 @@ mod mac {
     #[test]
     fn the_sampler_sees_a_waiting_thread_wait() {
         let (raw, names, _) = sample_a_thread(|_, wait| {
-            let _ = wait.recv();
+            wait.recv().ok();
         });
         assert!(raw.waiting, "a thread in recv waits: {names:#?}");
     }
@@ -163,7 +163,7 @@ mod mac {
     #[test]
     fn a_caught_sample_is_announced_while_the_thread_is_still_stopped() {
         use std::sync::atomic::AtomicU64;
-        use std::time::{Duration, Instant};
+        use std::time::Duration;
 
         let stop = Arc::new(AtomicBool::new(false));
         let count = Arc::new(AtomicU64::new(0));
@@ -185,8 +185,8 @@ mod mac {
                 || true,
                 |_| {
                     let before = count.load(Ordering::Relaxed);
-                    let until = Instant::now() + Duration::from_millis(2);
-                    while Instant::now() < until {
+                    let until = crate::time::now() + Duration::from_millis(2);
+                    while crate::time::now() < until {
                         std::hint::spin_loop();
                     }
                     frozen.set(count.load(Ordering::Relaxed) == before);

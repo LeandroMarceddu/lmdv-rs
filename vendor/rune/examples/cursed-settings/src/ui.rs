@@ -351,7 +351,7 @@ fn general(s: &Cursed, k: &Kit, hair: f32) -> El {
                     "language",
                     "Language",
                     "Used for menus and messages.",
-                    Select::new("lang", &["English"]).current(Some("English")).build(k, &mut layer),
+                    Select::new("lang", &["English"]).label("Language").current(Some("English")).build(k, &mut layer),
                 ),
             ],
         ))
@@ -417,14 +417,17 @@ fn appearance(s: &Cursed, k: &Kit, hair: f32) -> El {
                     "size",
                     "Text size",
                     "Used across the app.",
-                    Select::new("size", &["13 pt"]).current(Some("13 pt")).build(k, &mut Vec::new()),
+                    Select::new("size", &["13 pt"]).label("Text size").current(Some("13 pt")).build(k, &mut Vec::new()),
                 ),
                 setting(
                     k,
                     "font",
                     "Code font",
                     "Used in diffs and the terminal.",
-                    Select::new("font", &["IBM Plex Mono"]).current(Some("IBM Plex Mono")).build(k, &mut Vec::new()),
+                    Select::new("font", &["IBM Plex Mono"])
+                        .label("Code font")
+                        .current(Some("IBM Plex Mono"))
+                        .build(k, &mut Vec::new()),
                 ),
             ],
         ))
@@ -483,6 +486,7 @@ fn network(s: &Cursed, k: &Kit, hair: f32) -> El {
                     "IP address",
                     "This Mac's address on the local network.",
                     TextInput::new(&s.ip)
+                        .label("IP address")
                         .width(Some(168.0))
                         .disabled(!p.static_ip)
                         .on_edit(|s: &mut Cursed| &mut s.ip)

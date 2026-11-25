@@ -2921,9 +2921,9 @@ impl Drop for WindowState {
         if last {
             self.shared.set_quitting();
         }
-        // Rune skips the last window's `on_quit` because its host is dropped
-        // first, so the session decision is repeated here when no close hook
-        // ran. A window that closed while others stay leaves the session.
+        // If no close hook ran (the host was dropped), repeat the session
+        // decision here. A window that closed while others stay leaves the
+        // session.
         if !self.session_flushed {
             self.shared.refresh_placement(self.id);
             if last || self.shared.is_quitting() {

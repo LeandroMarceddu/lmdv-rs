@@ -157,7 +157,9 @@ impl Dev {
 fn state_of(press: titlebar::TitlebarPress) -> (Option<(f64, (f32, f32))>, bool) {
     match press {
         titlebar::TitlebarPress::Rest => (None, false),
-        titlebar::TitlebarPress::Armed(pair) => (Some((pair.at, pair.point)), false),
+        titlebar::TitlebarPress::Holding(pair) | titlebar::TitlebarPress::Armed(pair) => {
+            (Some((pair.at, pair.point)), false)
+        }
         titlebar::TitlebarPress::SecondaryOnRegion(pair) => (pair.map(|pair| (pair.at, pair.point)), true),
     }
 }
@@ -192,6 +194,7 @@ impl Walk {
         let mut rt = Runtime::new((), view, (200.0, 200.0), Env::new(true, 1.0));
         rt.double_click_interval = INTERVAL;
         rt.set_native_titlebar_band(BAND);
+        rt.host.titlebar.defer_drag_override = Some(false);
         if caption {
             rt.set_caption(Some(crate::titlebar::Caption::new(BAND)));
         }
@@ -202,10 +205,10 @@ impl Walk {
     /// Whatever the last sequence left goes, without stepping: the next starts at `Rest`.
     fn reset(&mut self) {
         self.rt.cancel_pointer();
-        self.rt.titlebar.press = titlebar::TitlebarPress::Rest;
-        self.rt.titlebar.action = None;
+        self.rt.host.titlebar.press = titlebar::TitlebarPress::Rest;
+        self.rt.host.titlebar.action = None;
         self.rt.take_window_menu();
-        self.rt.queue.retain(|_| false);
+        self.rt.frame.queue.retain(|_| false);
         self.rt.clock = 0.0;
         self.dev = Dev::new(BAND);
         self.now = 0.0;
@@ -254,7 +257,7 @@ impl Walk {
                 self.dev.secondary_up(region);
             }
             Letter::Clear => {
-                self.rt.titlebar.clear();
+                self.rt.host.titlebar.clear();
                 self.dev.clear();
             }
             Letter::Tick => {
@@ -278,13 +281,13 @@ impl Walk {
     }
 
     fn compare(&self, letter: Letter) -> Result<(), String> {
-        if self.rt.titlebar.action != self.dev.action {
+        if self.rt.host.titlebar.action != self.dev.action {
             return Err(format!(
                 "after {letter:?}: action {:?}, dev {:?}, press {:?}",
-                self.rt.titlebar.action, self.dev.action, self.rt.titlebar.press
+                self.rt.host.titlebar.action, self.dev.action, self.rt.host.titlebar.press
             ));
         }
-        let (ours, reference) = (state_of(self.rt.titlebar.press), self.dev.state());
+        let (ours, reference) = (state_of(self.rt.host.titlebar.press), self.dev.state());
         if ours != reference {
             return Err(format!("after {letter:?}: press {ours:?}, dev {reference:?}"));
         }
@@ -305,6 +308,24 @@ fn focus_loss_cancels_titlebar_press() {
     assert_eq!(rt.take_window_menu(), None);
     rt.pointer_down(x, y);
     assert_eq!(rt.take_titlebar_action(), Some(TitlebarAction::Drag));
+    rt.pointer_down(x, y);
+    assert_eq!(rt.take_titlebar_action(), Some(TitlebarAction::DoubleClick));
+}
+
+#[test]
+fn focus_loss_cancels_deferred_titlebar_press() {
+    let mut rt = Walk::new(true).rt;
+    rt.host.titlebar.defer_drag_override = Some(true);
+    let (x, y) = REGION;
+    rt.pointer_down(x, y);
+    assert_eq!(rt.take_titlebar_action(), None);
+    rt.window_focus(false);
+    rt.window_focus(true);
+    rt.pointer_move(x + 20.0, y);
+    assert_eq!(rt.take_titlebar_action(), None, "focus loss cancels deferred hold");
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    assert_eq!(rt.take_titlebar_action(), None);
     rt.pointer_down(x, y);
     assert_eq!(rt.take_titlebar_action(), Some(TitlebarAction::DoubleClick));
 }

@@ -6,14 +6,13 @@
 //! and the GPU's (`gpu.png`), and prints `rune-cpu-boot {json}` with that frame's numbers and the
 //! drift between the two.
 
-use crate::time::Instant;
 use std::io::Write;
 use std::path::PathBuf;
 
 use serde_json::json;
 
 use super::{CpuPainter, Pixels, Scene, Target};
-use crate::runtime::Runtime;
+use crate::runtime::RuntimeCore;
 
 pub(crate) struct Tool {
     dir: PathBuf,
@@ -33,7 +32,7 @@ pub(crate) struct Tool {
 impl Tool {
     /// A run whose GPU has PCI vendor ID endor, the one whose rounding the CPU follows.
     pub(crate) fn new(dir: PathBuf, threads: usize, vendor: u32) -> Tool {
-        let _ = std::fs::create_dir_all(&dir);
+        std::fs::create_dir_all(&dir).ok();
         let log = std::fs::File::create(dir.join("frames.jsonl")).ok().map(std::io::BufWriter::new);
         Tool {
             dir,
@@ -50,18 +49,12 @@ impl Tool {
 
     /// Before the renderer prepares frame `k`, which `rt` laid out in `update_ns`: fills its
     /// queued masks and paints it, and at the snapshot frame records it.
-    pub(crate) fn frame<S: 'static>(
-        &mut self,
-        rt: &mut Runtime<S>,
-        size: (u32, u32),
-        k: usize,
-        update_ns: u64,
-        snap: bool,
-    ) {
-        let started = Instant::now();
+    pub(crate) fn frame(&mut self, rt: &mut RuntimeCore, size: (u32, u32), k: usize, update_ns: u64, snap: bool) {
+        let started = crate::time::now();
         let fills = self.painter.fill_masks(&mut rt.text.atlas);
         let scene = Scene::new(&rt.instances, &rt.text.atlas, &rt.images, size, rt.clear_color())
             .srgb_blend(rt.srgb_blend())
+            .fade_stops(rt.fade_stops())
             .native_surfaces(!rt.surfaces.is_empty())
             .font_smoothing(rt.font_smoothing())
             .half_rounding(super::HalfRounding::of_vendor(self.vendor));
@@ -88,17 +81,21 @@ impl Tool {
             Err(why) => out["needs_gpu"] = json!(format!("{why:?}")),
         }
         if let Some(log) = self.log.as_mut() {
-            let _ = writeln!(log, "{out}");
+            writeln!(log, "{out}").ok();
         }
         if !snap {
             return;
         }
         let mut kinds = [0u32; 16];
         for i in &rt.instances {
-            kinds[(i.params[1].max(0.0) as usize).min(15)] += 1;
+            let slot = match i.kind() {
+                Some(k) => k.as_u8() as usize,
+                None => (i.params[1].max(0.0) as usize).min(15),
+            };
+            kinds[slot] += 1;
         }
         out["kinds"] = json!(kinds);
-        let _ = std::fs::write(self.dir.join("draw.bin"), super::record::encode(&scene));
+        std::fs::write(self.dir.join("draw.bin"), super::record::encode(&scene)).ok();
         // The frame's rows, tightly packed.
         let bgra: Vec<u8> = self
             .buf
@@ -108,7 +105,7 @@ impl Tool {
             .copied()
             .collect();
         let rgba: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], p[3]]).collect();
-        let _ = crate::render::write_png(&self.dir.join("cpu.png"), size.0, size.1, &rgba);
+        crate::render::write_png(&self.dir.join("cpu.png"), size.0, size.1, &rgba).ok();
         self.painted = Some((bgra, out));
     }
 
@@ -116,9 +113,9 @@ impl Tool {
     pub(crate) fn gpu(&mut self, rgba: &[u8], size: (u32, u32)) {
         let Some((cpu, mut out)) = self.painted.take() else { return };
         if let Some(log) = self.log.as_mut() {
-            let _ = log.flush();
+            log.flush().ok();
         }
-        let _ = crate::render::write_png(&self.dir.join("gpu.png"), size.0, size.1, rgba);
+        crate::render::write_png(&self.dir.join("gpu.png"), size.0, size.1, rgba).ok();
         if self.size == size {
             let d = super::drift(
                 Pixels::bgra(&cpu, size.0, size.1, size.0 as usize * 4),

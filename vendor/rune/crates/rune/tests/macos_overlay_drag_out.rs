@@ -24,10 +24,11 @@ fn main() {
 }
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod mac {
     use crate::macos_support::{can_post_events, drag_pasteboard, on_main, release_real_button, wait, warp};
     use objc2::{
-        class, msg_send, msg_send_id,
+        class, msg_send,
         rc::Retained,
         runtime::{AnyObject, Bool},
     };
@@ -96,25 +97,27 @@ mod mac {
 
     /// The panel with CGWindowID `number`: (level, style mask, key, frame in AppKit points).
     fn panel(number: u32) -> Option<(isize, usize, bool, NSRect)> {
+        // SAFETY: invoked on the AppKit main thread (`on_main`); queries live `NSWindow` properties.
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
-            let windows: Retained<NSArray<AnyObject>> = msg_send_id![app, windows];
+            let windows: Retained<NSArray<AnyObject>> = msg_send![app, windows];
             windows
                 .iter()
                 .find(|w| {
-                    let n: isize = msg_send![*w, windowNumber];
+                    let n: isize = msg_send![&**w, windowNumber];
                     n == number as isize
                 })
                 .map(|w| {
-                    let key: Bool = msg_send![w, isKeyWindow];
-                    (msg_send![w, level], msg_send![w, styleMask], key.as_bool(), msg_send![w, frame])
+                    let key: Bool = msg_send![&*w, isKeyWindow];
+                    (msg_send![&*w, level], msg_send![&*w, styleMask], key.as_bool(), msg_send![&*w, frame])
                 })
         }
     }
 
     fn primary_height() -> f64 {
+        // SAFETY: called on the AppKit main thread; queries `NSScreen.screens` and the first screen's `frame`.
         unsafe {
-            let screens: Retained<NSArray<AnyObject>> = msg_send_id![class!(NSScreen), screens];
+            let screens: Retained<NSArray<AnyObject>> = msg_send![class!(NSScreen), screens];
             let frame: NSRect = msg_send![&*screens.iter().next().expect("a screen"), frame];
             frame.size.height
         }
@@ -122,6 +125,7 @@ mod mac {
 
     /// Posts mouse events to window `number`: (NSEventType, global top-left point).
     fn post(number: u32, events: &[(usize, (f64, f64))]) {
+        // SAFETY: invoked on the AppKit main thread (`on_main`); builds synthetic `NSEvent`s and posts them to `NSApplication`.
         unsafe {
             let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
             let (_, _, _, frame) = panel(number).expect("the overlay panel");
@@ -139,6 +143,8 @@ mod mac {
 
     /// On-screen windows at the dragging level, `[x, y, w, h]` in global top-left points.
     fn drag_windows() -> Vec<[f64; 4]> {
+        // SAFETY: `CGWindowListCopyWindowInfo` returns a newly retained `CFArray` (checked non-null
+        // and released with `CFRelease`); each element index is `< count` and dictionary values are null-checked.
         unsafe {
             let level = CGWindowLevelForKey(DRAGGING_LEVEL_KEY);
             let list = CGWindowListCopyWindowInfo(ON_SCREEN_ONLY, 0);
@@ -270,7 +276,7 @@ mod mac {
         let mut app = App::new(AppSpec::new("overlay drag out", (200.0, 100.0), || (), window_view))
             .args(Vec::new())
             .on_ready(move |_| {
-                let _ = ready_tx.send(());
+                ready_tx.send(()).ok();
             });
         let [x, y, width, height] = PANEL;
         let options = OverlayOptions {
@@ -293,7 +299,7 @@ mod mac {
                 ready_rx.recv_timeout(Duration::from_secs(30)).expect("window ready");
                 if !drive(handle.clone(), overlay.clone(), f.clone()) {
                     // The live session's tracking loop holds the event loop, so quit can't land.
-                    let _ = std::fs::remove_file(&f);
+                    std::fs::remove_file(&f).ok();
                     println!("macos_overlay_drag_out: ok (session start, image and pasteboard only)");
                     std::process::exit(0);
                 }
@@ -302,7 +308,7 @@ mod mac {
             handle.quit();
         });
         app.run();
-        let _ = std::fs::remove_file(&file);
+        std::fs::remove_file(&file).ok();
         assert_eq!(*result.lock().unwrap(), Some(true), "macos_overlay_drag_out failed");
         println!("macos_overlay_drag_out: ok");
     }

@@ -78,7 +78,7 @@ Rules:
 | Per-window state is `!Send` and lives on the UI thread. | `Rc`, `RefCell`, `TextEdit`, `ImageCache` are legal in `WindowState`; never send them to workers. |
 | No `Span::image` at the pinned rev. The only inline visual is a square `InlineIcon` tied to the following word. | Inline math needs a text patch (`Span::image` + `Span::rise` + inline-box geometry). |
 | No text-click byte callback. `Cx::caret` is only the focused field's caret. | Start with a double-click handler reading `Tx::text_selection`; patch only if it fails. |
-| Native close has no veto: `CloseRequested` hides, then runs `on_close`. | Patch `App::on_close_request -> bool`; otherwise unsaved-close confirmation is impossible. |
+| Native close: Rune `f4ec14e` runs `on_close_request -> CloseResponse` before hiding. | Return `Defer` while a document is dirty; no local patch. |
 | `TextEdit` has one selection, no gutter, no find/replace; undo is 128 full snapshots / 1 MiB. | Build find/replace/line ops; multi-cursor needs a patch; use block mode for large docs. |
 | Typing in one field: ~12 ms/keystroke at 50 KB, ~46 ms at 200 KB; per-block: ~0.8/2.6 ms. | Two editor modes (D12) are mandatory. |
 | `Gpu::headless`, `Renderer`, `Offscreen`, `write_png` are public. | PNG export/diagram capture can run in an export worker. |
@@ -92,22 +92,22 @@ Rules:
 
 | Patch | Scope | Acceptance |
 |---|---|---|
-| `0001-text-inline-object.patch` | `Span::image(InlineImage)` + `Span::rise(f32)`, U+FFFC placeholder, inline-box geometry in `text.rs`, `text/span.rs`, `text/pill_chips.rs`, `runtime/paint/content.rs`, and `InlineImage::label` | Inline formula baseline within 0.5 pt, correct aspect, wraps whole, selection skips it, RTL works |
-| `0002-close-request-veto.patch` | `App::on_close_request`/`WindowSpec::on_close_request` before hiding; programmatic close stays force-close | Alt+F4 on a dirty doc keeps the window and shows the dialog |
+| `0001-text-inline-object.patch` | `Span::image(InlineImage)` + `Span::rise(f32)`, U+FFFC placeholder, inline-box geometry in `rune-text/src/layout/{span,shape,pill_chips}.rs`, `runtime/paint/content.rs`, and `InlineImage::label` | Inline formula baseline within 0.5 pt, correct aspect, wraps whole, selection skips it, RTL works |
 | `0003-a11y-inline-object.patch` | Accessibility text substitutes an inline image's label (TeX or alt) for the U+FFFC marker in node names, values and text runs | No U+FFFC in the accessibility tree; the formula reads as `Math: {tex}`; character lengths and word starts match the spoken value |
 | `0004-text-highlight-inline-image.patch` | A text highlight whose range holds an inline image's placeholder keeps the picture's box, merged into the glyph intervals | Find/line highlights cover formulas and inline images; text highlights stay unchanged |
-| `0005-text-hit.patch` (if needed) | Text-hit callback with rendered byte under pointer, or double-press variant | Double-click preview places caret; single click still selects |
-| `0006-window-theme.patch` (optional) | Native frame theme where winit supports it | Light/dark frame follows the app; not a release gate |
-| `0007-linux-frame.patch` (deferred) | Interactive edge resize + optional client-side frame | Only if native frame is rejected |
+| `0005-mermaid-svg.patch` | Static SVG serialization of a laid-out Mermaid scene (`render_svg`, `Drawing::to_svg`) for rich copy, HTML, DOCX, PDF and the lightbox | Self-contained SVG with paths, labels and title; no scripts, images or external fonts |
 
-Root `[patch.crates-io]` must repeat Rune's five vendored crates:
+Root `[patch.crates-io]` must repeat Rune's eight vendored crates:
 
 ```toml
 [patch.crates-io]
 wgpu-hal = { path = "vendor/rune/vendor/wgpu-hal" }
+naga = { path = "vendor/rune/vendor/naga" }
 winit = { path = "vendor/rune/vendor/winit" }
+sctk-adwaita = { path = "vendor/rune/vendor/sctk-adwaita" }
 parley_engine = { path = "vendor/rune/vendor/parley_engine" }
 accesskit_windows = { path = "vendor/rune/vendor/accesskit_windows" }
+accesskit_atspi_common = { path = "vendor/rune/vendor/accesskit_atspi_common" }
 accesskit_macos = { path = "vendor/rune/vendor/accesskit_macos" }
 ```
 

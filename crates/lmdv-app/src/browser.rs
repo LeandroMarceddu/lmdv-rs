@@ -2104,8 +2104,16 @@ fn browser_row(state: &WindowState, index: usize, kit: &Kit) -> El {
             state.browser_row_pressed(&path, dir, mods, tx);
         })
         .on_secondary_press(move |state: &mut WindowState, point, tx| {
-            state.show_browser_menu(PathBuf::from(&menu_path), dir, point);
-            state.focus_browser_menu(tx, false);
+            // Rune also routes the synthetic Shift+F10/Menu press here. Use the
+            // keyboard anchor so the menu follows the row instead of opening at
+            // the synthesized pointer point.
+            if tx.by_keys() {
+                state.show_browser_menu_keyboard();
+                state.focus_browser_menu(tx, true);
+            } else {
+                state.show_browser_menu(PathBuf::from(&menu_path), dir, point);
+                state.focus_browser_menu(tx, false);
+            }
         })
 }
 

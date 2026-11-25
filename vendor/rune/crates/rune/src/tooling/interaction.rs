@@ -1,7 +1,7 @@
 //! Interaction timing: how long each input took to reach the screen, which page and control it
 //! was, and where the frame's time went, sent to a developer's local OpenTelemetry collector.
 //!
-//! Off unless `RUNE_PERF=1` or `OTEL_EXPORTER_OTLP_ENDPOINT` points at loopback (`gate`). Off,
+//! Off unless `RUNE_PERF=1`, or (in debug builds and release builds with `tooling`) `OTEL_EXPORTER_OTLP_ENDPOINT` points at loopback (`gate`). Off,
 //! a frame checks one cached flag and nothing else runs: no clocks, threads or files.
 //!
 //! On, a frame whose input ran a handler (a press, key, edit, paste, wheel, drag, hover) is timed
@@ -21,7 +21,22 @@
 //! app's.
 
 mod cause;
+#[cfg(not(target_arch = "wasm32"))]
 mod export;
+#[cfg(target_arch = "wasm32")]
+mod export {
+    use super::*;
+    #[allow(dead_code)]
+    pub(crate) enum Message {
+        Slow(Box<Slow>),
+        Frame(Box<SlowFrame>),
+        Rollup { rolls: Vec<rollup::Roll>, from: Instant, to: Instant },
+    }
+    pub(crate) fn send(_: Message) -> bool {
+        false
+    }
+    pub(crate) fn flush(_: Duration) {}
+}
 mod frame;
 pub(crate) mod gate;
 mod names;
@@ -51,6 +66,7 @@ const ROLLUP_EVERY: Duration = Duration::from_secs(60);
 const SLOW_PER_SECOND: u32 = 10;
 
 /// The `update` span's attribute for each [`Phase`].
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const PHASE_NAMES: [&str; PHASES] =
     ["rune.view_ms", "rune.commit_ms", "rune.layout_ms", "rune.text_ms", "rune.paint_ms", "rune.apply_ms"];
 
@@ -100,8 +116,7 @@ fn slow_ms() -> f64 {
     }
     static MS: OnceLock<f64> = OnceLock::new();
     *MS.get_or_init(|| {
-        std::env::var("RUNE_PERF_SLOW_MS")
-            .ok()
+        rune_core::env::var("RUNE_PERF_SLOW_MS")
             .and_then(|v| v.trim().parse().ok())
             .filter(|ms: &f64| *ms > 0.0)
             .unwrap_or(SLOW_MS)
@@ -118,6 +133,8 @@ pub(crate) struct Note {
 }
 
 /// A slow interaction, as sent.
+// Fields are serialized by tooling::interaction::export on non-wasm32 targets.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct Slow {
     pub route: Arc<str>,
     pub control: Arc<str>,
@@ -142,6 +159,8 @@ pub(crate) struct Slow {
 }
 
 /// A slow frame no input caused, as sent.
+// Fields are serialized by tooling::interaction::export on non-wasm32 targets.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) struct SlowFrame {
     pub start: Instant,
     pub built: Instant,
@@ -173,6 +192,9 @@ pub(crate) struct Tracker {
     /// The last commit's memo-reused node ranges (start, len), while a frame is timed.
     pub reused: Vec<(usize, usize)>,
     sent: (Option<Instant>, u32),
+    /// The thread's CPU clock, raw, when the timed frame began: Windows reads it before it knows
+    /// the cycles' rate (the first 20 ms after the process first asks) and converts it once it does.
+    cpu_mark: Option<crate::frame::profile::ThreadCpuMark>,
 }
 
 /// What finishing a timed frame decided.
@@ -195,7 +217,19 @@ impl Tracker {
     /// A frame starts; `queued` when input waits for it. A built frame no host presented
     /// (a bare `Runtime`, a window that skipped drawing) ends at its build.
     pub(crate) fn frame_begins(&mut self, queued: bool) -> Option<Finished> {
-        self.begin_with(queued, slow_ms(), Instant::now, crate::frame::profile::cpu_ms)
+        // The frame's CPU counts from 0 at a raw mark, converted when it is built: a reading in
+        // milliseconds would be `None` until Windows knows the cycles' rate, and so would the frame's.
+        // A second begin while a frame is open keeps that frame's mark, as it keeps its start.
+        let keep = matches!(self.frame, Frame::Open { .. });
+        let mark = std::cell::Cell::new(None);
+        let finished = self.begin_with(queued, slow_ms(), crate::time::now, || {
+            mark.set(crate::frame::profile::thread_cpu_mark());
+            mark.get().map(|_| 0.0)
+        });
+        if !keep {
+            self.cpu_mark = mark.get();
+        }
+        finished
     }
 
     fn begin_with(
@@ -238,7 +272,10 @@ impl Tracker {
     /// The frame, of `nodes` nodes, is built; `shaped` text runs it shaped. A slow frame no
     /// input caused comes back to send.
     pub(crate) fn built(&mut self, shaped: u32, nodes: usize) -> Option<SlowFrame> {
-        self.build_with(shaped, nodes, watchdog::disarm(), slow_ms(), Instant::now, crate::frame::profile::cpu_ms)
+        let mark = self.cpu_mark;
+        self.build_with(shaped, nodes, watchdog::disarm(), slow_ms(), crate::time::now, || {
+            mark.and_then(crate::frame::profile::thread_cpu_since).map(|ns| ns / 1e6)
+        })
     }
 
     fn build_with(
@@ -312,7 +349,7 @@ impl Tracker {
     /// Sends the histograms when a minute has passed since the last, or `now` regardless.
     pub(crate) fn roll(&mut self, force: bool) {
         let Some(from) = self.rolled_since else { return };
-        let to = Instant::now();
+        let to = crate::time::now();
         if self.rollup.is_empty() || (!force && to.saturating_duration_since(from) < ROLLUP_EVERY) {
             return;
         }

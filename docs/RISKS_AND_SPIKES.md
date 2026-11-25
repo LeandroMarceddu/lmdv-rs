@@ -10,10 +10,10 @@ Reviewed at every phase gate. A risk with no owner is not managed.
 |---|---|---|---|---|---|---|
 | RK-01 | **Inline math needs a Rune text patch**; no `Span::image` at the pinned rev, only a square `InlineIcon`. | H | H | P0 patch 0001 (`Span::image` + `Span::rise` + inline-box geometry); baseline test at 1×/2×; fallback is block-only with a documented gap, never a square formula. | Formula sits >0.5 pt off, wrong aspect, wraps badly | open |
 | RK-02 | **Whole-document editing is slow**: ~12 ms/keystroke at 50 KB, ~46 ms at 200 KB. | H | H | Two-mode editor (single field ≤64 KiB/1500 lines, block mode above); measured threshold; global undo journal; typing p95 gate. | Typing p95 >16 ms at 64 KB or 1 MB | open |
-| RK-03 | **Rune is pre-release and vendored**; a rev bump re-applies patches 0001/0002 and can break APIs. | H | M | Pin rev; `.patch` files; vendor checksum; bump runbook; goldens on every bump. | Patch conflict or API break on bump | open |
+| RK-03 | **Rune is pre-release and vendored**; a rev bump re-applies patches 0001/0003/0004/0005 and can break APIs. | H | M | Pin rev; `.patch` files; vendor checksum; bump runbook; goldens on every bump. | Patch conflict or API break on bump | open |
 | RK-04 | **Shared document buffers across windows** create lease/undo/close races. | M | H | One canonical `Rc<Document>`; lease state machine; explicit takeover; close prompts; race tests. | Lost edit or stale view in a two-window script | open |
 | RK-05 | **Markdown fork drifts** from upstream and accumulates bugs. | M | H | Fork only the module; provenance/diff log; reference fixtures; one owner (`lmdv-md`); fuzz no panic. | Fixture regression with no upstream change | open |
-| RK-06 | **Native close has no veto**; unsaved-close confirmation impossible unpatched. | M | H | Patch 0002 `on_close_request -> bool`; programmatic close stays force-close; test Alt+F4/WM close. | Dirty window closes without prompt | open |
+| RK-06 | **Native close has no veto**; unsaved-close confirmation impossible unpatched. | M | H | Upstream `on_close_request -> CloseResponse` since Rune `f4ec14e` (no local patch); programmatic close stays force-close; test Alt+F4/WM close. | Dirty window closes without prompt | mitigated |
 | RK-07 | **Linux launch/focus**: Rune's single instance lacks cwd/paths; Wayland activation restrictions. | M | M | Own socket with cwd/line/activation token; route on UI thread; test second process; X11/Wayland focus. | Second launch opens wrong tab or no focus | open |
 | RK-08 | **Export beyond Rune**: PDF/DOCX/math/pagination. | H | H | Shared `ExportDoc`; Typst PDF; OOXML DOCX; RaTeX images + best-effort OMML; PNG offscreen; goldens. | Clipped PDF, broken DOCX, missing math | open |
 | RK-09 | **Cross-window tab drag on Wayland** has no global coordinates/capture. | H | M | X11 tear-out/drop; Wayland menu fallback; no data loss; document substitute. | Drop test misses windows or duplicates tabs | open |
@@ -62,7 +62,7 @@ Each spike is timeboxed, produces a written result, and ends with **go / no-go /
 
 **Do:**
 
-- Add `App::on_close_request` / `WindowSpec::on_close_request -> bool`; run before hiding; keep programmatic close force-close.
+- Use upstream `App::on_close_request -> CloseResponse` (Rune `f4ec14e`); return `Defer` while dirty and keep programmatic close force-close.
 - Test dirty tab, multiple dirty tabs, Cancel, Save failure, window manager close, Alt+F4, last window.
 
 **Acceptance:** dirty window stays open on Cancel; Save writes and closes; no zombie window after quit.

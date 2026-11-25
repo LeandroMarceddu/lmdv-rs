@@ -544,10 +544,10 @@ pub(crate) fn on_key(state: &mut WindowState, event: &KeyEvent, tx: &mut Tx) -> 
     dispatch_command(state, command.id, tx)
 }
 
-/// Vetoes a native close while a document is dirty, showing the real
+/// Defers a native close while a document is dirty, showing the real
 /// Save / Don't save / Cancel dialog (ADR-020, OI-006).
-fn close_request(state: &mut WindowState, _: &mut Tx) -> bool {
-    state.guard_close_window()
+fn close_request(state: &mut WindowState, _: &mut Tx) -> rune::CloseResponse {
+    if state.guard_close_window() { rune::CloseResponse::Defer } else { rune::CloseResponse::Close }
 }
 
 /// Flushes drafts, reading positions and the session when one window closes.
@@ -560,8 +560,9 @@ fn window_closed(state: &mut WindowState, _: &mut Tx) {
 }
 
 /// Flushes on an app quit (Rune's `on_quit`). Every live window keeps its
-/// session entry, so the next launch restores them all; the last window's
-/// `on_quit` is skipped, and `WindowState::drop` makes the same decision there.
+/// session entry, so the next launch restores them all. Rune also runs this
+/// when the last main window closes; `finish_window` records that and
+/// `WindowState::drop` repeats the decision only if no close hook ran.
 fn app_quit(state: &mut WindowState, _: &mut Tx) {
     crate::session::finish_window(state, true);
 }
@@ -662,7 +663,7 @@ mod tests {
         doc.apply(0..4, "changed");
         state.sync_tab_dirty(&doc);
         let mut tx = Tx::default();
-        assert!(close_request(&mut state, &mut tx));
+        assert_eq!(close_request(&mut state, &mut tx), rune::CloseResponse::Defer);
         assert!(matches!(state.prompt(), Some(crate::editor::Prompt::CloseWindow)));
     }
 
@@ -671,7 +672,7 @@ mod tests {
         let temp = TempDir::new().unwrap();
         let mut state = window(&temp);
         let mut tx = Tx::default();
-        assert!(!close_request(&mut state, &mut tx));
+        assert_eq!(close_request(&mut state, &mut tx), rune::CloseResponse::Close);
         assert!(state.ui.notice.is_none());
     }
 

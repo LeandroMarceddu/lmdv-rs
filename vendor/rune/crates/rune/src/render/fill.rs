@@ -13,8 +13,7 @@ pub(super) struct FillPass {
     /// `projection` for each page height, copied in before each page's pass.
     projections: wgpu::Buffer,
     bind: wgpu::BindGroup,
-    instances: wgpu::Buffer,
-    capacity: usize,
+    instances: rune_staging::GrowBuffer,
 }
 
 /// What a fill pass binds besides its own buffers.
@@ -80,15 +79,15 @@ impl FillPass {
         }
         projections.unmap();
         let bind = Self::bind(device, &bindings, &projection);
-        let capacity = 64;
-        FillPass {
-            pipeline,
-            projection,
-            projections,
-            bind,
-            instances: Renderer::instance_buffer(device, capacity),
-            capacity,
-        }
+        let instances = rune_staging::GrowBuffer::new(
+            device,
+            "instances",
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            std::mem::size_of::<Instance>(),
+            64,
+            0,
+        );
+        FillPass { pipeline, projection, projections, bind, instances }
     }
 
     fn bind(device: &wgpu::Device, b: &FillBindings<'_>, projection: &wgpu::Buffer) -> wgpu::BindGroup {
@@ -109,12 +108,9 @@ impl FillPass {
         pages: &[(usize, Vec<QueuedFill>)],
     ) -> Vec<(usize, std::ops::Range<u32>)> {
         let count: usize = pages.iter().map(|(_, f)| f.len()).sum();
-        if count > self.capacity {
-            self.capacity = count.next_power_of_two();
-            self.instances = Renderer::instance_buffer(device, self.capacity);
-        }
+        self.instances.ensure(device, count);
         let instances: Vec<Instance> = pages.iter().flat_map(|(_, fills)| fills.iter().map(instance)).collect();
-        staging.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
+        staging.write_buffer(self.instances.buffer(), 0, bytemuck::cast_slice(&instances));
         let mut first = 0u32;
         pages
             .iter()
@@ -308,9 +304,11 @@ impl Renderer {
                 wgpu::Extent3d { width: ATLAS_SIZE, height: rows, depth_or_array_layers: 1 },
             );
             queue.submit([encoder.finish()]);
+            // A callback never panics: one that did while a failed wait unwinds (wgpu aborts the map
+            // then) would abort the process. A failed map shows as `get_mapped_range`'s error.
             let slice = buffer.slice(..);
-            slice.map_async(wgpu::MapMode::Read, |r| r.expect("map fill drift"));
-            device.poll(wgpu::PollType::wait_indefinitely()).expect("poll");
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            rune_gpu::health::poll(device, wgpu::PollType::wait_indefinitely()).expect("poll");
             let out = slice.get_mapped_range().expect("mapped").to_vec();
             buffer.unmap();
             out

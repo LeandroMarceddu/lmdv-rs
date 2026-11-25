@@ -5,7 +5,7 @@ keeps the full type sketches, rationale, rejected alternatives and module trees.
 `PLAN.md`; the subagent contract is in `AGENTS.md`; the risk register is in `docs/RISKS_AND_SPIKES.md`.
 
 **Inputs read:** the behavior spec, Rune at
-`cca5df6f…` (`vendor/rune/`), `BEHAVIOR_SPEC.md` (342 behavior rows),
+`f4ec14e…` (`vendor/rune/`), `BEHAVIOR_SPEC.md` (342 behavior rows),
 `RUNE_CAPABILITY_MAP.md`, and the repository `AGENTS.md`.
 
 **One-sentence design:** one event loop, one shared document registry, one command registry, one
@@ -88,7 +88,6 @@ Keep patches in `vendor/rune/patches/` as numbered `.patch` files plus `UPSTREAM
 | Patch | Scope | Acceptance |
 |---|---|---|
 | `0001-text-inline-object.patch` | Add `Span::image(InlineImage)` and `Span::rise(f32)`; reserve a U+FFFC placeholder; extend the existing inline-box bookkeeping in `text.rs`, `text/span.rs`, `text/pill_chips.rs`, `runtime/paint/content.rs`. | Inline formula baseline within 0.5 pt, correct aspect ratio, wraps whole, selection copy skips it, works in RTL. |
-| `0002-close-request-veto.patch` | Add `App::on_close_request(fn(&mut S, &mut Tx) -> bool)` and `WindowSpec::on_close_request`; run before hiding on `CloseRequested`; `Tx::close_window`/`AppHandle::close` remain force-close. | Alt+F4 on a dirty doc leaves the window open and shows the dialog. |
 | `0003-text-hit.patch` (only if needed) | Add `El::on_text_hit(fn(&mut S, TextHit, &mut Tx) -> bool)` with the rendered byte under the pointer, or a double-press variant that does not break selection. | Double-click on preview places the editor caret on that word; single click still selects normally. |
 | `0004-window-theme.patch` (optional) | `WindowHandle::set_theme(Theme)` to match the app theme on the native frame where winit supports it. | Native frame follows light/dark choice; not a release gate. |
 | `0005-linux-frame.patch` (deferred) | Interactive edge resize and optional client-side frame. | Only if the native frame is judged unacceptable; never blocks parity. |
@@ -1787,7 +1786,7 @@ Do not touch: shared files, other crates, vendor/rune except the assigned patch,
 vendor/rune except the assigned patch, user files outside the repo.
 
 Constraints:
-- Rune pinned rev cca5df6…; no webview; Linux first; no CARGO_TARGET_DIR.
+- Rune pinned rev f4ec14e…; no webview; Linux first; no CARGO_TARGET_DIR.
 - No file I/O in handlers/views; no unwrap in UI paths; no TODO without a parity ID.
 - Follow docs/ARCHITECTURE.md ownership and handler rules.
 - Keep the public API exactly as frozen; if it must change, stop and report.

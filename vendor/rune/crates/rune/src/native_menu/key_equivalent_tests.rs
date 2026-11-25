@@ -37,6 +37,7 @@ fn named_keys_use_appkit_characters() {
     assert_eq!(equivalent("cmd+escape"), eq("\u{1b}", COMMAND));
     assert_eq!(equivalent("ctrl+tab"), eq("\t", CONTROL));
     assert_eq!(equivalent("cmd+space"), eq(" ", COMMAND));
+    assert_eq!(equivalent("printscreen"), eq("\u{f72e}", 0));
 }
 
 #[test]
@@ -74,6 +75,7 @@ fn every_key_has_one_lowercase_character() {
         "right",
         "up",
         "down",
+        "printscreen",
     ];
     for name in names {
         let (key, _) = equivalent(&format!("cmd+{name}"));
@@ -92,6 +94,19 @@ fn menu_keycaps_show_the_accelerator() {
     assert_eq!(caps("cmd+shift+z").last().unwrap(), "Z");
     assert_eq!(caps("ctrl+f5").last().unwrap(), "F5");
     assert_eq!(caps("ctrl+left").last().unwrap(), "←");
+}
+
+#[test]
+fn cmd_q_shortcut_matches_builtin_terminate_yield_equivalent() {
+    let ke = KeyEquivalent::new(&"cmd+q".parse::<Shortcut>().unwrap());
+    let eq = super::standard::Equivalent::new(
+        &ke.key,
+        ke.mask & COMMAND != 0,
+        ke.mask & SHIFT != 0,
+        ke.mask & OPTION != 0,
+        ke.mask & CONTROL != 0,
+    );
+    assert_eq!(eq, super::standard::yieldable_equivalent(true, false, false, Some("terminate:")));
 }
 
 /// Dvorak's characters at QWERTY positions, by Carbon key code, under any modifiers.

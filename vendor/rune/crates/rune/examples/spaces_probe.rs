@@ -6,6 +6,7 @@
 fn main() {}
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 fn main() {
     // Work after `run` returns below: the process tears down in order rather than ending at once.
     rune::orderly_exit();
@@ -77,7 +78,7 @@ fn main() {
                 ..Default::default()
             })
             .on_created(move |_| {
-                let _ = created.send(());
+                created.send(()).ok();
             }),
         (),
     );
@@ -89,7 +90,7 @@ fn main() {
             std::thread::sleep(Duration::from_millis(600));
             let (tx, rx) = std::sync::mpsc::channel();
             handle.update(move |_, _| {
-                let _ = tx.send(snapshot(label, hidden));
+                tx.send(snapshot(label, hidden)).ok();
             });
             if !rx.recv_timeout(Duration::from_secs(10)).unwrap() {
                 result.store(false, Ordering::SeqCst);
