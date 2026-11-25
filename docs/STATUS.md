@@ -528,7 +528,7 @@
 - Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
 - UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
-- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 36 open OIs (OI-199: post-close RSS). v0.11.0.
+- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 35 open OIs (OI-199 accepted: post-close RSS stays resident). v0.11.0.
 
 ## Rune f4ec14e — ported (v0.11.0)
 
