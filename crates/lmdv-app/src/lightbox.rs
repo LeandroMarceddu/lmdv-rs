@@ -26,10 +26,11 @@
 //! **Copy as large image** (4×) put them on the clipboard, and **Save as PNG…**
 //! asks for a destination and writes atomically through `lmdv-io` on a worker.
 //! A raster is copied at its natural pixel size, as V-09 asks; the two entries
-//! differ only for vector content. Saving or copying a diagram as PNG needs a
-//! scene rasterizer, and SVG needs a serializer, so diagrams keep the zoom-only
-//! preview for now (OI-140). A picture that is not PNG is refused with a notice:
-//! `lmdv-app` has no decoder to re-encode it.
+//! differ only for vector content. A Mermaid diagram is serialized to SVG for
+//! the preview layout (OI-181) and both rasters come from that document at 2×
+//! and 4× on a worker (OI-140/V-08/V-09), with an opaque raster background. A
+//! picture that is not PNG is converted with `lmdv_export::raster_to_png`,
+//! which also decodes AVIF (OI-183).
 //!
 //! The hover hint (V-02) is a child of the drawn media itself, so it sits at the
 //! media's top-right corner rather than the column's, and the article's clip
@@ -160,6 +161,8 @@ pub struct Lightbox {
     menu_open: Cell<bool>,
     /// The picture's PNG bytes, read on a worker when the preview opens.
     png: Arc<Mutex<PngState>>,
+    /// A diagram's PNG rasters, made from the SVG the preview laid out.
+    diagram: Arc<Mutex<DiagramRaster>>,
     /// The running Save as PNG… write, if any.
     save: RefCell<Option<ImageSave>>,
     /// When the preview opened from a plain link to a local image (L-06), the
@@ -179,6 +182,29 @@ enum PngState {
     /// The file's bytes, ready to copy or write.
     Ready(Arc<[u8]>),
     /// Why the picture can't be copied or saved.
+    Unavailable(String),
+}
+
+/// A diagram's copy/save rasters, made from its static SVG (V-08/V-09).
+#[derive(Clone, Debug)]
+enum DiagramRaster {
+    /// The preview has not drawn the diagram yet.
+    Empty,
+    /// The SVG is ready and a worker is rendering it at 2× and 4×.
+    Rendering,
+    /// Both raster scales are ready.
+    Ready { png2: Arc<[u8]>, png4: Arc<[u8]> },
+    /// Why the diagram cannot be copied or saved.
+    Unavailable(String),
+}
+
+/// The PNG bytes for one copy/save action.
+enum PngLookup {
+    /// The requested scale, ready.
+    Ready(Arc<[u8]>),
+    /// Still loading.
+    Loading,
+    /// Why it cannot be made.
     Unavailable(String),
 }
 
@@ -235,6 +261,7 @@ impl Lightbox {
             backdrop_dragged: false,
             menu_open: Cell::new(false),
             png: Arc::new(Mutex::new(PngState::Loading)),
+            diagram: Arc::new(Mutex::new(DiagramRaster::Empty)),
             save: RefCell::new(None),
             link_fallback: None,
             allow_outside: false,
@@ -261,24 +288,94 @@ impl Lightbox {
         self.png.lock().map(|state| state.clone()).unwrap_or_else(|poison| poison.into_inner().clone())
     }
 
+    /// The diagram's raster state (V-08/V-09).
+    fn diagram(&self) -> DiagramRaster {
+        self.diagram.lock().map(|state| state.clone()).unwrap_or_else(|poison| poison.into_inner().clone())
+    }
+
+    /// Whether this preview still needs its diagram serialized.
+    fn needs_diagram_raster(&self) -> bool {
+        self.media.kind == MediaKind::Diagram && matches!(self.diagram(), DiagramRaster::Empty)
+    }
+
+    /// Takes the SVG the preview laid out and renders its 2× and 4× PNGs on a
+    /// worker (V-08/V-09). Only the first layout is used: a later resize keeps
+    /// the copy/save document the preview opened with.
+    fn prepare_diagram_raster(&self, svg: String, waker: Waker) {
+        let bytes: Arc<[u8]> = Arc::from(svg.into_bytes());
+        match self.diagram.lock() {
+            Ok(mut state) if matches!(*state, DiagramRaster::Empty) => *state = DiagramRaster::Rendering,
+            Ok(_) => return,
+            Err(poison) => {
+                let mut state = poison.into_inner();
+                if !matches!(*state, DiagramRaster::Empty) {
+                    return;
+                }
+                *state = DiagramRaster::Rendering;
+            }
+        }
+        let slot = self.diagram.clone();
+        let spawned = rune::task::spawn("lmdv-diagram-png", move || {
+            let png2 = lmdv_export::raster::svg_to_png(&bytes, 2.0);
+            let png4 = lmdv_export::raster::svg_to_png(&bytes, 4.0);
+            let next = match (png2, png4) {
+                (Some(png2), Some(png4)) => DiagramRaster::Ready { png2: Arc::from(png2), png4: Arc::from(png4) },
+                _ => DiagramRaster::Unavailable(lmdv_i18n::t!("msg.imageUnavailable").to_owned()),
+            };
+            if let Ok(mut state) = slot.lock() {
+                *state = next;
+            }
+            waker();
+        });
+        if spawned.is_err()
+            && let Ok(mut state) = self.diagram.lock()
+        {
+            *state = DiagramRaster::Unavailable(lmdv_i18n::t!("msg.imageUnavailable").to_owned());
+        }
+    }
+
+    /// The PNG bytes for a copy or save at `scale` (V-08/V-09). A raster has
+    /// one natural size and answers both scales with it; a diagram has its own
+    /// 2× and 4× rasters.
+    fn png_at(&self, scale: u32) -> PngLookup {
+        match self.media.kind {
+            MediaKind::Image => match self.png() {
+                PngState::Ready(bytes) => PngLookup::Ready(bytes),
+                PngState::Loading => PngLookup::Loading,
+                PngState::Unavailable(reason) => PngLookup::Unavailable(reason),
+            },
+            MediaKind::Diagram => match self.diagram() {
+                DiagramRaster::Ready { png2, png4 } => PngLookup::Ready(if scale >= 4 { png4 } else { png2 }),
+                DiagramRaster::Empty | DiagramRaster::Rendering => PngLookup::Loading,
+                DiagramRaster::Unavailable(reason) => PngLookup::Unavailable(reason),
+            },
+        }
+    }
+
     /// Whether the PNG bytes are ready to copy or save.
     pub fn png_ready(&self) -> bool {
-        matches!(self.png(), PngState::Ready(_))
+        matches!(self.png_at(2), PngLookup::Ready(_))
     }
 
     /// Why the picture cannot be copied or saved, once the worker said so.
     pub fn png_unavailable(&self) -> Option<String> {
-        match self.png() {
-            PngState::Unavailable(reason) => Some(reason),
+        match self.png_at(2) {
+            PngLookup::Unavailable(reason) => Some(reason),
             _ => None,
         }
     }
 
     /// The PNG bytes the copy and save actions use, once the worker answered
-    /// (V-08/V-09): the file's own PNG or a raster the worker converted.
+    /// (V-08/V-09): the file's own PNG, a converted raster, or a diagram's
+    /// 2× render.
     pub fn png_bytes(&self) -> Option<Arc<[u8]>> {
-        match self.png() {
-            PngState::Ready(bytes) => Some(bytes),
+        self.png_bytes_at(2)
+    }
+
+    /// [`Self::png_bytes`] at one copy scale: a diagram's 2× or 4× raster.
+    pub fn png_bytes_at(&self, scale: u32) -> Option<Arc<[u8]>> {
+        match self.png_at(scale) {
+            PngLookup::Ready(bytes) => Some(bytes),
             _ => None,
         }
     }
@@ -1024,16 +1121,16 @@ impl WindowState {
     }
 
     /// **Copy as image** (2×) and **Copy as large image** (4×): one PNG of the
-    /// previewed picture on the clipboard (V-08/V-09).
+    /// previewed picture or diagram on the clipboard (V-08/V-09).
     ///
     /// A raster is copied at its natural pixel size either way, as the original
-    /// does; `scale` is the vector rasterization factor the diagrams will use
-    /// once they can be rasterized. The bytes were read when the preview opened,
-    /// so this handler only writes the clipboard.
-    pub(crate) fn copy_lightbox_png(&mut self, _scale: u32, tx: &mut Tx) {
+    /// does; a diagram uses its 2× or 4× raster from the static SVG. The bytes
+    /// were made when the preview opened, so this handler only writes the
+    /// clipboard.
+    pub(crate) fn copy_lightbox_png(&mut self, scale: u32, tx: &mut Tx) {
         let Some(lightbox) = self.lightbox.as_ref() else { return };
-        match lightbox.png() {
-            PngState::Ready(bytes) => {
+        match lightbox.png_at(scale) {
+            PngLookup::Ready(bytes) => {
                 let Some(image) = ClipboardImage::from_png(bytes) else {
                     self.notice(lmdv_i18n::t!("msg.imageUnavailable"));
                     return;
@@ -1041,8 +1138,8 @@ impl WindowState {
                 tx.copy_rich(ClipboardContent::new("").with_image(image));
                 self.notice(lmdv_i18n::t!("msg.imageCopied"));
             }
-            PngState::Loading => self.notice(lmdv_i18n::t!("msg.imagePreparing")),
-            PngState::Unavailable(reason) => self.notice(reason),
+            PngLookup::Loading => self.notice(lmdv_i18n::t!("msg.imagePreparing")),
+            PngLookup::Unavailable(reason) => self.notice(reason),
         }
     }
 
@@ -1080,13 +1177,13 @@ impl WindowState {
     /// result reaches `poll_lightbox` through the lightbox's save slot.
     pub(crate) fn start_lightbox_save(&mut self, path: PathBuf) {
         let Some(lightbox) = self.lightbox.as_ref() else { return };
-        let bytes = match lightbox.png() {
-            PngState::Ready(bytes) => bytes,
-            PngState::Loading => {
+        let bytes = match lightbox.png_at(2) {
+            PngLookup::Ready(bytes) => bytes,
+            PngLookup::Loading => {
                 self.notice(lmdv_i18n::t!("msg.imagePreparing"));
                 return;
             }
-            PngState::Unavailable(reason) => {
+            PngLookup::Unavailable(reason) => {
                 self.notice(reason);
                 return;
             }
@@ -1225,6 +1322,11 @@ pub(crate) fn overlay(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, 
             match rune_kit::mermaid::drawing(&lightbox.media.source, &look.style, max_width) {
                 Some(drawing) => {
                     let size = drawing.size;
+                    // V-08/V-09: serialize the exact layout on screen once, then
+                    // the worker renders its 2× and 4× PNGs.
+                    if lightbox.needs_diagram_raster() {
+                        lightbox.prepare_diagram_raster(drawing.to_svg(), state.window_waker());
+                    }
                     diagram = Some(drawing.el);
                     size
                 }
@@ -1362,13 +1464,11 @@ pub(crate) fn overlay(state: &WindowState, cx: &mut Cx<WindowState>, kit: &Kit, 
 
 /// The title bar's copy/save button and its menu (V-08).
 ///
-/// A diagram is left without the menu until it can be rasterized: it has no
-/// PNG and its SVG needs a serializer (OI-140). A picture always gets the menu;
-/// its rows report the reason when the file is not a PNG.
+/// A picture gets the menu from the start; its rows report the reason when the
+/// file is not a PNG. A diagram gets it too: the preview's static SVG is
+/// rasterized at 2× and 4× as soon as the drawing is laid out, and the rows
+/// say “preparing” while the worker finishes (OI-140/V-08/V-09).
 fn copy_menu(lightbox: &Lightbox, kit: &Kit) -> (Option<El>, Vec<El>) {
-    if lightbox.media.kind != MediaKind::Image {
-        return (None, Vec::new());
-    }
     let button = IconButton::new(kit.glyph.copy)
         .variant(IconButtonVariant::GhostMuted)
         .control_size(ControlSize::Small)

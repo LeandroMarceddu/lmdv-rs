@@ -16,7 +16,7 @@ use std::rc::Rc;
 
 use lmdv_core::{LineHeight, Prefs, ReaderFont, ThemePref};
 use lmdv_render::{CalloutPaint, DocLabels, DocTheme};
-use rune::{Color, Family};
+use rune::{Color, Family, oklch};
 use rune_kit::Kit;
 use rune_kit::kit::StateColors;
 use rune_kit::markdown::MarkdownStyle;
@@ -87,12 +87,30 @@ pub fn is_dark(theme: ThemePref, system_dark: bool) -> bool {
 /// The window kit for `theme`, resolved against the system scheme.
 ///
 /// Light, system and dark use `rune-kit`'s neutral light/dark palettes; sepia
-/// and black override the semantic roles from the original app's tokens.
+/// and black override the semantic roles from the original app's tokens. The
+/// neutral light accent is darkened to clear AA for link ink and primary
+/// buttons (A-01).
 pub(crate) fn palette(theme: ThemePref, system_dark: bool) -> Kit {
     match theme {
         ThemePref::Sepia => themed(false, &sepia()),
         ThemePref::Black => themed(true, &black()),
-        ThemePref::Light | ThemePref::System | ThemePref::Dark => Kit::neutral(is_dark(theme, system_dark)),
+        ThemePref::Light | ThemePref::System | ThemePref::Dark => {
+            let mut kit = Kit::neutral(is_dark(theme, system_dark));
+            if !kit.dark {
+                // A-01: the neutral light accent (L 0.60, #2f7fe3) is
+                // 3.99:1 on the white card and 3.54:1 on the page — below AA
+                // for links, accent icons and primary-button ink. The same
+                // hue at L 0.52 is 5.60:1 on white and 4.96:1 on the page.
+                let accent = oklch(0.52, 0.17, 256.0);
+                let c = &mut kit.c;
+                c.bg_accent = accent;
+                c.text_accent = accent;
+                c.icon_accent = accent;
+                c.border_focus = accent;
+                c.border_active = accent;
+            }
+            kit
+        }
     }
 }
 
@@ -444,19 +462,27 @@ mod tests {
     }
 
     #[test]
-    fn both_schemes_keep_text_and_muted_ink_readable() {
-        for (theme, kit) in
-            [(ThemePref::Sepia, palette(ThemePref::Sepia, false)), (ThemePref::Black, palette(ThemePref::Black, true))]
-        {
+    fn every_theme_keeps_body_muted_and_link_ink_readable() {
+        // A-01: body, muted and link ink at 4.5:1 on both the page and the
+        // reading card, in all four themes; primary-button ink too.
+        let themes = [
+            (ThemePref::Light, palette(ThemePref::Light, false)),
+            (ThemePref::Dark, palette(ThemePref::Dark, true)),
+            (ThemePref::Sepia, palette(ThemePref::Sepia, false)),
+            (ThemePref::Black, palette(ThemePref::Black, true)),
+        ];
+        for (theme, kit) in themes {
             let c = &kit.c;
-            let on_page = contrast(c.text_base, c.page);
-            let muted_on_page = contrast(c.text_muted, c.page);
-            let on_card = contrast(c.text_base, c.bg_base);
-            let link_on_card = contrast(c.text_accent, c.bg_base);
-            assert!(on_page >= 4.5, "{theme:?}: body on page {on_page:.2}:1");
-            assert!(muted_on_page >= 4.5, "{theme:?}: muted on page {muted_on_page:.2}:1");
-            assert!(on_card >= 4.5, "{theme:?}: body on card {on_card:.2}:1");
-            assert!(link_on_card >= 4.5, "{theme:?}: link on card {link_on_card:.2}:1");
+            for (surface, backdrop) in [("page", c.page), ("card", c.bg_base)] {
+                let body = contrast(c.text_base, backdrop);
+                let muted = contrast(c.text_muted, backdrop);
+                let link = contrast(c.text_accent, backdrop);
+                assert!(body >= 4.5, "{theme:?}: body on {surface} {body:.2}:1");
+                assert!(muted >= 4.5, "{theme:?}: muted on {surface} {muted:.2}:1");
+                assert!(link >= 4.5, "{theme:?}: link on {surface} {link:.2}:1");
+            }
+            let button = contrast(c.submit_fg, c.bg_accent);
+            assert!(button >= 4.5, "{theme:?}: primary-button ink {button:.2}:1");
             assert!(c.border_base.hex() != c.bg_base.hex(), "{theme:?}: a border is visible");
         }
     }

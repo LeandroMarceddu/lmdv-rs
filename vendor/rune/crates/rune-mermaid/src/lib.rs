@@ -134,11 +134,13 @@ mod sequence_draw;
 mod shape;
 mod state;
 mod steady;
+mod svg;
 mod timeline;
 mod xychart;
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 use rune::{Color, El, TextStyle, oklch, oklcha, tok};
 
@@ -260,14 +262,35 @@ pub struct Drawing {
     /// The fill and border of the card it would draw in, for the viewer's frame.
     pub surface: Color,
     pub surface_border: Color,
+    /// The prepared layout, so a viewer can save or copy the drawing as SVG.
+    pub(crate) scene: Rc<Scene>,
+    pub(crate) style: DiagramStyle,
+}
+
+impl Drawing {
+    /// This drawing as a static SVG document, in points, without hover
+    /// highlights: the same card, title and paths the viewer draws.
+    pub fn to_svg(&self) -> String {
+        self.scene.svg(&self.style)
+    }
 }
 
 /// [`render_with_hover`]'s title and drawing alone, laid out and fitted for `style.max_width`
 /// as its card would be.
 pub fn render_drawing(src: &str, style: &DiagramStyle, hover: Hover, color: Color) -> Option<Drawing> {
     let hover = (hover != Hover::Off).then_some((hover, color));
-    let (el, size) = scenes::built(src, style, hover, None).0?.drawing(style, None);
-    Some(Drawing { el, size, surface: style.surface, surface_border: style.surface_border })
+    let scene = scenes::built(src, style, hover, None).0?;
+    let (el, size) = scene.drawing(style, None);
+    Some(Drawing { el, size, surface: style.surface, surface_border: style.surface_border, scene, style: *style })
+}
+
+/// `src` as one static SVG document, or `None` when it is outside the supported subset.
+///
+/// The size, viewBox, title, fills, strokes and labels match [`render_drawing`]; the document
+/// references no script, image or external font, so a rasterizer or an exported page can embed
+/// it as it is.
+pub fn render_svg(src: &str, style: &DiagramStyle) -> Option<String> {
+    Some(render_drawing(src, style, Hover::Off, Color::TRANSPARENT)?.to_svg())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1842,6 +1842,18 @@ pub fn keycaps_in(locale: usize, chord: &str) -> Vec<String> {
         .collect()
 }
 
+/// A chord as one text run with the locale's key names: `Ctrl+Shift+S` is
+/// `Strg+Umschalt+S` in German. The palette's command rows draw their default
+/// key this way; the compact `?` overlay draws the same caps as keycaps.
+pub fn chord_text(chord: &str) -> String {
+    chord_text_in(lmdv_i18n::locale(), chord)
+}
+
+/// [`chord_text`] in an explicit locale.
+pub fn chord_text_in(locale: usize, chord: &str) -> String {
+    keycaps_in(locale, chord).join("+")
+}
+
 /// Looks a command up by its default shortcut.
 pub fn command_for_key(event: &KeyEvent) -> Option<&'static CommandSpec> {
     COMMANDS.iter().find(|command| command.default_keys.iter().any(|chord| key_matches(event, chord)))

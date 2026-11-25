@@ -102,6 +102,11 @@ fn key_caps_are_localized_per_catalog() {
     assert_eq!(crate::commands::keycaps_in(index("de"), "Shift+Space"), ["Umschalt", "Leertaste"]);
     assert_eq!(crate::commands::keycaps_in(index("fr"), "Esc"), ["\u{c9}chap"]);
     assert_eq!(crate::commands::keycaps_in(index("it"), "Ctrl+="), ["Ctrl", "="], "unnamed keys are their own cap");
+    // I-07: the palette's command rows draw a default key as one localized run.
+    assert_eq!(crate::commands::chord_text_in(index("de"), "Ctrl+Shift+E"), "Strg+Umschalt+E");
+    assert_eq!(crate::commands::chord_text_in(index("es"), "Ctrl+Shift+E"), "Ctrl+May\u{fa}s+E");
+    assert_eq!(crate::commands::chord_text_in(index("de"), "Space"), "Leertaste");
+    assert_eq!(crate::commands::chord_text_in(0, "Ctrl+S"), "Ctrl+S", "English keeps the standard names");
 }
 
 fn anchor(id: &str, offset: f32) -> ScrollAnchor {

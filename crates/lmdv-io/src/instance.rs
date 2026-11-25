@@ -1,19 +1,26 @@
-//! The single-instance lock and Unix-socket protocol.
+//! The single-instance lock and transport.
 //!
-//! The first process takes a `flock` on `<socket>.lock`, binds a stream socket
-//! (mode 0600 in a directory 0700) and forwards each launch to a callback. A
-//! later process connects and waits for an ack. Messages are a big-endian
-//! `u32` length followed by UTF-8 JSON, capped at 1 MiB. `SO_PEERCRED` must
-//! match the effective uid.
+//! One process owns the instance and every later process hands it its launch.
 //!
-//! The listener only forwards a [`LaunchRequest`]; it never opens files.
+//! * Unix: the first process takes a `flock` on `<socket>.lock`, binds a stream
+//!   socket (mode 0600 in a directory 0700) and forwards each launch to a
+//!   callback. A later process connects and waits for an ack. `SO_PEERCRED`
+//!   must match the effective uid.
+//! * Windows: the first process owns a named mutex (`Local\lmdv-<id>.lock`) and
+//!   serves a named pipe (`\\.\pipe\lmdv-<id>-<session>`). The mutex namespace
+//!   is per session, and the pipe name carries the session id because the pipe
+//!   namespace is machine-wide: a second session of the same account runs its
+//!   own instance instead of connecting to a window on another desktop. The
+//!   pipe instance is created with the process token's default DACL, so only
+//!   the same user (and SYSTEM or an administrator) may connect, and remote
+//!   clients are rejected.
 //!
-//! Windows has no Unix-domain socket path in `std` and no peer credentials, so
-//! the transport is a compile-time stub there: the message types and codec are
-//! shared, and [`InstancePaths::discover`], [`InstanceServer::claim`] and
-//! [`forward`] return [`InstanceError::Unsupported`]. The app degrades to
-//! starting without single-instance routing, exactly as it does when a Unix
-//! claim fails.
+//! Both transports carry the same frames: a big-endian `u32` length followed by
+//! UTF-8 JSON, capped at 1 MiB. The listener only forwards a
+//! [`LaunchRequest`]; it never opens files.
+//!
+//! A failure to claim or forward is not fatal: the app logs it and starts
+//! without single-instance routing.
 
 use std::fs::File;
 #[cfg(unix)]
@@ -25,21 +32,35 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt
 use std::os::unix::io::AsRawFd;
 #[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 #[cfg(unix)]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-#[cfg(unix)]
 use std::thread;
-use std::time::Duration;
-#[cfg(unix)]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use fs2::FileExt;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, ERROR_BROKEN_PIPE, ERROR_FILE_NOT_FOUND, ERROR_NO_DATA, ERROR_PIPE_BUSY,
+    ERROR_PIPE_CONNECTED, ERROR_PIPE_NOT_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
+    INVALID_HANDLE_VALUE,
+};
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::{CreateFileW, OPEN_EXISTING, PIPE_ACCESS_DUPLEX};
+#[cfg(windows)]
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE, PIPE_WAIT,
+    PeekNamedPipe, WaitNamedPipeW,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CreateMutexW;
 
 use crate::dirs::AppDirs;
 use crate::launch::Launch;
@@ -103,14 +124,21 @@ impl LaunchAck {
     }
 }
 
-/// The socket and lock file used by one instance id.
+/// The transport objects used by one instance id.
+///
+/// On Unix `dir` is the runtime folder, `socket` the socket path and `lock`
+/// the `flock` file. On Windows the same fields carry Win32 object names
+/// instead: `socket` is the named-pipe name, `lock` the named-mutex name, and
+/// `dir` the app data folder (diagnostics only — no file is created there).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InstancePaths {
-    /// The directory holding the socket; mode 0700.
+    /// The directory holding the Unix socket (mode 0700); the data folder on
+    /// Windows.
     pub dir: PathBuf,
-    /// `$XDG_RUNTIME_DIR/lmdv-<id>.sock`, or a cache/tmp fallback.
+    /// `$XDG_RUNTIME_DIR/lmdv-<id>.sock`, a cache/tmp fallback, or
+    /// `\\.\pipe\lmdv-<id>-<session>` on Windows.
     pub socket: PathBuf,
-    /// The `flock` file, never removed.
+    /// The `flock` file, never removed; the named-mutex name on Windows.
     pub lock: PathBuf,
 }
 
@@ -149,14 +177,24 @@ impl InstancePaths {
         Ok(Self::build(fallback, socket))
     }
 
-    /// Windows has no single-instance transport here yet.
+    /// Resolves the named mutex and named pipe for an instance id.
+    ///
+    /// Nothing is created here: [`InstanceServer::claim`] creates the mutex and
+    /// the first pipe instance, and [`forward`] opens the pipe.
     #[cfg(windows)]
-    pub fn discover(_dirs: &AppDirs) -> Result<Self, InstanceError> {
-        Err(InstanceError::Unsupported)
+    pub fn discover(dirs: &AppDirs) -> Result<Self, InstanceError> {
+        Ok(Self {
+            dir: dirs.data.clone(),
+            socket: PathBuf::from(windows_pipe_name(&dirs.instance_id, session_id())),
+            lock: PathBuf::from(windows_mutex_name(&dirs.instance_id)),
+        })
     }
 
     /// Builds paths in an explicit directory. Used by tests and advanced
     /// callers; [`InstanceServer::claim`] still creates the directory 0700.
+    ///
+    /// This is the Unix layout; Windows callers use [`Self::discover`], whose
+    /// fields are Win32 object names rather than paths.
     pub fn in_dir(dir: impl Into<PathBuf>, instance_id: &str) -> Self {
         let dir = dir.into();
         let socket = dir.join(socket_name(instance_id));
@@ -181,7 +219,10 @@ pub enum Claim {
 /// The listener thread and its held lock.
 pub struct InstanceServer {
     paths: InstancePaths,
+    #[cfg(unix)]
     _lock: File,
+    #[cfg(windows)]
+    _mutex: OwnedHandle,
     stop: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -254,17 +295,48 @@ impl InstanceServer {
         Ok(Claim::Primary(Self { paths, _lock: lock, stop, thread: Some(thread) }))
     }
 
-    /// Windows has no single-instance transport here yet. The app treats this
-    /// exactly like any other claim failure and starts without routing.
+    /// Claims the single-instance role on Windows.
+    ///
+    /// A free named mutex makes this process primary: it creates the first
+    /// pipe instance (so a name conflict is reported here, not on the listener
+    /// thread) and serves launches from it. A mutex that already exists means
+    /// another process owns the instance, and the caller forwards.
     #[cfg(windows)]
-    pub fn claim<F>(_paths: InstancePaths, _on_launch: F) -> Result<Claim, InstanceError>
+    pub fn claim<F>(paths: InstancePaths, on_launch: F) -> Result<Claim, InstanceError>
     where
         F: FnMut(LaunchRequest) -> LaunchAck + Send + 'static,
     {
-        Err(InstanceError::Unsupported)
+        let mutex_name = wide(&paths.lock.to_string_lossy());
+        // `CreateMutexW` reports “the object existed” through the thread's last
+        // error, so read it immediately; failure is a null handle.
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 1, mutex_name.as_ptr()) };
+        let last_error = unsafe { GetLastError() };
+        if handle.is_null() {
+            return Err(InstanceError::Io(io::Error::from_raw_os_error(last_error as i32)));
+        }
+        // SAFETY: the handle came from `CreateMutexW` and is owned from here on.
+        let mutex = unsafe { OwnedHandle::from_raw_handle(handle) };
+        if last_error == ERROR_ALREADY_EXISTS {
+            return Ok(Claim::Secondary(paths));
+        }
+
+        let pipe = paths.socket.to_string_lossy().into_owned();
+        let first = create_pipe_instance(&pipe)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = Arc::clone(&stop);
+        let thread_name = format!("lmdv-instance-{pipe}");
+        let thread = match thread::Builder::new()
+            .name(thread_name)
+            .spawn(move || serve_pipe(&pipe, first, thread_stop, on_launch))
+        {
+            Ok(thread) => thread,
+            Err(error) => return Err(InstanceError::Io(error)),
+        };
+
+        Ok(Claim::Primary(Self { paths, _mutex: mutex, stop, thread: Some(thread) }))
     }
 
-    /// The socket and lock paths.
+    /// The transport objects (socket and lock paths, or Win32 object names).
     pub fn paths(&self) -> &InstancePaths {
         &self.paths
     }
@@ -273,6 +345,12 @@ impl InstanceServer {
 impl Drop for InstanceServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
+        // A pipe server blocks in `ConnectNamedPipe`; a throwaway client
+        // connection ends that wait so the listener can see the stop flag.
+        #[cfg(windows)]
+        if let Some(thread) = &self.thread {
+            wake_pipe_server(&self.paths.socket, thread);
+        }
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -319,13 +397,244 @@ pub fn forward(paths: &InstancePaths, request: &LaunchRequest) -> Result<LaunchA
     Ok(ack)
 }
 
-/// Windows has no single-instance transport here yet.
+/// Forwards a launch over the named pipe and waits [`ACK_TIMEOUT`] for an ack.
+///
+/// A primary that is still starting is waited for up to [`CONNECT_TIMEOUT`]:
+/// a missing pipe is retried, and `ERROR_PIPE_BUSY` waits with
+/// `WaitNamedPipeW` rather than spinning.
 #[cfg(windows)]
-pub fn forward(_paths: &InstancePaths, _request: &LaunchRequest) -> Result<LaunchAck, InstanceError> {
-    Err(InstanceError::Unsupported)
+pub fn forward(paths: &InstancePaths, request: &LaunchRequest) -> Result<LaunchAck, InstanceError> {
+    let name = paths.socket.to_string_lossy();
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let file = loop {
+        match open_pipe_client(&name) {
+            Ok(file) => break file,
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(InstanceError::Timeout);
+                }
+                let wait = (deadline - now).as_millis().min(50) as u32;
+                wait_named_pipe(&name, wait.max(1));
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => {
+                if Instant::now() >= deadline {
+                    return Err(InstanceError::Timeout);
+                }
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(InstanceError::Io(error)),
+        }
+    };
+
+    let mut writer = &file;
+    write_message(&mut writer, request).map_err(map_ack_timeout)?;
+    let mut reader = PipeReader { file: &file, deadline: Instant::now() + ACK_TIMEOUT };
+    let ack: LaunchAck = read_message(&mut reader).map_err(map_ack_timeout)?;
+    if ack.v != PROTOCOL_VERSION {
+        return Err(InstanceError::Version(ack.v));
+    }
+    Ok(ack)
 }
 
-#[cfg(unix)]
+/// A pipe buffer big enough for the launches lmdv sends (the protocol cap is
+/// still [`MAX_MESSAGE_BYTES`]): one write or ack never blocks on a reader that
+/// is a few microseconds behind.
+#[cfg(windows)]
+const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
+
+/// The NUL-terminated UTF-16 form the Win32 names take.
+#[cfg(windows)]
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Creates one byte-mode duplex pipe instance with the process's default DACL.
+#[cfg(windows)]
+fn create_pipe_instance(name: &str) -> io::Result<File> {
+    let name = wide(name);
+    let handle = unsafe {
+        CreateNamedPipeW(
+            name.as_ptr(),
+            PIPE_ACCESS_DUPLEX,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            1,
+            PIPE_BUFFER_BYTES,
+            PIPE_BUFFER_BYTES,
+            0,
+            std::ptr::null(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a valid pipe handle is owned by the returned `File` from here on.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+/// Opens the primary's pipe; `ERROR_PIPE_BUSY` means an instance exists but is
+/// serving another client.
+#[cfg(windows)]
+fn open_pipe_client(name: &str) -> io::Result<File> {
+    let name = wide(name);
+    let handle = unsafe {
+        CreateFileW(
+            name.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: a valid pipe handle is owned by the returned `File` from here on.
+    Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+fn wait_named_pipe(name: &str, millis: u32) {
+    let name = wide(name);
+    unsafe { WaitNamedPipeW(name.as_ptr(), millis) };
+}
+
+/// Serves launches until `stop` is set.
+///
+/// The instance is created before the blocking `ConnectNamedPipe`, so a client
+/// that arrives early queues instead of failing. Every iteration uses a fresh
+/// instance: one client, one request, one ack.
+#[cfg(windows)]
+fn serve_pipe<F>(name: &str, first: File, stop: Arc<AtomicBool>, mut on_launch: F)
+where
+    F: FnMut(LaunchRequest) -> LaunchAck,
+{
+    let mut next = Some(first);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        let pipe = match next.take().map_or_else(|| create_pipe_instance(name), Ok) {
+            Ok(pipe) => pipe,
+            Err(_) => {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+        };
+        let connected = unsafe { ConnectNamedPipe(pipe.as_raw_handle() as HANDLE, std::ptr::null_mut()) };
+        if connected == 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(ERROR_PIPE_CONNECTED as i32) {
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+                continue;
+            }
+        }
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
+        handle_pipe_client(pipe, &mut on_launch);
+    }
+}
+
+#[cfg(windows)]
+fn handle_pipe_client<F>(pipe: File, on_launch: &mut F)
+where
+    F: FnMut(LaunchRequest) -> LaunchAck,
+{
+    let mut reader = PipeReader { file: &pipe, deadline: Instant::now() + ACK_TIMEOUT };
+    let request = match read_message::<_, LaunchRequest>(&mut reader) {
+        Ok(request) => request,
+        Err(_) => return,
+    };
+    let mut writer = &pipe;
+    if request.v != PROTOCOL_VERSION {
+        let _ = write_message(&mut writer, &LaunchAck::failed(format!("unsupported version {}", request.v)));
+        return;
+    }
+    let ack = on_launch(request);
+    let _ = write_message(&mut writer, &ack);
+}
+
+/// A pipe reader that never blocks longer than its deadline.
+///
+/// `PeekNamedPipe` says whether anything is available, so a client that
+/// connects and then stalls cannot pin the listener thread (the Unix socket
+/// uses a read timeout for the same reason). Reads only happen when bytes are
+/// already there, and a byte-mode pipe returns what it has.
+#[cfg(windows)]
+struct PipeReader<'a> {
+    file: &'a File,
+    deadline: Instant,
+}
+
+#[cfg(windows)]
+impl Read for PipeReader<'_> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            let mut available = 0u32;
+            let ok = unsafe {
+                PeekNamedPipe(
+                    self.file.as_raw_handle() as HANDLE,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            };
+            if ok == 0 {
+                let error = io::Error::last_os_error();
+                return match error.raw_os_error() {
+                    // A closed client is a clean end of stream, not an error.
+                    Some(code)
+                        if code == ERROR_BROKEN_PIPE as i32
+                            || code == ERROR_PIPE_NOT_CONNECTED as i32
+                            || code == ERROR_NO_DATA as i32 =>
+                    {
+                        Ok(0)
+                    }
+                    _ => Err(error),
+                };
+            }
+            if available > 0 {
+                let mut file = self.file;
+                return file.read(out);
+            }
+            if Instant::now() >= self.deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "the instance pipe did not answer"));
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+/// Connects once to end the server's `ConnectNamedPipe` wait on shutdown.
+#[cfg(windows)]
+fn wake_pipe_server(name: &std::path::Path, thread: &std::thread::JoinHandle<()>) {
+    let name = name.to_string_lossy();
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while !thread.is_finished() && Instant::now() < deadline {
+        match open_pipe_client(&name) {
+            Ok(file) => {
+                drop(file);
+                return;
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                wait_named_pipe(&name, 10);
+            }
+            Err(_) => thread::sleep(Duration::from_millis(5)),
+        }
+    }
+}
+
 fn map_ack_timeout(error: InstanceError) -> InstanceError {
     match &error {
         InstanceError::Io(source) if matches!(source.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {
@@ -377,8 +686,6 @@ pub enum InstanceError {
     Version(u32),
     #[error("cannot lock the instance file: {0}")]
     Lock(#[source] io::Error),
-    #[error("single-instance routing is not supported on this platform")]
-    Unsupported,
 }
 
 #[cfg(unix)]
@@ -465,7 +772,8 @@ fn is_would_block(error: &io::Error) -> bool {
         || error.raw_os_error() == Some(libc::EAGAIN)
 }
 
-fn socket_name(instance_id: &str) -> String {
+/// The sanitized instance id shared by every transport object name.
+fn instance_stem(instance_id: &str) -> String {
     let mut clean: String = instance_id
         .chars()
         .map(|character| match character {
@@ -477,7 +785,41 @@ fn socket_name(instance_id: &str) -> String {
     if clean.is_empty() {
         clean.push_str("main");
     }
-    format!("lmdv-{clean}.sock")
+    clean
+}
+
+fn socket_name(instance_id: &str) -> String {
+    format!("lmdv-{}.sock", instance_stem(instance_id))
+}
+
+/// The named-pipe name a Windows primary serves.
+///
+/// The pipe namespace is machine-wide, so the current session id separates two
+/// sessions of the same account; the mutex's `Local\` namespace already does
+/// that for the claim itself.
+#[cfg(any(windows, test))]
+fn windows_pipe_name(instance_id: &str, session: u32) -> String {
+    format!(r"\\.\pipe\lmdv-{}-{session}", instance_stem(instance_id))
+}
+
+/// The named-mutex name a Windows primary owns; `Local\` keeps it per session,
+/// which matches the desktop app's scope.
+#[cfg(any(windows, test))]
+fn windows_mutex_name(instance_id: &str) -> String {
+    format!(r"Local\lmdv-{}.lock", instance_stem(instance_id))
+}
+
+/// This process's terminal-services session id; 0 when Windows does not answer.
+#[cfg(windows)]
+fn session_id() -> u32 {
+    use windows_sys::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+    use windows_sys::Win32::System::Threading::GetCurrentProcessId;
+
+    let mut session = 0u32;
+    // SAFETY: the process id is this process's and `session` is a valid out
+    // pointer; the call has no other side effects.
+    let answered = unsafe { ProcessIdToSessionId(GetCurrentProcessId(), &mut session) };
+    if answered == 0 { 0 } else { session }
 }
 
 #[cfg(unix)]
@@ -522,9 +864,9 @@ fn create_private_dir(path: &Path, uid: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use std::sync::mpsc;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     use tempfile::TempDir;
 
     use super::*;
@@ -653,12 +995,79 @@ mod tests {
         assert!(paths.socket.exists(), "the refused object is left alone");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_named_pipe_primary_forwards_and_acks() {
+        let temp = TempDir::new().unwrap();
+        let dirs = AppDirs {
+            config: temp.path().join("config"),
+            data: temp.path().join("data"),
+            cache: temp.path().join("cache"),
+            state: temp.path().join("state"),
+            logs: temp.path().join("state/logs"),
+            portable: false,
+            instance_id: format!("test-{}", std::process::id()),
+        };
+        let paths = InstancePaths::discover(&dirs).unwrap();
+        assert!(paths.socket.to_string_lossy().starts_with(r"\\.\pipe\lmdv-test-"));
+        assert!(paths.lock.to_string_lossy().starts_with(r"Local\lmdv-test-"));
+
+        let (tx, rx) = mpsc::channel();
+        let claim = InstanceServer::claim(paths.clone(), move |request| {
+            tx.send(request).unwrap();
+            LaunchAck::ok()
+        })
+        .unwrap();
+        let Claim::Primary(server) = claim else {
+            panic!("the first claim must be primary");
+        };
+
+        let launch = Launch {
+            path: Some(PathBuf::from(r"C:\notes\a.md")),
+            line: Some(7),
+            new_window: true,
+            cwd: PathBuf::from(r"C:\notes"),
+        };
+        let ack = forward(&paths, &LaunchRequest::new(launch.clone())).unwrap();
+        assert!(ack.ok);
+        let received = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(received.launch, launch);
+
+        let secondary = InstanceServer::claim(paths.clone(), |_| LaunchAck::ok());
+        assert!(matches!(secondary, Ok(Claim::Secondary(_))), "a held mutex means secondary");
+
+        drop(server);
+    }
+
     #[test]
     fn instance_ids_are_sanitized_for_the_socket_name() {
         assert_eq!(socket_name("main"), "lmdv-main.sock");
         assert_eq!(socket_name("a/b c"), "lmdv-a-b-c.sock");
         assert_eq!(socket_name(""), "lmdv-main.sock");
         assert!(socket_name(&"x".repeat(200)).len() <= "lmdv-".len() + 64 + ".sock".len());
+    }
+
+    #[test]
+    fn the_windows_objects_are_named_per_instance_and_sanitized() {
+        assert_eq!(windows_pipe_name("main", 1), r"\\.\pipe\lmdv-main-1");
+        assert_eq!(windows_mutex_name("main"), r"Local\lmdv-main.lock");
+        assert_eq!(windows_pipe_name("a/b c", 2), r"\\.\pipe\lmdv-a-b-c-2");
+        assert_eq!(windows_mutex_name("a/b c"), r"Local\lmdv-a-b-c.lock");
+        assert_eq!(windows_pipe_name("", 0), r"\\.\pipe\lmdv-main-0", "an empty id is the main instance");
+        assert_ne!(windows_pipe_name("portable-0123456789ab", 1), windows_pipe_name("main", 1));
+        assert_ne!(
+            windows_pipe_name("main", 1),
+            windows_pipe_name("main", 2),
+            "a second session must not reach the first session's window"
+        );
+        assert!(
+            windows_pipe_name(&"x".repeat(200), 4294967295).len() <= r"\\.\pipe\lmdv-".len() + 64 + 11,
+            "the sanitized id and the session id are bounded"
+        );
+        assert!(
+            windows_mutex_name(&"x".repeat(200)).len() <= r"Local\lmdv-".len() + 64 + ".lock".len(),
+            "the sanitized id is capped"
+        );
     }
 
     #[test]

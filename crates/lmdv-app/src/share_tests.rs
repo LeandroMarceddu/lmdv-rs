@@ -718,6 +718,61 @@ fn rich_copy_resolves_local_pictures_through_the_path_policy() {
 }
 
 #[test]
+fn a_mermaid_source_becomes_a_safe_static_svg() {
+    let svg = crate::export_io::diagram_svg("flowchart LR\n    A[Start] --> B[Done]").expect("the diagram draws");
+    let svg = String::from_utf8(svg).expect("UTF-8 SVG");
+    assert!(svg.starts_with("<svg "), "{svg:.120}");
+    assert!(svg.contains("<path "), "the canvas is paths");
+    assert!(svg.contains(">Start</text>"), "the labels are text");
+    for forbidden in ["<script", "<image", "href=", "url(", "@import"] {
+        assert!(!svg.contains(forbidden), "the export SVG carries {forbidden}");
+    }
+    assert!(crate::export_io::diagram_svg("this is not a diagram").is_none());
+}
+
+#[test]
+fn rich_copy_embeds_a_mermaid_diagram_as_an_image() {
+    // OI-106/X-02: the rich clipboard fragment carries a drawing, not the
+    // Mermaid syntax the fragment used to fall back to.
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let markdown = "# Diagram\n\n```mermaid\nflowchart LR\n    A[Source] --> B[Done]\n```\n";
+    state.open_synthetic("Diagram", markdown);
+    let (mut runtime, board) = clipboard_runtime(state);
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+        assert!(state.run_command("share.copy-rich", tx), "rich copy is available");
+    });
+    wait_for_clipboard(&mut runtime, &board);
+
+    let html = board.content().and_then(|content| content.html().map(str::to_owned)).expect("HTML form");
+    assert!(html.contains("data:image/svg+xml;base64,"), "the diagram is an embedded image: {html:.400}");
+    assert!(html.contains("alt=\"Mermaid diagram\""), "the picture keeps the localized alt text");
+    assert!(!html.contains("flowchart LR"), "the diagram source is not in the rich copy");
+    assert!(!runtime.state.share.copy_busy());
+}
+
+#[test]
+fn a_docx_export_embeds_a_mermaid_diagram_as_a_png() {
+    // OI-106/X-08: DOCX rasterizes the static SVG through the same media path
+    // as an SVG picture, so Word gets a PNG drawing instead of a code block.
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Diagram", "# Diagram\n\n```mermaid\nflowchart LR\n    A[Source] --> B[Done]\n```\n");
+    wait_for_reader(&mut state);
+    let target = export_target(&temp, "diagram.docx");
+    state.start_export(ExportFormat::Docx, target.clone(), None, false);
+    wait_for_export(&mut state);
+
+    let bytes = std::fs::read(&target).expect("the exported DOCX");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("word/media/image1.png"), "the diagram is a PNG media part");
+    assert!(
+        bytes.windows(8).any(|window| window == b"\x89PNG\r\n\x1a\n"),
+        "the stored media entry is a real PNG (pictures are stored, not deflated)"
+    );
+}
+
+#[test]
 fn a_failed_rich_copy_shows_an_error_notice_and_no_flash() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);

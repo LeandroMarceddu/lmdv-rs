@@ -23,7 +23,7 @@ use rune::El;
 use crate::markdown::{DiagramPaint, MarkdownStyle};
 
 pub use rune_mermaid::DrawingModel;
-pub use rune_mermaid::{DiagramStyle, Drawing, Hover, may_draw, supported};
+pub use rune_mermaid::{DiagramStyle, Drawing, Hover, may_draw, render_svg, supported};
 
 /// Prepare the drawn label runs for a viewer that searches and highlights a diagram.
 pub fn prepare(src: &str, style: &MarkdownStyle, max_width: f32) -> Option<DrawingModel> {

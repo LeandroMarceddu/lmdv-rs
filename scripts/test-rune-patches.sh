@@ -14,3 +14,5 @@ cargo test --manifest-path vendor/rune/Cargo.toml -p rune \
     --test inline_image_layout \
     --test inline_image_scene \
     --test close_request_veto
+# Patch 0005: the static Mermaid SVG serializer and its self-containment tests.
+cargo test --manifest-path vendor/rune/Cargo.toml -p rune-mermaid --lib svg

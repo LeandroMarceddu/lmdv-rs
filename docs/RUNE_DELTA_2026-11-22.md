@@ -80,7 +80,7 @@ No new build requirement beyond the optional `rune-kit` `math` deps.
 
 ## Patch status against the new head
 
-All four patches still fail `git apply --check`. A dry run against a
+The four ported patches still fail `git apply --check`. A dry run against a
 `7a707454` worktree has the **same hunk counts**, so the last 33 commits
 changed the rework content, not which hunks fail.
 
@@ -90,6 +90,7 @@ changed the rework content, not which hunks fail.
 | 0002 close veto | no | 8/15 | `window/lifecycle.rs` → `window/host/lifecycle.rs`; hook storage must move into generic `Shared<S>`; `spec.rs` forwards via `forward_app_builders!`; `handle.rs::close` is a one-liner |
 | 0003 a11y labels | no | 14/21 | `a11y/text.rs` split into `text/runs.rs` + `text/long_field.rs`; `a11y/node.rs` context |
 | 0004 highlight box | no | 2/2 unplaceable | `text/cursor.rs` → `rune-text/src/layout/cursor.rs`; `text/tests.rs` → `rune-text/src/tests.rs` |
+| 0005 Mermaid SVG | new, applies on the patched tree | — | `rune-mermaid` static `render_svg`/`Drawing::to_svg`/`DrawingModel::to_svg`; export/lightbox use it. Port after 0004; ~1–2 h. |
 
 A useful simplification for 0001: hashing now lives in
 `Span::hash_layout`/`affects_layout`, so the old `hash.rs`/`paragraphs.rs`
@@ -127,7 +128,7 @@ adding wasmi and ~566 KiB of assets, and changing text metrics for no benefit.
 | Accessible inline objects | **No** — no a11y change; raw bytes are still spoken |
 | Highlight over an inline image | **No** — `TextHighlight` excludes pill/replace boxes |
 
-All four patches remain ours.
+All five patches remain ours; 0005 is additive on the patched tree.
 
 ## New APIs vs the open gaps
 

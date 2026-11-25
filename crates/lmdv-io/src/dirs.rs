@@ -90,8 +90,12 @@ impl AppDirs {
 
     /// Creates config, data, cache, state, logs and drafts with mode `0700`.
     ///
-    /// Platforms without POSIX modes create the folders and leave the
-    /// inherited ACLs in place.
+    /// Platforms without POSIX modes create the folders. Windows gives each of
+    /// them a protected DACL that grants the current user full control and lets
+    /// that entry inherit into the state, draft and log files written inside,
+    /// so another account cannot read them. The ACL step is best effort: a
+    /// filesystem without ACL support (a FAT portable copy) keeps the profile
+    /// folder's own per-user ACL instead of failing startup.
     pub fn ensure(&self) -> io::Result<()> {
         for path in [&self.config, &self.data, &self.cache, &self.state, &self.logs, &self.drafts_dir()] {
             if path.as_os_str().is_empty() || path.parent().is_none() {
@@ -100,6 +104,8 @@ impl AppDirs {
             fs::create_dir_all(path)?;
             #[cfg(unix)]
             fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+            #[cfg(windows)]
+            windows_privacy::protect(path);
         }
         Ok(())
     }
@@ -342,6 +348,121 @@ pub fn documents_dir() -> Option<PathBuf> {
 fn short_hash(value: &OsStr) -> String {
     let hash = blake3::hash(value.as_encoded_bytes());
     hash.to_hex()[..12].to_owned()
+}
+
+/// Windows state-folder privacy.
+///
+/// `%LOCALAPPDATA%` normally grants only the signed-in user (plus SYSTEM and
+/// administrators), but a redirected or roaming profile can inherit a wider
+/// ACL. Each folder lmdv owns therefore gets a protected DACL with one entry:
+/// the current user's SID, full control, inherited by subfolders and files.
+/// State, drafts and logs written inside are then readable only by that user.
+///
+/// This is best effort. A filesystem without ACL support (a FAT portable copy)
+/// or a denied security call keeps the inherited profile ACL rather than
+/// failing startup; the folder is still per-user on a normal account.
+#[cfg(windows)]
+mod windows_privacy {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::path::Path;
+    use std::ptr;
+
+    use windows_sys::Win32::Foundation::{ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW,
+        TRUSTEE_IS_SID, TRUSTEE_IS_USER, TRUSTEE_W,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetTokenInformation, PROTECTED_DACL_SECURITY_INFORMATION,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_QUERY, TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    /// Gives `path` a protected DACL for the current user; failures are left to
+    /// the inherited profile ACL.
+    pub(super) fn protect(path: &Path) {
+        let _ = set_private_dacl(path);
+    }
+
+    fn set_private_dacl(path: &Path) -> std::io::Result<()> {
+        let token = open_process_token()?;
+
+        // A null buffer only asks for the required length.
+        let mut needed = 0u32;
+        // SAFETY: a null buffer with length 0 is the documented size query.
+        unsafe {
+            GetTokenInformation(token.as_raw_handle(), TokenUser, ptr::null_mut(), 0, &mut needed);
+        }
+        if needed == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut buffer = vec![0u64; (needed as usize).div_ceil(8)];
+        let length = u32::try_from(buffer.len() * 8).unwrap_or(u32::MAX);
+        // SAFETY: the buffer is at least `needed` bytes, 8-aligned for
+        // `TOKEN_USER`, and lives until the SID has been copied into the ACL
+        // below.
+        let status = unsafe {
+            GetTokenInformation(token.as_raw_handle(), TokenUser, buffer.as_mut_ptr().cast(), length, &mut needed)
+        };
+        if status == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: on success the buffer holds one TOKEN_USER whose SID lives in
+        // the same allocation.
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+
+        let access = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_ALL_ACCESS,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_USER,
+                ptstrName: user.User.Sid.cast(),
+            },
+        };
+        let mut acl: *mut ACL = ptr::null_mut();
+        let status = unsafe { SetEntriesInAclW(1, &access, ptr::null(), &mut acl) };
+        if status != ERROR_SUCCESS {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+
+        let name: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let status = unsafe {
+            SetNamedSecurityInfoW(
+                name.as_ptr(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                acl,
+                ptr::null(),
+            )
+        };
+        // SAFETY: `SetEntriesInAclW` returned this allocation and the call above
+        // has finished with it.
+        unsafe {
+            LocalFree(acl.cast());
+        }
+        if status == ERROR_SUCCESS { Ok(()) } else { Err(std::io::Error::from_raw_os_error(status as i32)) }
+    }
+
+    /// Opens this process's token for a `TokenUser` query.
+    fn open_process_token() -> std::io::Result<OwnedHandle> {
+        let mut token = ptr::null_mut();
+        // SAFETY: `GetCurrentProcess` is a pseudo-handle; a successful
+        // `OpenProcessToken` returns a handle this function then owns.
+        let status = unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) };
+        if status == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `token` is a valid handle returned by `OpenProcessToken`.
+        Ok(unsafe { OwnedHandle::from_raw_handle(token) })
+    }
 }
 
 #[cfg(test)]

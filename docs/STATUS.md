@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-24
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (243 done, 54 substitutes, 23 partial, 4 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.10.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (257 done, 54 substitutes, 13 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.10.0 is released. Remaining: 7 P0 partials (Rune/rune-kit), six P1/P2 clauses, the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -521,14 +521,23 @@
 - The repository homepage and AppStream `<url type="homepage">` point at it; `appstreamcli validate` is now clean.
 - ADR-027 supersedes ADR-025's no-homepage clause; OI-157 is fixed. No analytics or app webview.
 
+## Diagrams, Windows runtime, UI polish — complete
+
+- Diagram export: `rune-mermaid` patch 0005 adds static SVG serialization; rich copy/HTML/DOCX/PDF embed diagrams, and the lightbox gives diagrams 2×/4×/Save PNG through the public SVG rasterizer. X-02/X-07/X-08/X-11/V-08/V-09 green; OI-106/181 fixed.
+- AVIF: `imgalifier-avif` (pure Rust, no NASM) decodes into PNG for DOCX/PDF and lightbox copy/save; extensionless AVIF is sniffed. OI-183 fixed.
+- Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
+- UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
+- Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
+- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 36 open OIs. Post-0.10.0; no new tag.
+
 ## Next up
 
 **Next when work resumes:**
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
-2. Close or accept the 8 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10; X-02 needs the rune-mermaid serializer. Remaining app-side P1s are D-06/R-28 drag-to-scroll, T-34/W-10 toolbar, T-15 pulse, E-29 multi-cursor (Rune), L-12 menu/OI-195, A-01/A-05/A-06/I-07/I-08.
-3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — the user asked to hold it for now.
-4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime only if it becomes a target (OI-155).
+2. Close or accept the 7 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10. Remaining P1/P2 clauses are A-05/A-06 (tab/tree ARIA, kit), E-29 (multi-cursor, Rune), L-12 (inline SVG vector shapes, OI-195), V-02 (inline hover, OI-182) and D-08 (kit drag-cancel).
+3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — now includes patch 0005 (Mermaid SVG).
+4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime is implemented but needs the manual checklist in OI-155.
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.
 
@@ -536,7 +545,7 @@
 
 **Known flake (2026-11-22):** CI run 45052468637 (`3d988a0`) failed twice on the Linux gate, each time in an unrelated test: attempt 1 and the docs follow-up `aaef8a0` timed out `lmdv-io store::tests::drafts_are_capped_by_count_and_characters` on its first `flush(2s)`; attempt 2 hit the known Rune debug assertion `text_spec.rs:245: a text changed after its shape key was taken` in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` (the same flake as run 44821493750). The drain batch fsyncs every draft, and CI's loaded disk can exceed two seconds; its first flush timeout is now **5 s**, matching the second half. The Rune assertion remains a low-probability shape-cache flake: the test alone passed 30 local runs and five full app-suite runs on two cores. Record any repeat with the run id; do not mask it with another timeout.
 
-**Known flake (instance lock, 2026-11-21 / 2026-11-23):** `lmdv-io instance::tests::a_stale_socket_is_reclaimed_but_a_live_one_is_not` intermittently panics with “a free lock must be primary” under the parallel `lmdv-io` suite. It failed once on 2026-11-21 and once on 2026-11-23 during the table-fix gate, then passed on the next run. The test alone passes 30+ times, the four instance tests pass 20× in parallel, and the full `lmdv-io` suite passes serially 4×; the remaining failure is a test-parallelism/`flock` release race in the fixture, not app behavior. Record any repeat; if it recurs in CI, isolate the instance tests behind a test mutex or make the fixture reopen the lock after an explicit close.
+**Known flake (instance lock) — tmpfs artifact:** `lmdv-io instance::tests::a_stale_socket_is_reclaimed_but_a_live_one_is_not` intermittently panics with “a free lock must be primary” under the parallel suite. Forensics on 2026-11-24 reproduced it 7/30 on `/tmp` (tmpfs), 0/10 single-threaded, and 0/35 with `TMPDIR` on btrfs; `flock` returns `EWOULDBLOCK` with no fd or `/proc/locks` entry. This is a tmpfs/sandbox artifact, not app behavior. For a clean gate use `TMPDIR=$PWD/target/tmp cargo test -p lmdv-io` (or the full gate with that TMPDIR).
 
 ## P6-01b — complete
 

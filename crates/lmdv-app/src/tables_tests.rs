@@ -8,7 +8,8 @@ use rune_kit::SortDir;
 use tempfile::TempDir;
 
 use crate::tables::{
-    SortKey, TablePreview, TableTarget, copy_tsv, fold, highlight_ranges, natural_widths, plan_widths, sort_order,
+    SortKey, TABLE_PREVIEW_SCROLL, TablePreview, TableTarget, copy_tsv, fold, highlight_ranges, minimum_widths,
+    natural_widths, plan_widths, sort_order,
 };
 use crate::test_support;
 use crate::window::WindowState;
@@ -318,6 +319,76 @@ fn widths_fit_the_view_and_cap_the_growth() {
         plan_widths(&[400.0, 400.0], &[300.0, 300.0], 100.0),
         [400.0, 400.0],
         "below the minimum: 100% and scroll"
+    );
+    assert_eq!(
+        plan_widths(&[360.0, 56.0], &[900.0, 56.0], 500.0),
+        [900.0, 56.0],
+        "a floor above the 360 pt cap still fits its column (OI-194)"
+    );
+}
+
+#[test]
+fn a_token_wider_than_the_column_cap_grows_its_column_instead_of_clipping() {
+    let plain = "word".repeat(40);
+    let code = format!("base64Token{}", "x".repeat(140));
+    let table = drawn_table(&["Token", "Kind"], &[&[plain.as_str(), "plain"], &[code.as_str(), "code"]]);
+
+    // The floor follows the reading table: CSS min-content of the widest cell
+    // in its own face, padding included, and not capped at MAX_COLUMN.
+    let body = rune::TextStyle::new(15.0, 400.0);
+    let padding = 2.0 * crate::tables::CELL_PAD + 2.0;
+    let measured = rune::text::content_widths(&plain, &[], body).0 + padding;
+    let code_floor = rune::text::content_widths(&code, &[], body).0 + padding;
+    let minimums = minimum_widths(&table);
+    assert!(minimums[0] > 360.0, "the token is wider than the cap: {}", minimums[0]);
+    assert!(minimums[0] >= measured - 0.5, "the floor fits the whole plain token: {} vs {measured}", minimums[0]);
+    assert!(
+        minimums[0] >= code_floor - 0.5,
+        "the floor fits the whole code token too: {} vs {code_floor}",
+        minimums[0]
+    );
+
+    let preview = preview_of(table, 900.0);
+    assert_eq!(natural_widths(&preview.table)[0], 360.0, "the natural width still caps at 360");
+    assert!(preview.widths[0] > 360.0, "the planned column grows past the cap: {}", preview.widths[0]);
+    assert!(preview.widths[0] >= minimums[0] - 0.5, "the column keeps the whole token");
+    assert!(preview.overflow, "the grid is wider than the view and scrolls");
+    assert!(preview.table_width > preview.available + 0.5, "the table overflows its view");
+}
+
+#[test]
+fn a_wide_token_preview_renders_the_whole_token_inside_its_scroller() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let token = format!("base64Token{}", "x".repeat(140));
+    let source = format!("# Wide token\n\n| Token | Kind |\n| - | - |\n| {token} | code |\n");
+    state.open_synthetic("Wide token", &source);
+    let model = state.active_tab().and_then(|tab| tab.view.reader.clone()).expect("the model");
+    let table = lmdv_render::table_refs(&model).into_iter().next().expect("one table");
+    state.select_table(table);
+    let mut tx = Tx::default();
+    state.open_table_preview(&mut tx);
+
+    let elements = render(state);
+    let scroll = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some(TABLE_PREVIEW_SCROLL))
+        .expect("the preview's scroller");
+    let cell = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some("table-preview-head-0"))
+        .expect("the first column's header cell");
+    let grid = elements
+        .iter()
+        .find(|element| element.key.as_deref() == Some("table-preview-grid"))
+        .expect("the preview's grid");
+    assert!(cell.rect[2] > 360.0, "the token's column grows past the 360 pt cap: {} wide", cell.rect[2]);
+    assert!(grid.rect[2] >= cell.rect[2], "the grid holds its widest column: {} >= {}", grid.rect[2], cell.rect[2]);
+    assert!(
+        grid.rect[2] > scroll.rect[2] + 0.5,
+        "the grid scrolls inside the panel instead of clipping: {} in {}",
+        grid.rect[2],
+        scroll.rect[2]
     );
 }
 

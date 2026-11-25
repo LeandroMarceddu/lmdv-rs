@@ -275,22 +275,26 @@ impl Canvas {
         let (pieces, label_keys) = pieces(&self, map);
         let hovers = self.hovers(map, paint);
         let labels = self.labels.into_iter().map(|l| Label { at: map(l.at), ..l }).collect();
+        // The same finished geometry the pieces draw, kept as plain paths and
+        // fills for [`Scene::svg`] (labels stay in `labels`).
+        let svg_ops: Vec<Op> = self
+            .ops
+            .iter()
+            .map(|op| match op {
+                Op::Fill(points, color) => Op::Fill(points.iter().map(|&p| map(p)).collect(), *color),
+                Op::Stroke { points, closed, width, cap, color } => Op::Stroke {
+                    points: points.iter().map(|&p| map(p)).collect(),
+                    closed: *closed,
+                    width: *width,
+                    cap: *cap,
+                    color: *color,
+                },
+            })
+            .collect();
         let full = [b[2] - b[0] + 2.0 * pad, b[3] - b[1] + 2.0 * pad];
         let size = [full[0] * scale, full[1] * scale];
         let lit = self.hover.map_or(Color::TRANSPARENT, |h| h.1);
-        Some(Scene {
-            title: None,
-            size,
-            full,
-            scale,
-            pieces,
-            labels,
-            label_keys,
-            hovers,
-            lit,
-            #[cfg(test)]
-            ops: self.ops,
-        })
+        Some(Scene { title: None, size, full, scale, pieces, labels, label_keys, hovers, lit, svg_ops })
     }
 }
 
@@ -311,9 +315,9 @@ pub(crate) struct Scene {
     pub(crate) hovers: Vec<Spot>,
     /// The hover colour.
     lit: Color,
-    /// What the pieces draw, in the diagram's own points.
-    #[cfg(test)]
-    pub(crate) ops: Vec<Op>,
+    /// What the pieces draw, in the diagram's laid-out points (the group
+    /// transform applies [`Self::scale`]), for [`Self::svg`].
+    pub(crate) svg_ops: Vec<Op>,
 }
 
 impl Scene {
@@ -447,9 +451,9 @@ impl Scene {
 }
 
 /// Points between a diagram's title and its drawing.
-const TITLE_GAP: f32 = 12.0;
+pub(crate) const TITLE_GAP: f32 = 12.0;
 
-fn title_font(paint: &DiagramStyle) -> TextStyle {
+pub(crate) fn title_font(paint: &DiagramStyle) -> TextStyle {
     TextStyle { size: paint.font.size + 1.0, line_height: paint.font.line_height + 2.0, weight: 600.0, ..paint.font }
 }
 

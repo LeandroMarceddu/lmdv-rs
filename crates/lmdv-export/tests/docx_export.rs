@@ -557,6 +557,35 @@ fn svg_pictures_are_rasterized_into_the_package() {
     assert!(body.contains("<wp:extent cx=\"914400\" cy=\"457200\"/>"), "{body}");
 }
 
+/// An AVIF picture, decoded by the exporter's pure-Rust decoder (OI-183).
+struct AvifAssets;
+
+impl AssetResolver for AvifAssets {
+    fn image(&self, _src: &str, _alt: &str) -> Option<ExportedAsset> {
+        let bytes = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/avif-test.avif"))
+            .expect("the AVIF fixture");
+        Some(ExportedAsset::new("image/avif", bytes))
+    }
+
+    fn diagram(&self, _source: &str) -> Option<ExportedAsset> {
+        None
+    }
+}
+
+#[test]
+fn an_avif_picture_is_decoded_and_embedded_as_png() {
+    let parts = unzip(&docx("![A blue field](./art.avif)\n", &ExportOptions::default(), &AvifAssets));
+    let media: Vec<&String> = parts.keys().filter(|name| name.starts_with("word/media/")).collect();
+    assert_eq!(media, vec!["word/media/image1.png"], "AVIF becomes a PNG media part");
+    let bytes = &parts[media[0]];
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "the media part is a PNG");
+    let body = document(&parts);
+    assert!(body.contains("<a:blip "), "the picture is in the body:\n{body}");
+    assert!(body.contains("descr=\"A blue field\""));
+    // The 8×6 picture at its natural size, 96 dpi.
+    assert!(body.contains("<wp:extent cx=\"76200\" cy=\"57150\"/>"), "{body}");
+}
+
 #[test]
 fn the_package_deflates_xml_parts_and_stores_pictures() {
     use zip::CompressionMethod;

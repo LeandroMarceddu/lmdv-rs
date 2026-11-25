@@ -794,16 +794,53 @@ fn escape_closes_the_copy_menu_before_the_preview() {
 }
 
 #[test]
-fn a_diagram_has_no_copy_menu_until_it_can_be_rasterized() {
+fn a_diagram_gets_the_copy_and_save_menu_and_png_rasters() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
-    state.open_synthetic("Diagram", "```mermaid\nflowchart LR\n    A --> B\n```\n");
+    state.open_synthetic("Diagram", "```mermaid\nflowchart LR\n    A[Source] --> B[Done]\n```\n");
     let media = diagram_ref(&state);
     open_active(&mut state, media);
+    let board = rune::clipboard::memory();
     let mut runtime = runtime(state);
+    runtime.use_clipboard(&board);
     runtime.frame(0.0);
-    assert!(runtime.find(LIGHTBOX_ZOOM_LEVEL).is_some(), "the preview itself is there");
-    assert!(runtime.find(LIGHTBOX_COPY).is_none(), "no empty copy menu for a diagram (OI-140)");
+    assert!(runtime.find(LIGHTBOX_COPY).is_some(), "a diagram now has the copy/save menu (OI-140/OI-181)");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !runtime.state.lightbox().is_some_and(|lightbox| lightbox.png_ready()) {
+        assert!(Instant::now() < deadline, "the diagram rasters never finished");
+        std::thread::sleep(Duration::from_millis(5));
+        runtime.frame(0.0);
+    }
+    let lightbox = runtime.state.lightbox().expect("the preview stays open");
+    let two = lightbox.png_bytes().expect("the 2× raster");
+    let four = lightbox.png_bytes_at(4).expect("the 4× raster");
+    assert!(two.starts_with(b"\x89PNG\r\n\x1a\n"), "the 2× raster is a PNG");
+    assert!(four.starts_with(b"\x89PNG\r\n\x1a\n"), "the 4× raster is a PNG");
+    let two_width = u32::from_be_bytes(two[16..20].try_into().unwrap());
+    let four_width = u32::from_be_bytes(four[16..20].try_into().unwrap());
+    assert!(two_width > 0, "the raster has pixels");
+    assert!(four_width > two_width, "4× is wider than 2×: {four_width} vs {two_width}");
+    assert!(lightbox.png_unavailable().is_none());
+
+    // Copy as large image puts the 4× PNG on the clipboard.
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| state.copy_lightbox_png(4, tx));
+    let copied = board.content().expect("clipboard content");
+    let image = copied.image().expect("a diagram image on the clipboard");
+    assert_eq!(image.size().0, four_width, "the clipboard carries the 4× raster");
+    assert_eq!(runtime.state.ui.notice.as_ref().expect("a notice").text, "Image copied to the clipboard.");
+
+    // Save as PNG writes the 2× raster atomically.
+    let path = temp.path().join("diagram.png");
+    runtime.update(|state: &mut WindowState, _: &mut Tx| state.start_lightbox_save(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !runtime.state.poll_lightbox() {
+        assert!(Instant::now() < deadline, "the diagram save never finished");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let written = std::fs::read(&path).expect("the saved diagram");
+    assert!(written.starts_with(b"\x89PNG\r\n\x1a\n"), "the saved diagram is a PNG");
+    assert!(written.len() > 500, "the saved diagram has real ink: {} bytes", written.len());
 }
 
 #[test]

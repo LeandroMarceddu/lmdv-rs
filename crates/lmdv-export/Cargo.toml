@@ -16,6 +16,10 @@ base64 = "0.22"
 # and already compiled for the PDF pipeline through krilla-svg.
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# OI-183: AVIF pictures decode through this crate's vendored pure-Rust rav1d
+# (MIT/BSD-2), so the exporter gains no C or NASM build step and the DOCX/PDF
+# writers can embed the picture instead of falling back to its alt text.
+imgalifier-avif = { version = "0.1", default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 percent-encoding = "2"
 # OI-076: rasterize SVG pictures for DOCX, which has no SVG `a:blip` without a
 # PNG fallback. Already compiled for the PDF pipeline through krilla-svg; text

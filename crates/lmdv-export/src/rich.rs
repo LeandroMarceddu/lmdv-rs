@@ -16,8 +16,8 @@
 //! selection copy (X-03) keeps the same markup and styling.
 //!
 //! Math is the embedded 2× PNG with the TeX in `alt`; native MathML/OMML is
-//! still open (OI-066). Mermaid falls back to its source when the resolver has
-//! no raster (OI-106).
+//! still open (OI-066). Mermaid is an embedded SVG image when the app's resolver
+//! provides one, and falls back to its source otherwise (OI-106).
 
 use std::ops::Range;
 use std::path::{Path, PathBuf};

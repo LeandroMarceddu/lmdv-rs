@@ -36,6 +36,18 @@ impl DrawingModel {
     /// [`Self::labels`]. A hover copy uses the same marks as the label underneath it.
     pub fn draw(&self, marks: impl Fn(&str) -> Vec<TextHighlight>) -> Drawing {
         let (el, size) = self.scene.drawing(&self.style, Some(&marks));
-        Drawing { el, size, surface: self.style.surface, surface_border: self.style.surface_border }
+        Drawing {
+            el,
+            size,
+            surface: self.style.surface,
+            surface_border: self.style.surface_border,
+            scene: self.scene.clone(),
+            style: self.style,
+        }
+    }
+
+    /// The prepared layout as a static SVG document, without hover highlights.
+    pub fn to_svg(&self) -> String {
+        self.scene.svg(&self.style)
     }
 }

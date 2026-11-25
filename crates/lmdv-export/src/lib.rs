@@ -58,15 +58,19 @@ pub use pdf::{PdfFont, PdfOptions, PdfPage, export_pdf};
 pub use rich::{RichOptions, export_rich_fragment, export_rich_html};
 pub use tsv::table_tsv;
 
-/// Re-encodes a raster picture (PNG, JPEG, GIF, WebP or BMP) as PNG.
+/// Re-encodes a raster picture (PNG, JPEG, GIF, WebP, BMP or AVIF) as PNG.
 ///
 /// The preview's copy/save actions need PNG bytes; the app has no image
 /// decoder of its own, and this crate already reads pictures for the exporters.
-/// An SVG goes through [`raster::svg_to_png`] instead. Call it on a worker.
-/// `None` when the bytes do not decode.
+/// An SVG goes through [`raster::svg_to_png`] instead. AVIF uses the pure-Rust
+/// decoder in [`raster::avif_to_png`] (OI-183). Call it on a worker. `None`
+/// when the bytes do not decode.
 pub fn raster_to_png(bytes: &[u8]) -> Option<Vec<u8>> {
     use image::ImageEncoder;
-    let image = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let image = match image::load_from_memory(bytes) {
+        Ok(image) => image.to_rgba8(),
+        Err(_) => return raster::avif_to_png(bytes).map(|(png, _)| png),
+    };
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
         .write_image(image.as_raw(), image.width(), image.height(), image::ExtendedColorType::Rgba8)

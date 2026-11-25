@@ -1,4 +1,4 @@
-//! SVG rasterization for the app and the DOCX writer.
+//! SVG and AVIF decoding for the app and the DOCX/PDF writers.
 //!
 //! Word can embed an SVG picture, but the plain DrawingML `a:blip` a `.docx`
 //! carries needs a raster fallback that every Word version understands. The
@@ -7,6 +7,11 @@
 //! through [`svg_to_png`], which renders an SVG at a requested scale with
 //! `resvg` over `usvg` — already compiled for the PDF pipeline (typst-pdf uses
 //! `krilla-svg`, which uses both).
+//!
+//! [`avif_to_png`] decodes AVIF still pictures with the pure-Rust decoder
+//! `imgalifier-avif` (a vendored rav1d) and re-encodes them as PNG: `image`
+//! only encodes AVIF, and the DOCX/PDF writers must embed a picture every
+//! reader understands (OI-183). No C library, NASM or network is involved.
 //!
 //! The raster is sized to the SVG's intrinsic size times the scale, capped at
 //! [`MAX_EDGE`] pixels per edge, and drawn on an opaque white background: a
@@ -44,6 +49,32 @@ pub fn svg_to_png(svg: &[u8], scale: f32) -> Option<Vec<u8>> {
 /// reserve a box (the DOCX media writer).
 pub fn svg_to_png_sized(svg: &[u8], scale: f32) -> Option<(Vec<u8>, (u32, u32))> {
     render(svg, scale, Some([255, 255, 255, 255]))
+}
+
+/// Decodes an AVIF still picture to an opaque PNG and returns its pixel size
+/// (OI-183).
+///
+/// The decoder is `imgalifier-avif`'s pure-Rust rav1d port: no C library,
+/// NASM, system font or network is involved. `None` when the bytes are not a
+/// decodable AVIF still image, so the caller keeps its alt-text fallback.
+pub fn avif_to_png(bytes: &[u8]) -> Option<(Vec<u8>, (u32, u32))> {
+    let image = imgalifier_avif::decode_avif(bytes).ok()?;
+    let (width, height) = (image.width, image.height);
+    let expected = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+    if width == 0 || height == 0 || image.data.len() != expected {
+        return None;
+    }
+    Some((encode_rgba_png(width, height, &image.data)?, (width, height)))
+}
+
+/// Encodes 8-bit RGBA pixels as a PNG.
+fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(png)
 }
 
 /// Renders `svg` at `scale`, optionally filling the pixmap first.
@@ -169,5 +200,33 @@ mod tests {
         let blank = br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"></svg>"##;
         let without = svg_to_png(blank, 1.0).expect("a raster");
         assert_eq!(with_image, without, "the local file must not be read");
+    }
+
+    #[test]
+    fn an_avif_fixture_decodes_to_a_png_of_its_size() {
+        // Generated for this test with avifenc: an 8×6 blue field with a light
+        // rectangle. Decoding it needs no system library (OI-183).
+        let avif = include_bytes!("../tests/fixtures/avif-test.avif");
+        let (png, (width, height)) = avif_to_png(avif).expect("the AVIF fixture decodes");
+        assert_eq!((width, height), (8, 6));
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+        let image = decode(&png);
+        assert_eq!(image.dimensions(), (8, 6));
+        assert!(
+            image.pixels().any(|pixel| pixel.0 != [255, 255, 255, 255]),
+            "the raster contains the picture's ink, not only white"
+        );
+        let converted = crate::raster_to_png(avif).expect("the copy/save conversion decodes AVIF");
+        assert!(converted.starts_with(b"\x89PNG\r\n\x1a\n"), "the converted copy is a PNG");
+    }
+
+    #[test]
+    fn undecodable_avif_bytes_fall_back_to_none() {
+        assert!(avif_to_png(b"not an avif").is_none(), "garbage");
+        assert!(avif_to_png(b"").is_none(), "empty");
+        // A PNG is a picture, but not an AVIF one.
+        let png = br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"></svg>"##;
+        let png = svg_to_png(png, 1.0).expect("a raster");
+        assert!(avif_to_png(&png).is_none());
     }
 }

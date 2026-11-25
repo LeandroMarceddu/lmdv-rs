@@ -30,7 +30,7 @@ use lmdv_core::{DocumentId, DocumentKey, TabId};
 use lmdv_io::Launch;
 use lmdv_md::MdDoc;
 use lmdv_render::{DetailsState, LinkWire, heading_key};
-use rune::{Mods, PointerButton, Tx};
+use rune::{Mods, PointerButton, PointerPress, Tx};
 
 use crate::commands::MARKDOWN_EXTENSIONS;
 use crate::window::{NOTICE_SECONDS, NoticeAction, NoticeKind, TabView, WindowState};
@@ -70,6 +70,16 @@ pub enum LinkTarget {
     Ignored,
     /// A destination the app refuses, with the reason to show.
     Refused(String),
+}
+
+/// A link's context menu (OI-195): the destination as written and the point
+/// the secondary press landed on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkMenu {
+    /// The rendered destination (`#anchor`, `media:…`, a relative path, a URL).
+    pub dest: String,
+    /// The menu's anchor, in window points.
+    pub point: PointerPress,
 }
 
 /// How a link click places the document it opens (T-12/L-11).
@@ -139,6 +149,30 @@ impl WindowState {
     /// The one link wire this window's article uses.
     pub(crate) fn link_wire(&self) -> LinkWire {
         self.cached_link_wire().clone()
+    }
+
+    /// The editor preview's link wire: links open, but a secondary press is the
+    /// block menu's (E-04), not the reader's link menu (OI-195).
+    pub(crate) fn preview_link_wire(&self) -> LinkWire {
+        self.cached_preview_link_wire().clone()
+    }
+
+    /// Opens the link's context menu at `point` (OI-195).
+    pub(crate) fn show_link_menu(&mut self, dest: &str, point: PointerPress) {
+        // One context menu at a time; the block menu's state lives in
+        // `preview_nav`, so closing it here keeps the two from stacking.
+        self.ui.block_menu = None;
+        self.ui.link_menu = Some(LinkMenu { dest: dest.to_owned(), point });
+    }
+
+    /// The open link context menu, if any.
+    pub fn link_menu(&self) -> Option<&LinkMenu> {
+        self.ui.link_menu.as_ref()
+    }
+
+    /// Closes the link context menu.
+    pub fn close_link_menu(&mut self) {
+        self.ui.link_menu = None;
     }
 
     /// Classifies a rendered link destination for the active document.
@@ -1442,5 +1476,152 @@ mod tests {
         assert!(is_markdown(Path::new("a.MARKDOWN")));
         assert!(!is_markdown(Path::new("a.png")));
         assert!(!is_markdown(Path::new("a")));
+    }
+
+    // ---- R-28/OI-195: middle click and the link context menu ----------------
+
+    /// A page whose second block is one link, fully covering the line.
+    fn linked_page(temp: &TempDir) -> PathBuf {
+        let root = temp.path().join("linked");
+        std::fs::create_dir_all(&root).unwrap();
+        let next = root.join("next.markdown");
+        std::fs::write(&next, "# Next\n").unwrap();
+        let index = root.join("index.md");
+        std::fs::write(&index, "# Links\n\n[next](next.markdown)\n").unwrap();
+        index
+    }
+
+    fn link_runtime(temp: &TempDir) -> (rune::Runtime<WindowState>, (f32, f32), PathBuf) {
+        let index = linked_page(temp);
+        let mut state = window(temp);
+        open_file(&mut state, index);
+        poll_until(&mut state, "the linked page's parse", |state| {
+            state.active_tab().is_some_and(|tab| tab.view.reader.is_some())
+        });
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let link = runtime.elements().into_iter().find(|element| element.role == "link").expect("the rendered link");
+        let at = (link.rect[0] + link.rect[2] * 0.5, link.rect[1] + link.rect[3] * 0.5);
+        (runtime, at, temp.path().join("linked/next.markdown"))
+    }
+
+    #[test]
+    fn a_middle_click_on_a_link_opens_it_behind_without_panning() {
+        let temp = TempDir::new().unwrap();
+        let (mut runtime, (x, y), next) = link_runtime(&temp);
+        let front = runtime.state.active_tab().map(|tab| tab.id);
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.button_down(x, y, PointerButton::Middle);
+        runtime.frame(0.0);
+        runtime.button_up(x, y, PointerButton::Middle);
+        runtime.frame(0.0);
+        poll_until(&mut runtime.state, "the background link tab", |state| shows(state, &next));
+        assert_eq!(runtime.state.active_tab().map(|tab| tab.id), front, "a middle click opens behind");
+        assert_eq!(runtime.state.reading.scroll.get().offset, 0.0, "a middle click is not a pan");
+    }
+
+    #[test]
+    fn a_secondary_click_on_a_link_opens_the_four_item_menu() {
+        let temp = TempDir::new().unwrap();
+        let (mut runtime, (x, y), _) = link_runtime(&temp);
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.button_down(x, y, PointerButton::Secondary);
+        runtime.frame(0.0);
+        runtime.button_up(x, y, PointerButton::Secondary);
+        runtime.frame(0.0);
+
+        let menu = runtime.state.link_menu().expect("the link menu");
+        assert_eq!(menu.dest, "next.markdown", "the menu carries the destination as written");
+        let elements = runtime.elements();
+        assert!(elements.iter().any(|element| element.key.as_deref() == Some("link-menu-menu")), "the menu is drawn");
+        let words: Vec<String> = elements.iter().filter_map(|element| element.label.clone()).collect();
+        for label in ["Open link", "Open in a new tab", "Open in a new window", "Copy link address"] {
+            assert!(words.iter().any(|word| word == label), "OI-195's {label:?} row: {words:?}");
+        }
+
+        runtime.state.close_link_menu();
+        assert!(runtime.state.link_menu().is_none());
+    }
+
+    #[test]
+    fn the_menus_open_in_a_new_tab_row_opens_the_link_in_front() {
+        let temp = TempDir::new().unwrap();
+        let (mut runtime, (x, y), next) = link_runtime(&temp);
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.button_down(x, y, PointerButton::Secondary);
+        runtime.frame(0.0);
+        runtime.button_up(x, y, PointerButton::Secondary);
+        runtime.frame(0.0);
+        let item = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("link-menu-item1"))
+            .expect("Open in a new tab");
+        let (ix, iy) = (item.rect[0] + item.rect[2] * 0.5, item.rect[1] + item.rect[3] * 0.5);
+        runtime.pointer_move(ix, iy);
+        runtime.frame(0.0);
+        runtime.pointer_down(ix, iy);
+        runtime.pointer_up(ix, iy);
+        runtime.frame(0.0);
+        assert!(runtime.state.link_menu().is_none(), "choosing closes the menu");
+        poll_until(&mut runtime.state, "the menu's foreground tab", |state| shows(state, &next));
+        let active = runtime.state.active_document_id().expect("a document in front");
+        let active_doc = runtime.state.shared().docs().get(active).expect("the document");
+        assert_eq!(
+            active_doc.key.borrow().path().map(std::path::Path::to_path_buf),
+            Some(next),
+            "Open in a new tab brings the target forward"
+        );
+    }
+
+    #[test]
+    fn the_editor_preview_keeps_the_block_menu_on_a_secondary_press() {
+        let temp = TempDir::new().unwrap();
+        let index = linked_page(&temp);
+        let mut state = window(&temp);
+        open_file(&mut state, index);
+        poll_until(&mut state, "the linked page's parse", |state| {
+            state.active_tab().is_some_and(|tab| tab.view.reader.is_some())
+        });
+        let mut tx = Tx::default();
+        assert!(state.enter_editor(None, &mut tx));
+        let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let link = runtime.elements().into_iter().find(|element| element.role == "link").expect("the preview's link");
+        let (x, y) = (link.rect[0] + link.rect[2] * 0.5, link.rect[1] + link.rect[3] * 0.5);
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.button_down(x, y, PointerButton::Secondary);
+        runtime.frame(0.0);
+        runtime.button_up(x, y, PointerButton::Secondary);
+        runtime.frame(0.0);
+        assert!(runtime.state.link_menu().is_none(), "OI-195's menu is the reader's");
+        assert!(runtime.state.block_menu().is_some(), "E-04 keeps the edit-from-here menu");
+    }
+
+    #[test]
+    fn opening_the_link_menu_replaces_the_block_menu() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        state.open_synthetic("One", "# One\n\nText\n");
+        state.show_block_menu(
+            &lmdv_render::BlockRef {
+                key: "b1".to_owned(),
+                line: 1,
+                end_line: 1,
+                code: false,
+                text: "Text".to_owned(),
+                texts: Vec::new(),
+            },
+            PointerPress { x: 10.0, y: 10.0 },
+        );
+        state.show_link_menu("next.md", PointerPress { x: 30.0, y: 30.0 });
+        assert!(state.block_menu().is_none(), "a link's menu closes the block's");
+        assert!(state.link_menu().is_some());
     }
 }

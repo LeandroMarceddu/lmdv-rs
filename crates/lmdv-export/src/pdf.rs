@@ -318,9 +318,9 @@ struct PreparedAsset {
 
 /// Assigns a virtual path and optional transcoded bytes to every asset.
 ///
-/// Typst reads PNG, JPEG, GIF, WebP and SVG. BMP is decoded and re-encoded as
-/// PNG so a valid picture is not silently lost. Anything else falls back to
-/// text where it is referenced.
+/// Typst reads PNG, JPEG, GIF, WebP and SVG. BMP and AVIF are decoded and
+/// re-encoded as PNG so a valid picture is not silently lost. Anything else
+/// falls back to text where it is referenced.
 fn prepare_assets(doc: &ExportDoc) -> Result<Vec<PreparedAsset>, ExportError> {
     let mut prepared = Vec::with_capacity(doc.assets.len());
     for (index, asset) in doc.assets.iter().enumerate() {
@@ -329,7 +329,15 @@ fn prepare_assets(doc: &ExportDoc) -> Result<Vec<PreparedAsset>, ExportError> {
             prepared.push(PreparedAsset { asset: asset.id, path: String::new(), file: None, size: None });
             continue;
         };
-        let (bytes, size) = if asset.mime == "image/bmp" {
+        let (bytes, size) = if asset.mime == "image/avif" {
+            // A picture the decoder rejects keeps the alt-text fallback; the
+            // rest of the document still exports (OI-183).
+            let Some((png, size)) = crate::raster::avif_to_png(&asset.bytes) else {
+                prepared.push(PreparedAsset { asset: asset.id, path: String::new(), file: None, size: None });
+                continue;
+            };
+            (png, Some(size))
+        } else if asset.mime == "image/bmp" {
             let decoded = image::load_from_memory_with_format(&asset.bytes, image::ImageFormat::Bmp)
                 .map_err(|error| ExportError::Pdf(format!("could not decode a BMP picture: {error}")))?;
             let size = (decoded.width(), decoded.height());
@@ -370,6 +378,7 @@ fn asset_extension(asset: &ExportAsset) -> Option<&'static str> {
         "image/webp" => Some("webp"),
         "image/svg+xml" => Some("svg"),
         "image/bmp" => Some("png"),
+        "image/avif" => Some("png"),
         _ => None,
     }
 }
@@ -2627,6 +2636,44 @@ mod tests {
     fn unknown_raw_tags_still_degrade_to_text() {
         let source = source("<custom-tag>Fallback paragraph</custom-tag>\n");
         assert!(source.contains("text(\"Fallback paragraph\")"), "an unknown tag dropped its text:\n{source}");
+    }
+
+    #[test]
+    fn an_avif_asset_is_transcoded_to_png() {
+        let doc = ExportDoc {
+            assets: vec![ExportAsset {
+                id: AssetId(0),
+                mime: "image/avif",
+                bytes: include_bytes!("../tests/fixtures/avif-test.avif").to_vec(),
+                width: None,
+                height: None,
+                baseline: None,
+            }],
+            ..ExportDoc::default()
+        };
+        let prepared = prepare_assets(&doc).expect("the picture is prepared");
+        assert_eq!(prepared.len(), 1);
+        assert!(prepared[0].path.ends_with(".png"), "Typst gets a PNG path: {}", prepared[0].path);
+        assert_eq!(prepared[0].size, Some((8, 6)), "the decoder reports the AVIF's pixel size");
+        let (_, bytes) = prepared[0].file.as_ref().expect("the transcoded file");
+        assert!(bytes.as_slice().starts_with(b"\x89PNG\r\n\x1a\n"), "not a PNG");
+    }
+
+    #[test]
+    fn an_undecodable_avif_falls_back_to_alt_text() {
+        let doc = ExportDoc {
+            assets: vec![ExportAsset {
+                id: AssetId(0),
+                mime: "image/avif",
+                bytes: b"not an avif".to_vec(),
+                width: None,
+                height: None,
+                baseline: None,
+            }],
+            ..ExportDoc::default()
+        };
+        let prepared = prepare_assets(&doc).expect("the document still prepares");
+        assert!(prepared[0].file.is_none(), "the rejected picture has no file; its reference keeps alt text");
     }
 
     fn without_breaks(text: &str) -> String {

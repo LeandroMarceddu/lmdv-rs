@@ -14,7 +14,8 @@
 //! * [`store`] — versioned JSON with one coalescing writer thread.
 //! * [`watch`] — debounced document and folder-tree watchers.
 //! * [`tree`] — Markdown folder listings and folder-wide search.
-//! * [`instance`] — the `flock` + Unix-socket single-instance protocol.
+//! * [`instance`] — the single-instance protocol: a `flock` + Unix socket on
+//!   Unix, a named mutex + named pipe on Windows.
 //! * [`assoc`] — making lmdv the default Markdown handler: the Windows
 //!   registry registration with the Default apps hand-off, and the Linux XDG
 //!   desktop entry plus `mimeapps.list` defaults.
@@ -42,10 +43,56 @@ pub use read::{LARGE_DOC_BYTES, LoadedFile, MAX_DOC_BYTES, ReadError, is_large_d
 pub use tree::{SearchHit, TreeEntry, TreeError, TreeListing, is_markdown_name, list_tree, search_tree};
 pub use write::{SaveOutcome, WriteError, save_document};
 
-/// Opens `path` with the desktop's handler (`xdg-open`). Only user-initiated
-/// actions should call this, and only from a worker: it spawns a process.
+/// Opens `path` with the desktop's handler.
+///
+/// Linux uses `xdg-open`; Windows hands the path to `ShellExecuteW` with the
+/// `open` verb. The shell receives the path as its own argument, never as a
+/// command line, so a file name cannot introduce a command (no `cmd /c start`
+/// quoting hazard and no console window). Only user-initiated actions should
+/// call this, and only from a worker: it spawns a process or asks the shell to
+/// open a document.
+#[cfg(not(windows))]
 pub fn open_external(path: &std::path::Path) -> std::io::Result<()> {
     std::process::Command::new("xdg-open").arg(path).spawn().map(|_| ())
+}
+
+/// Opens `path` with its registered handler (see the Unix form).
+///
+/// `ShellExecuteW` returns a value above 32 on success; anything else is the
+/// shell's error code, reported as an `io::Error`.
+#[cfg(windows)]
+pub fn open_external(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    if path.as_os_str().is_empty() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "there is no path to open"));
+    }
+    let verb: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    let file: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: both strings are NUL-terminated and live across the call. The
+    // path is the file operand, not a command line, so it is never re-parsed.
+    //
+    // The shell may run in-proc extensions, so this worker thread gets an STA
+    // for the call. `CoInitializeEx` >= 0 includes S_FALSE (already an STA),
+    // whose reference this call still owns; a changed-mode error performed no
+    // initialization and is left alone.
+    let initialized = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED as u32) } >= 0;
+    let result = unsafe {
+        ShellExecuteW(ptr::null_mut(), verb.as_ptr(), file.as_ptr(), ptr::null(), ptr::null(), SW_SHOWNORMAL)
+    };
+    if initialized {
+        // SAFETY: balances the successful `CoInitializeEx` above.
+        unsafe { CoUninitialize() };
+    }
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!("the shell could not open the path (code {})", result as isize)))
+    }
 }
 
 /// Removes one file. An already absent file is success.
@@ -145,11 +192,11 @@ pub fn reveal_commands(path: &std::path::Path) -> Vec<RevealCommand> {
     #[cfg(windows)]
     {
         let _ = folder_arg;
-        vec![RevealCommand {
-            program: "explorer".to_owned(),
-            args: vec![format!("/select,{}", target.display()).into()],
-            selects: true,
-        }]
+        // Build the comma form from the raw wide path rather than `display()`,
+        // so a non-Unicode name survives; `Command` quotes the one argument.
+        let mut select = std::ffi::OsString::from("/select,");
+        select.push(target.as_os_str());
+        vec![RevealCommand { program: "explorer".to_owned(), args: vec![select], selects: true }]
     }
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     {

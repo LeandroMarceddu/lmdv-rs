@@ -248,10 +248,10 @@ fn open_confirmation(active: Option<&Path>) -> Confirmation {
     if shell_open(SETTINGS_PAGE) {
         return Confirmation::SettingsPage;
     }
-    if let Some(path) = active {
-        if open_with_dialog(path).is_ok() {
-            return Confirmation::OpenWithDialog;
-        }
+    if let Some(path) = active
+        && open_with_dialog(path).is_ok()
+    {
+        return Confirmation::OpenWithDialog;
     }
     Confirmation::Unavailable
 }

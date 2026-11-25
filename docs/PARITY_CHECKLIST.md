@@ -40,24 +40,24 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
-| Reading and viewer | 30 | 26 | 3 | 0 | 1 | 0 |
-| Tabs and windows | 35 | 23 | 8 | 2 | 2 | 0 |
+| Reading and viewer | 30 | 27 | 3 | 0 | 0 | 0 |
+| Tabs and windows | 35 | 25 | 8 | 2 | 0 | 0 |
 | Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
-| Full-window preview | 18 | 15 | 0 | 3 | 0 | 0 |
-| Share, print and export | 16 | 10 | 2 | 4 | 0 | 0 |
+| Full-window preview | 18 | 17 | 0 | 1 | 0 | 0 |
+| Share, print and export | 16 | 14 | 2 | 0 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
 | Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
 | Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
 | Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
-| Window chrome | 10 | 2 | 3 | 1 | 0 | 4 |
-| Drag and drop | 8 | 3 | 2 | 2 | 1 | 0 |
+| Window chrome | 10 | 3 | 3 | 0 | 0 | 4 |
+| Drag and drop | 8 | 4 | 2 | 2 | 0 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
-| Accessibility | 15 | 12 | 0 | 3 | 0 | 0 |
-| Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
+| Accessibility | 15 | 13 | 0 | 2 | 0 | 0 |
+| Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **243** | **54** | **23** | **4** | **18** |
+| **All** | **342** | **257** | **54** | **13** | **0** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -88,7 +88,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **R-25** Ctrl+A scope (P1 · F-BASIC) — done
 - [x] **R-26** Selection copy (P1 · F-SELECT) — done
 - [x] **R-27** Double-click while reading (P0 · F-BASIC) — done
-- [ ] **R-28** Drag to scroll (P1 · F-LONG) — missing
+- [x] **R-28** Drag to scroll (P1 · F-LONG) — done
 - [x] **R-29** Empty/error state persistence (P1 · F-ERRORS) — done
 - [x] **R-30** Reading settings isolation (P0 · F-PREFS) — substitute
 
@@ -108,7 +108,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-12** Click-open placement (P0 · F-TABS) — done
 - [x] **T-13** Start-page replacement (P0 · F-BASIC) — done
 - [x] **T-14** Background insertion order (P1 · F-TABS) — done
-- [ ] **T-15** Background tab pulse (P2 · F-TABS) — missing
+- [x] **T-15** Background tab pulse (P2 · F-TABS) — done
 - [x] **T-16** Tab hover card (P1 · F-TABS) — done
 - [x] **T-17** Overflow tab list (P1 · F-TABS) — substitute
 - [x] **T-18** Tab context menu (P1 · F-TABS) — done
@@ -127,7 +127,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-31** New window (P1 · F-WINDOW) — done
 - [x] **T-32** Multi-select open (P1 · F-BASIC) — substitute
 - [x] **T-33** Tabs across windows (P0 · F-WINDOW) — done
-- [ ] **T-34** Tab overflow and narrow toolbar (P1 · F-NARROW) — missing
+- [x] **T-34** Tab overflow and narrow toolbar (P1 · F-NARROW) — done
 - [x] **T-35** Reading time/ad ratio in tab (P2 · F-TABS) — done
 
 ## E — Editor (40)
@@ -219,8 +219,8 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **V-05** Drag pan (P1 · F-PREVIEW) — done
 - [x] **V-06** Fit/Width/100% semantics (P1 · F-PREVIEW) — done
 - [x] **V-07** Preview caption/accessibility (P1 · F-A11Y) — done
-- [~] **V-08** Preview copy menu (P1 · F-PREVIEW) — partial
-- [~] **V-09** PNG rasterization (P1 · F-PREVIEW) — partial
+- [x] **V-08** Preview copy menu (P1 · F-PREVIEW) — done
+- [x] **V-09** PNG rasterization (P1 · F-PREVIEW) — done
 - [x] **V-10** Preview close semantics (P1 · F-PREVIEW) — done
 - [x] **V-11** Table preview layout (P1 · F-TABLE) — done
 - [x] **V-12** Table zoom (P1 · F-TABLE) — done
@@ -234,16 +234,16 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 ## X — Share, print and export (16)
 
 - [x] **X-01** Share menu (P0 · F-EXPORT) — done
-- [~] **X-02** Copy whole document as rich text (P0 · F-EXPORT) — partial
+- [x] **X-02** Copy whole document as rich text (P0 · F-EXPORT) — done
 - [x] **X-03** Copy selection as rich text (P1 · F-SELECT) — done
 - [x] **X-04** Print (P0 · F-EXPORT) — substitute
 - [x] **X-05** Save as PDF (P0 · F-EXPORT) — done
 - [x] **X-06** Page break per H1 (P1 · F-EXPORT) — done
-- [~] **X-07** HTML export (P1 · F-EXPORT) — partial
-- [~] **X-08** DOCX export (P1 · F-EXPORT) — partial
+- [x] **X-07** HTML export (P1 · F-EXPORT) — done
+- [x] **X-08** DOCX export (P1 · F-EXPORT) — done
 - [x] **X-09** Export naming (P1 · F-EXPORT) — done
 - [x] **X-10** Export ignores reader settings (P0 · F-EXPORT) — done
-- [~] **X-11** Print theme swap (P1 · F-EXPORT) — partial
+- [x] **X-11** Print theme swap (P1 · F-EXPORT) — done
 - [x] **X-12** Wide-table print fitting (P1 · F-EXPORT) — done
 - [x] **X-13** Feedback (P2 · F-EXPORT) — done
 - [x] **X-14** Print header text (P1 · F-EXPORT) — done
@@ -368,7 +368,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **W-07** Always on top (P1 · Pin keeps window above others; restart unpinned.) — done
 - [x] **W-08** Native chrome hidden behind preview (P2 · Open preview over caption: no invisible close trap.) — n/a
 - [x] **W-09** Window title (P1 · Dirty title begins bullet.) — done
-- [~] **W-10** Toolbar layout (P1 · Layout matches fixture screenshot.) — partial
+- [x] **W-10** Toolbar layout (P1 · Layout matches fixture screenshot.) — done
 
 ## D — Drag and drop (8)
 
@@ -377,7 +377,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **D-03** Image drop in editor (P1 · Drop PNG while editing inserts image.) — done
 - [~] **D-04** Tab drag (P0 · Reorder and tear-off.) — partial
 - [x] **D-05** Cross-window ghost (P1 · Ghost follows pointer over other window.) — substitute
-- [ ] **D-06** Drag-to-scroll (P1 · Middle-drag scrolls.) — missing
+- [x] **D-06** Drag-to-scroll (P1 · Middle-drag scrolls.) — done
 - [x] **D-07** Window drag by sole tab (P2 · Sole tab drag moves window.) — substitute
 - [~] **D-08** Drag cancel (P1 · Esc mid-drag restores order.) — partial
 
@@ -399,7 +399,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 ## A — Accessibility (15)
 
-- [~] **A-01** Contrast (P1 · Contrast checker passes 4.5:1 body / 3:1 large.) — partial
+- [x] **A-01** Contrast (P1 · Contrast checker passes 4.5:1 body / 3:1 large.) — done
 - [x] **A-02** Visible focus (P0 · Tab through UI: every stop visible.) — done
 - [x] **A-03** Names from tooltips (P0 · Screen reader says “Save, Control+S”.) — done
 - [x] **A-04** Toolbar and dialogs (P1 · Every control has accessible name.) — done
@@ -423,8 +423,8 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **I-04** Reload carries tabs (P1 · Switch language dirty: tab/edits survive.) — substitute
 - [x] **I-05** WebView2 language mirror (P2 · Change language, restart: spellcheck dictionary changes.) — n/a
 - [x] **I-06** Date/number formatting (P1 · Italian: “1.234”; English: “1,234”.) — done
-- [~] **I-07** Key names localized (P1 · German shows “Strg+Umschalt+E”.) — partial
-- [~] **I-08** English command names as keywords (P1 · Italian UI: typing “print” finds “Stampa”.) — partial
+- [x] **I-07** Key names localized (P1 · German shows “Strg+Umschalt+E”.) — done
+- [x] **I-08** English command names as keywords (P1 · Italian UI: typing “print” finds “Stampa”.) — done
 - [x] **I-09** Help and export language (P1 · German help and `lang="de"` export.) — done
 - [~] **I-10** Localized dialogs and menus (P0 · German close prompt says “Speichern/Nicht speichern/Abbrechen”.) — partial
 - [x] **I-11** Seven locale artifacts (P2 · Each artifact exists and is non-empty.) — done

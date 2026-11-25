@@ -37,6 +37,13 @@ pub const PREVIEW_MAX_BYTES: usize = 256 * 1024;
 pub const DROP_CARD_KEY: &str = "drop-card";
 /// The drop card's centered layer (D-01).
 pub const DROP_OVERLAY_KEY: &str = "drop-overlay";
+/// Below this toolbar width the separators disappear (T-34).
+pub const TOOLBAR_SEPARATORS_MIN: f32 = 720.0;
+/// Below this width Open and Help disappear, leaving Ctrl+O and F1 (T-34).
+pub const TOOLBAR_CORE_MIN: f32 = 640.0;
+/// Below this width the strip's `+` disappears, leaving Ctrl+T and the tab
+/// list (T-34).
+pub const TAB_PLUS_MIN: f32 = 560.0;
 
 /// The editor header's line count and block count are catalog plurals.
 const EDITOR_LINES: lmdv_i18n::PluralKey = lmdv_i18n::plural_key("editor.lines");
@@ -81,7 +88,7 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
     let shell = SplitView::new(main)
         .sidebar(&state.left, |state: &mut WindowState| &mut state.left, sidebar)
         .inspector(&state.right, |state: &mut WindowState| &mut state.right, inspector)
-        .toolbar(toolbar(state, share, &kit))
+        .toolbar(toolbar(state, cx, share, &kit))
         .titlebar_inset(cx.titlebar_inset())
         .frame_inset(8.0)
         .toolbar_in_panel()
@@ -112,6 +119,7 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
     help_dialog(state, cx, &kit, &mut layer);
     editor_dialog(state, &kit, &mut layer);
     block_context_menu(state, &kit, &mut layer);
+    link_context_menu(state, &kit, &mut layer);
     tab_context_menu(state, &kit, &mut layer);
     crate::table_ui::preview_overlay(state, cx, &kit, &mut layer);
     crate::lightbox::overlay(state, cx, &kit, &mut layer);
@@ -195,6 +203,42 @@ fn block_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
     let menu = menu
         .item(MenuItem::new(lmdv_i18n::t!("msg.cancel")).on_select(|state: &mut WindowState| state.close_block_menu()))
         .on_close(|state: &mut WindowState| state.close_block_menu());
+    let trigger = menu.build(kit, layer);
+    layer.push(trigger);
+}
+
+/// The link context menu (OI-195): open here, in a new tab, in a new window,
+/// or copy the address exactly as the Markdown wrote it. The placement rules
+/// are the click's own (`LinkPlacement`), so the policy does not fork.
+fn link_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
+    if state.active_tab().is_none_or(|tab| tab.view.mode != Mode::Viewer) {
+        return;
+    }
+    let Some(open) = state.link_menu() else { return };
+    let dest = open.dest.clone();
+    let point = open.point;
+    let trigger = el().key("link-menu-anchor").absolute(0.0, 0.0).size(0.0, 0.0);
+    let mut menu = rune_kit::context_menu("link-menu", trigger, Some(point)).min_width(240.0);
+    for (label, placement) in [
+        (lmdv_i18n::t!("ctx.openLink"), crate::links::LinkPlacement::Current),
+        (lmdv_i18n::t!("ctx.openNewTab"), crate::links::LinkPlacement::ForegroundTab),
+        (lmdv_i18n::t!("ctx.openNewWindow"), crate::links::LinkPlacement::NewWindow),
+    ] {
+        let target = dest.clone();
+        menu = menu.item(MenuItem::new(label).on_select_tx(move |state: &mut WindowState, tx: &mut Tx| {
+            state.close_link_menu();
+            state.open_link_placed(&target, placement, tx);
+        }));
+    }
+    let copied = dest.clone();
+    let menu = menu.separator().item(MenuItem::new(lmdv_i18n::t!("ctx.copyLinkAddress")).on_select_tx(
+        move |state: &mut WindowState, tx: &mut Tx| {
+            state.close_link_menu();
+            tx.copy(copied.clone());
+            state.notice(lmdv_i18n::t!("msg.pathCopied"));
+        },
+    ));
+    let menu = menu.on_close(|state: &mut WindowState| state.close_link_menu());
     let trigger = menu.build(kit, layer);
     layer.push(trigger);
 }
@@ -422,7 +466,7 @@ fn share_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) -> El {
     menu.build(kit, layer)
 }
 
-fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
+fn toolbar(state: &WindowState, cx: &Cx<WindowState>, share: El, kit: &Kit) -> Toolbar {
     let c = &kit.c;
     let title = state.active_tab().map(Tab::full_title).unwrap_or_else(|| "lmdv".to_owned());
     let open = IconButton::new(&icons::FOLDER)
@@ -506,6 +550,35 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
         .build(kit)
         .key(crate::edit_ui::PREVIEW_TOGGLE_KEY);
 
+    // W-10: Save stays visible whenever a document is open, as the original's
+    // toolbar does. In the reader it is a no-op, exactly like Ctrl+S there.
+    let save_label = crate::commands::strip_trailing_keys(lmdv_i18n::t!("toolbar.save")).to_owned();
+    let save = Button::new(save_label.clone())
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Regular)
+        .disabled(state.active_document_id().is_none())
+        .help(save_label)
+        .shortcut("Ctrl+S")
+        .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
+            state.run_command("file.save", tx);
+        })
+        .build(kit)
+        .key("save-toolbar");
+    // W-10's Aa opens the reading settings: Settings with the reader section's
+    // size stepper focused. The visible caps stay "Aa" in every language; the
+    // accessible name is the localized Reading settings.
+    let reading = lmdv_i18n::t!("toolbar.reading").to_owned();
+    let reading_settings = Button::new(reading.clone())
+        .variant(ButtonVariant::GhostMuted)
+        .control_size(ControlSize::Regular)
+        .label_with(|font, ink| text("Aa").font(font).color(ink))
+        .help(reading)
+        .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
+            state.run_command("app.reading-settings", tx);
+        })
+        .build(kit)
+        .key("reading-settings-toolbar");
+
     // W-07: the same per-window fact the palette's `view.pin` check reads.
     let pin = IconButton::new(&icons::PIN)
         .variant(IconButtonVariant::GhostMuted)
@@ -519,17 +592,42 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
         .build(kit)
         .key("pin-toggle");
 
-    let mut bar = Toolbar::new()
-        .leading(text("lmdv").font(TextStyle::new(14.0, 600.0)).color(c.text_muted))
-        .title(title)
-        .trailing(open)
-        .trailing(edit)
-        .trailing(browser)
-        .trailing(outline)
-        .trailing(share)
-        .trailing(pin)
-        .trailing(settings)
-        .trailing(help);
+    // T-34: the toolbar's width comes from the last frame (the first frame
+    // assumes it is wide, and the next corrects it before it is seen).
+    let width = cx
+        .layout_size("toolbar")
+        .map(|size| size[0])
+        .or_else(|| cx.layout_size("window-body").map(|size| size[0]))
+        .unwrap_or(f32::INFINITY);
+    let separators = width >= TOOLBAR_SEPARATORS_MIN;
+    let core = width >= TOOLBAR_CORE_MIN;
+
+    // W-10's order, tabs in their own band (OI-003): tree, Open, Edit, Save,
+    // separator, Share, Aa, Pin, separator, Help, Outline. Settings keeps its
+    // Ctrl+, place after the outline. T-34: the centred document title is a
+    // fixed-width slot pinned across the band (the kit has no flexible middle),
+    // so a narrow window drops it rather than let it run under the controls;
+    // the native frame still names the document (W-09).
+    let mut bar = Toolbar::new().leading(text("lmdv").font(TextStyle::new(14.0, 600.0)).color(c.text_muted));
+    if separators {
+        bar = bar.title(title);
+    }
+    let mut bar = bar.trailing(browser);
+    if core {
+        bar = bar.trailing(open);
+    }
+    bar = bar.trailing(edit).trailing(save);
+    if separators {
+        bar = bar.trailing(toolbar_separator(kit, "toolbar-separator-1"));
+    }
+    bar = bar.trailing(share).trailing(reading_settings).trailing(pin);
+    if separators {
+        bar = bar.trailing(toolbar_separator(kit, "toolbar-separator-2"));
+    }
+    if core {
+        bar = bar.trailing(help);
+    }
+    bar = bar.trailing(outline).trailing(settings);
     if editing {
         bar = bar.trailing(preview);
     }
@@ -537,6 +635,11 @@ fn toolbar(state: &WindowState, share: El, kit: &Kit) -> Toolbar {
         bar = bar.trailing(text(lmdv_i18n::t!("msg.saved")).font(kit.ty.small).color(c.success.fg).key("saved-flash"));
     }
     bar
+}
+
+/// A toolbar group's vertical rule (W-10); T-34 hides both under 720 points.
+fn toolbar_separator(kit: &Kit, key: &'static str) -> El {
+    el().key(key).w(1.0).h(16.0).fill(kit.c.border_muted).a11y_hidden()
 }
 
 fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Vec<El>) -> El {
@@ -613,11 +716,18 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
                     tab.title()
                 }
             };
+            // T-15: a tab opened behind carries the kit's Unread dot and one
+            // ring for a short interval; activating it clears the mark. Unsaved
+            // work is the stronger fact and keeps the Attention dot.
+            let pulse = tab.view.pulse.filter(|_| !is_active && !tab.view.dirty);
             let item = TabItem::new(id.clone(), drawn).closable(true).status(if tab.view.dirty {
                 Some(TabItemStatus::Attention)
+            } else if pulse.is_some() {
+                Some(TabItemStatus::Unread)
             } else {
                 None
             });
+            let item = if let Some(pulse) = pulse { item.pulse(pulse.seq) } else { item };
             // T-03: after a save the tab's leading mark is a check for the
             // flash's 1.4 s; typing takes it away at once (the dirty dot). The
             // kit has no Saved status and keeps the close button in the status
@@ -658,17 +768,26 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
             })
         })
         .collect();
-    let plus = IconButton::new(&icons::PLUS)
-        .variant(IconButtonVariant::GhostMuted)
-        .control_size(ControlSize::Regular)
-        .label(lmdv_i18n::t!("tab.newTabHint"))
-        .help(lmdv_i18n::t!("tab.newTab"))
-        .shortcut("Ctrl+T")
-        .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
-            state.run_command("file.new-tab", tx);
-        })
-        .build(kit)
-        .key("new-tab");
+    // T-34: under 560 points the strip's `+` gives way; Ctrl+T and the all-tabs
+    // list keep working, so a narrow window can still open and reach tabs.
+    let band_width = cx
+        .layout_size("tab-band")
+        .map(|size| size[0])
+        .or_else(|| cx.layout_size("window-body").map(|size| size[0]))
+        .unwrap_or(f32::INFINITY);
+    let plus = (band_width >= TAB_PLUS_MIN).then(|| {
+        IconButton::new(&icons::PLUS)
+            .variant(IconButtonVariant::GhostMuted)
+            .control_size(ControlSize::Regular)
+            .label(lmdv_i18n::t!("tab.newTabHint"))
+            .help(lmdv_i18n::t!("tab.newTab"))
+            .shortcut("Ctrl+T")
+            .on_press_tx(|state: &mut WindowState, tx: &mut Tx| {
+                state.run_command("file.new-tab", tx);
+            })
+            .build(kit)
+            .key("new-tab")
+    });
     // T-17: the ⌄ list follows the last tab once the tabs pass the strip's
     // viewport, measured from the rows the kit laid out last frame. Its menu is
     // part of the trailing action so it anchors under the button; the plus
@@ -677,10 +796,13 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
         cx.layout_size(crate::tab_list::TAB_STRIP_SCROLL_KEY),
         cx.layout_size(crate::tab_list::TAB_STRIP_LIST_KEY),
     );
-    let trailing = if overflow {
-        row().key("tab-strip-actions").gap(6.0).center_y().child(tab_list_button(state, kit, layer)).child(plus)
-    } else {
-        plus
+    let trailing = match (overflow, plus) {
+        (true, Some(plus)) => {
+            row().key("tab-strip-actions").gap(6.0).center_y().child(tab_list_button(state, kit, layer)).child(plus)
+        }
+        (true, None) => tab_list_button(state, kit, layer),
+        (false, Some(plus)) => plus,
+        (false, None) => el().size(0.0, 0.0).a11y_hidden(),
     };
 
     // T-01/T-19: the measured strip width lets the kit size tabs from their
@@ -2230,17 +2352,29 @@ fn reader_article(
     } else {
         0.0
     };
+    // D-06/R-28: the empty margin is outside the column's text band, so the
+    // primary button's press is checked against this frame's column and its
+    // padding. The viewport's rect starts the autoscroll's edge bands.
+    state.reader_pan.record_geometry(
+        cx.layout(reader::ARTICLE_SCROLL_KEY),
+        cx.layout(reader::ARTICLE_KEY),
+        cx.layout(lmdv_render::DOC_KEY),
+        reader::column_padding(width).0,
+    );
 
     reader::ReaderView::new(model, &look.theme, &look.style, state.scroll_cell())
         .width(width)
         .max_width(column_width)
         .memo(article_state_version(state, tab))
         .scroll_signal(state.scroll_signal_cell())
+        .article_cursor(state.reader_pan.cursor())
         .math(&math)
         .images(&images)
         .mermaid(state.mermaid_cache())
         .wires(RenderWires {
-            link: Some(state.link_wire()),
+            // OI-195: the reader's links carry their context menu; the editor
+            // preview keeps its block menu on a secondary press (E-04).
+            link: Some(if tab.view.mode == Mode::Viewer { state.link_wire() } else { state.preview_link_wire() }),
             // M-07: task boxes are live only in the reading view. The editor's
             // preview and source keep every task click read-only. The wire goes
             // on the real checkbox control, not its row (OI-091).
@@ -4075,5 +4209,156 @@ mod tests {
         let outline = a11y(&tree, "toggle-outline").expect("the outline toggle");
         assert_eq!(outline.get("shortcut").and_then(|value| value.as_str()), Some("Ctrl+I"));
         assert_eq!(outline.get("name").and_then(|value| value.as_str()), Some("Toggle outline"));
+    }
+
+    // ---- W-10/T-34: toolbar order, controls and breakpoints ----------------
+
+    fn toolbar_elements(temp: &TempDir, scene: fn(&mut WindowState), width: f32) -> Vec<ElementInfo> {
+        let mut state = window(temp);
+        scene(&mut state);
+        let mut runtime = rune::Runtime::new(state, view, (width, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.elements()
+    }
+
+    #[test]
+    fn the_toolbar_carries_save_and_aa_in_the_specified_order() {
+        let temp = TempDir::new().unwrap();
+        let elements = toolbar_elements(&temp, scene_reader, 1100.0);
+        let x = |key: &str| by_key(&elements, key).rect[0];
+        let order = [
+            "toggle-browser",
+            "open-file-toolbar",
+            "edit-toggle",
+            "save-toolbar",
+            "toolbar-separator-1",
+            crate::share::TOOLBAR_KEY,
+            "reading-settings-toolbar",
+            "pin-toggle",
+            "toolbar-separator-2",
+            "help",
+            "toggle-outline",
+            crate::settings::SETTINGS_TOOLBAR,
+        ];
+        let positions: Vec<f32> = order.iter().map(|key| x(key)).collect();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]), "W-10's order: {order:?} at {positions:?}");
+
+        // The visible Aa keeps a localized accessible name, and Save keeps its chord.
+        let tree = {
+            let mut state = window(&temp);
+            scene_reader(&mut state);
+            let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+            runtime.frame(0.0);
+            runtime.accessibility_json()
+        };
+        let save = a11y(&tree, "save-toolbar").expect("the save button");
+        assert_eq!(save.get("name").and_then(|value| value.as_str()), Some("Save"));
+        assert_eq!(save.get("shortcut").and_then(|value| value.as_str()), Some("Ctrl+S"));
+        let aa = a11y(&tree, "reading-settings-toolbar").expect("the Aa button");
+        assert_eq!(
+            aa.get("name").and_then(|value| value.as_str()),
+            Some("Reading settings"),
+            "Aa's accessible name names the dialog"
+        );
+
+        // W-10's controls run the existing commands.
+        let mut state = window(&temp);
+        scene_reader(&mut state);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let (x, y) = runtime.find("reading-settings-toolbar").expect("Aa");
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert!(runtime.state.settings_is_open(), "Aa opens the reading settings");
+    }
+
+    #[test]
+    fn the_toolbar_breaks_at_720_640_and_the_plus_at_560() {
+        let temp = TempDir::new().unwrap();
+        let wide = toolbar_elements(&temp, scene_reader, 1100.0);
+        assert!(has_key(&wide, "toolbar-separator-1") && has_key(&wide, "toolbar-separator-2"));
+        assert!(
+            wide.iter().any(|element| element.path.contains("/toolbar/") && element.key.as_deref() == Some("title")),
+            "the centred title has room"
+        );
+
+        // Under 720 points the separators go; Open and Help stay until 640.
+        let mid = toolbar_elements(&temp, scene_reader, 700.0);
+        assert!(!has_key(&mid, "toolbar-separator-1"), "no separator under 720");
+        assert!(!has_key(&mid, "toolbar-separator-2"));
+        assert!(has_key(&mid, "open-file-toolbar"), "Open stays above 640");
+        assert!(has_key(&mid, "help"));
+        assert!(
+            !mid.iter().any(|element| element.path.contains("/toolbar/") && element.key.as_deref() == Some("title")),
+            "the narrow band drops the centred title instead of overlapping"
+        );
+
+        // Under 640 Open and Help go; Save and Aa stay.
+        let narrow = toolbar_elements(&temp, scene_reader, 620.0);
+        assert!(!has_key(&narrow, "open-file-toolbar"), "Open hides under 640");
+        assert!(!has_key(&narrow, "help"), "Help hides under 640");
+        assert!(has_key(&narrow, "save-toolbar") && has_key(&narrow, "reading-settings-toolbar"));
+        assert!(has_key(&narrow, "pin-toggle"));
+
+        // Under 560 the strip's + goes; Ctrl+T and the tab list remain.
+        let tiny = toolbar_elements(&temp, scene_tabs, 540.0);
+        assert!(!has_key(&tiny, "new-tab"), "the + hides under 560");
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let before = state.tabs().len();
+        let mut tx = Tx::default();
+        assert!(state.run_command("file.new-tab", &mut tx), "Ctrl+T still works");
+        assert_eq!(state.tabs().len(), before + 1);
+    }
+
+    // ---- T-15: a tab opened behind says so in the tree ---------------------
+
+    #[test]
+    fn a_pulsing_background_tab_reads_unread_until_it_is_activated() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let behind = state.tabs()[2].id;
+        let key = format!("t-{}", tab_key(behind));
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json();
+        assert_eq!(
+            a11y(&tree, &key).and_then(|node| node.get("description")).and_then(|value| value.as_str()),
+            None,
+            "no mark before the pulse"
+        );
+
+        runtime.update(|state: &mut WindowState, _| {
+            if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == behind) {
+                tab.view.pulse = Some(crate::window::TabPulse { seq: 7, until: 10.0 });
+            }
+        });
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json();
+        assert_eq!(
+            a11y(&tree, &key).and_then(|node| node.get("description")).and_then(|value| value.as_str()),
+            Some("Unread"),
+            "the kit's Unread mark names the new tab"
+        );
+
+        // A dirty background tab keeps the stronger Attention words.
+        runtime.update(|state: &mut WindowState, _| {
+            if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == behind) {
+                tab.view.dirty = true;
+            }
+        });
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json();
+        assert_eq!(
+            a11y(&tree, &key).and_then(|node| node.get("description")).and_then(|value| value.as_str()),
+            Some("Needs attention")
+        );
     }
 }

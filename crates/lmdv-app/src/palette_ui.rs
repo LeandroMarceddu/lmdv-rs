@@ -320,7 +320,7 @@ fn palette_row(palette: &PaletteState, kit: &Kit, index: usize) -> El {
     }
     if !entry.keys.is_empty() {
         option = option.child(
-            text(entry.keys.clone())
+            text(crate::commands::chord_text(&entry.keys))
                 .key("palette-row-keys")
                 .font(TextStyle { size: 11.0, ..kit.ty.mono })
                 .color(c.text_faint)

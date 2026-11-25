@@ -170,7 +170,7 @@ pub fn read_document(path: &Path) -> Result<LoadedFile, ReadError> {
 
     let text = String::from_utf8(bytes).map_err(|_| ReadError::NotUtf8(canonical.clone()))?;
     let buffer = SourceBuffer::from_file(&text);
-    let mut meta = meta_from(&metadata);
+    let mut meta = meta_from_identity(&metadata, Some(&file));
     meta.len = text.len() as u64;
     Ok(LoadedFile { path: canonical, buffer, meta })
 }
@@ -238,13 +238,48 @@ pub fn probe(path: &Path) -> Result<FileMeta, ReadError> {
     if !metadata.is_file() {
         return Err(ReadError::NotRegular(path.to_path_buf()));
     }
-    Ok(meta_from(&metadata))
+    // Windows' volume serial and file index only come from a handle; Unix
+    // takes `(dev, ino)` from the metadata itself.
+    let handle = open_for_identity(&canonical);
+    Ok(meta_from_identity(&metadata, handle.as_ref()))
+}
+
+/// Opens the file for its identity only.
+///
+/// Unix needs no handle. Windows asks for no data access
+/// (`access_mode(0)`), so a file another program is reading or writing still
+/// yields the `GetFileInformationByHandle` pair used for conflict checks.
+/// A file that metadata could see but that refuses even an attributes handle
+/// (a restrictive share lock) keeps the identity unknown; the modification
+/// time and length still guard the check, and the probe itself succeeds.
+#[cfg(windows)]
+fn open_for_identity(path: &Path) -> Option<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new().access_mode(0).open(path).ok()
+}
+
+#[cfg(not(windows))]
+fn open_for_identity(_path: &Path) -> Option<File> {
+    None
 }
 
 /// The core `FileMeta` for a `stat` result.
+///
+/// Windows metadata alone carries no stable identity, so callers that have an
+/// open handle use [`meta_from_identity`] there.
 pub(crate) fn meta_from(metadata: &Metadata) -> FileMeta {
+    meta_from_identity(metadata, None)
+}
+
+/// The core `FileMeta`, with the identity read from the open handle when the
+/// platform needs one.
+///
+/// Unix takes `(dev, ino)` from `metadata`; Windows asks
+/// `GetFileInformationByHandle` for the volume serial and file index (`None`
+/// leaves the identity unknown, for a stat with no handle).
+pub(crate) fn meta_from_identity(metadata: &Metadata, file: Option<&File>) -> FileMeta {
     let modified = metadata.modified().ok().and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
-    let (dev, ino) = file_identity(metadata);
+    let (dev, ino) = file_identity(metadata, file);
     FileMeta {
         len: metadata.len(),
         mtime_ns: modified.map_or(0, |duration| duration.as_nanos().min(u64::MAX as u128) as u64),
@@ -255,16 +290,36 @@ pub(crate) fn meta_from(metadata: &Metadata) -> FileMeta {
 
 /// The stable `(dev, ino)` pair for conflict checks and duplicate-tab dedupe.
 #[cfg(unix)]
-fn file_identity(metadata: &Metadata) -> (u64, u64) {
+fn file_identity(metadata: &Metadata, _file: Option<&File>) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
-/// Windows has no `st_dev`/`st_ino`. Its volume serial and file index are left
-/// at zero on purpose: [`FileMeta::identity_known`] then turns identity checks
-/// off, and conflicts fall back to the modification time and length, which is
-/// how the rest of the pipeline already treats an unknown identity.
-#[cfg(not(unix))]
-fn file_identity(_metadata: &Metadata) -> (u64, u64) {
+/// Windows' `(volume serial, file index)` pair, read from an open handle.
+///
+/// A file index is stable for the file's lifetime, so an atomic save (a new
+/// file renamed over the old name) is correctly seen as a new identity, exactly
+/// like a changed inode on Unix. A failed query leaves the identity unknown and
+/// the pipeline falls back to the modification time and length.
+#[cfg(windows)]
+fn file_identity(_metadata: &Metadata, file: Option<&File>) -> (u64, u64) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle};
+
+    let Some(file) = file else {
+        return (0, 0);
+    };
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: the handle is open for the call and `info` is a full struct.
+    let status = unsafe { GetFileInformationByHandle(file.as_raw_handle() as _, &mut info) };
+    if status == 0 {
+        return (0, 0);
+    }
+    let index = (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow);
+    (u64::from(info.dwVolumeSerialNumber), index)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_identity(_metadata: &Metadata, _file: Option<&File>) -> (u64, u64) {
     (0, 0)
 }
 
@@ -292,8 +347,8 @@ mod tests {
         assert!(loaded.meta.mtime_ns > 0);
         #[cfg(unix)]
         assert!(loaded.meta.identity_known(), "Unix reports a stable (dev, ino)");
-        #[cfg(not(unix))]
-        assert!(!loaded.meta.identity_known(), "Windows leaves the identity unknown; mtime and length guard instead");
+        #[cfg(windows)]
+        assert!(loaded.meta.identity_known(), "Windows reports the volume serial and file index");
     }
 
     #[test]
@@ -378,6 +433,17 @@ mod tests {
         let path = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
         assert!(matches!(read_document(&fifo), Err(ReadError::NotRegular(_))));
+    }
+
+    #[test]
+    fn probe_reports_the_same_stable_identity_twice() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("real.md");
+        fs::write(&path, b"x").unwrap();
+
+        let first = probe(&path).unwrap();
+        assert!(first.identity_known(), "a local file has an identity on both platforms");
+        assert_eq!(first, probe(&path).unwrap(), "nothing changed between the two stats");
     }
 
     // Windows symlinks need a privilege and have no POSIX mode, so the link

@@ -22,9 +22,9 @@
 //!   `w:footnoteReference` runs, not an end-of-document list. A footnote that
 //!   references another keeps the inner number as superscript text, because
 //!   Word has no nested notes.
-//! - SVG pictures are rasterized to PNG on the export worker (OI-076), with
-//!   text shaped by Typst's bundled faces. AVIF still needs a decoder that is
-//!   not in the dependency tree, so it degrades to its alt text.
+//! - SVG pictures are rasterized to PNG on the export worker (OI-076), and
+//!   AVIF pictures are decoded to PNG (OI-183), with text shaped by Typst's
+//!   bundled faces. A picture the decoder rejects degrades to its alt text.
 //! - The table of contents is a real Word `TOC` field (OI-078): the entry
 //!   paragraphs are its cached result, and `w:updateFields` lets Word rebuild
 //!   them with page numbers when the document opens.
@@ -1020,7 +1020,8 @@ impl<'a> Writer<'a> {
     }
 
     /// Emits one `wp:inline` drawing run. Returns `false` when the asset cannot
-    /// be embedded (a missing asset, an empty file, AVIF, …).
+    /// be embedded (a missing asset, an empty file, an AVIF the decoder
+    /// rejects, …).
     fn image_drawing(&mut self, out: &mut String, asset: AssetId, alt: &str, title: Option<&str>) -> bool {
         let part = self.part;
         let Some(media) = self.media_for(asset) else { return false };
@@ -1064,8 +1065,9 @@ impl<'a> Writer<'a> {
     /// Registers an asset as a media part and returns its index.
     ///
     /// An SVG is rasterized to PNG here (see [`raster`]); Word's plain
-    /// `a:blip` has no portable SVG support. AVIF has no decoder in the
-    /// exporter's dependency tree, so it still falls back to alt text.
+    /// `a:blip` has no portable SVG support. An AVIF is decoded and encoded as
+    /// PNG for the same reason (OI-183); a picture the decoder rejects still
+    /// falls back to its alt text.
     fn media_for(&mut self, asset: AssetId) -> Option<usize> {
         let index = asset.index();
         if let Some(slot) = self.media_by_asset.get(index).copied().flatten() {
@@ -1078,6 +1080,9 @@ impl<'a> Writer<'a> {
             }
             if source.mime == "image/svg+xml" {
                 let (png, (width, height)) = raster::svg_to_png(&source.bytes)?;
+                ("png", Some(png), Some((u64::from(width), u64::from(height))))
+            } else if source.mime == "image/avif" {
+                let (png, (width, height)) = crate::raster::avif_to_png(&source.bytes)?;
                 ("png", Some(png), Some((u64::from(width), u64::from(height))))
             } else {
                 (media_extension(source.mime)?, None, None)
@@ -2427,8 +2432,8 @@ mod tests {
         assert_eq!(media_extension("image/png"), Some("png"));
         assert_eq!(media_extension("image/jpeg"), Some("jpeg"));
         assert_eq!(media_extension("image/webp"), Some("webp"));
-        // SVG is rasterized to PNG before this lookup (`media_for`); AVIF has
-        // no decoder in the dependency tree, so both are not plain media types.
+        // SVG and AVIF are transcoded to PNG before this lookup (`media_for`),
+        // so neither is a plain media type.
         assert_eq!(media_extension("image/svg+xml"), None);
         assert_eq!(media_extension("image/avif"), None);
         assert_eq!(media_extension("application/pdf"), None);

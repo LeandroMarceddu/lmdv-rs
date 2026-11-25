@@ -61,7 +61,8 @@ pub const PREVIEW_MARGIN: f32 = 24.0;
 pub const PREVIEW_PAD: f32 = 14.0;
 /// The narrowest a preview column shrinks to.
 pub const MIN_COLUMN: f32 = 56.0;
-/// The widest a preview column grows to before its cells wrap.
+/// The widest a column's natural (one-line) width grows to before its cells
+/// wrap. A column's unbreakable floor is not capped ([`minimum_widths`]).
 pub const MAX_COLUMN: f32 = 360.0;
 /// Horizontal cell padding on each side.
 pub const CELL_PAD: f32 = 10.0;
@@ -189,9 +190,10 @@ impl TablePreview {
     /// Recomputes the sideways scrolling and frozen column from the drawn width.
     fn fit(&mut self) {
         let drawn = self.drawn_width();
-        // A table whose minimum widths do not fit opens at 100%; one that fits
-        // is squeezed or grown by its columns, and only the rounding of a
-        // squeezed minimum can still reach the scroller (V-18).
+        // A table whose minimum widths do not fit draws at its floors and
+        // scrolls sideways; one that fits is squeezed or grown by its columns,
+        // and only the rounding of a squeezed minimum can still reach the
+        // scroller (V-18, OI-194).
         self.overflow = drawn > self.available + 0.5;
         self.frozen = self.overflow
             && self.widths.first().is_some_and(|first| first * self.zoom <= self.available * FIRST_COLUMN_SHARE);
@@ -759,8 +761,15 @@ fn measure_cell(text: &str, style: TextStyle) -> f32 {
     rune::text::measure(text, &[], style, None).0 + CELL_PAD * 2.0 + 2.0
 }
 
-/// Each column's minimum width in points: its longest word, which wrapping
-/// cannot split (V-18), clamped to the same bounds as its natural width.
+/// Each column's minimum width in points: the widest run its cells cannot
+/// break, which wrapping cannot split (V-18, OI-194).
+///
+/// This follows the reading table's floor (`lmdv-render`'s
+/// `cell_min_width`): the CSS min-content width in the cell's own face, at
+/// least [`MIN_COLUMN`] but not capped at [`MAX_COLUMN`]. A token wider than
+/// the cap therefore grows its column; the grid scrolls instead of clipping
+/// the token. The wire carries drawn cell text, not inline styles, and the
+/// preview draws every cell in one face, so there is no styled run to measure.
 pub fn minimum_widths(table: &TableRef) -> Vec<f32> {
     let head = TextStyle::new(MEASURE_SIZE, 600.0);
     let body = TextStyle::new(MEASURE_SIZE, 400.0);
@@ -768,40 +777,49 @@ pub fn minimum_widths(table: &TableRef) -> Vec<f32> {
         .map(|column| {
             let mut widest = MIN_COLUMN;
             if let Some(cell) = table.head.get(column) {
-                widest = widest.max(measure_word(&cell.text, head));
+                widest = widest.max(min_content_cell(&cell.text, head));
             }
             for row in &table.rows {
                 if let Some(cell) = row.get(column) {
-                    widest = widest.max(measure_word(&cell.text, body));
+                    widest = widest.max(min_content_cell(&cell.text, body));
                 }
             }
-            widest.clamp(MIN_COLUMN, MAX_COLUMN)
+            widest
         })
         .collect()
 }
 
-fn measure_word(text: &str, style: TextStyle) -> f32 {
-    text.split_whitespace().map(|word| measure_cell(word, style)).fold(MIN_COLUMN, f32::max)
+/// The width of a cell's widest unbreakable run, padding included.
+fn min_content_cell(text: &str, style: TextStyle) -> f32 {
+    let text = if text.trim().is_empty() { " " } else { text };
+    rune::text::content_widths(text, &[], style).0 + CELL_PAD * 2.0 + 2.0
 }
 
 /// Plans the preview's columns for `available` points (V-18).
 ///
-/// A table whose minimum widths do not fit opens at 100% and scrolls; one that
-/// fits is scaled to the view — shrunk to fit when it would overflow at its
-/// natural widths, and grown at most 1.5× when it is narrow.
+/// A table whose minimum widths do not fit draws at its floors and scrolls;
+/// one that fits is scaled to the view — shrunk to fit when it would overflow
+/// at its natural widths, and grown at most 1.5× when it is narrow. The floors
+/// are applied last and are unbounded above (OI-194): a token wider than
+/// [`MAX_COLUMN`] still fits its cell, so the grid grows and scrolls rather
+/// than truncating it.
 pub fn plan_widths(natural: &[f32], minimum: &[f32], available: f32) -> Vec<f32> {
     let available = available.max(MIN_COLUMN);
     let min_total: f32 = minimum.iter().sum();
     let max_total: f32 = natural.iter().sum::<f32>().max(1.0);
-    if min_total > available {
-        return natural.to_vec();
-    }
-    if max_total > available {
+    let mut widths = if min_total > available {
+        natural.to_vec()
+    } else if max_total > available {
         let factor = available / max_total;
-        return natural.iter().zip(minimum).map(|(width, floor)| (width * factor).max(*floor)).collect();
+        natural.iter().zip(minimum).map(|(width, floor)| (width * factor).max(*floor)).collect()
+    } else {
+        let factor = (available / max_total).min(1.5);
+        natural.iter().map(|width| width * factor).collect()
+    };
+    for (width, floor) in widths.iter_mut().zip(minimum) {
+        *width = (*width).max(*floor);
     }
-    let factor = (available / max_total).min(1.5);
-    natural.iter().map(|width| width * factor).collect()
+    widths
 }
 
 // ---- folding --------------------------------------------------------------

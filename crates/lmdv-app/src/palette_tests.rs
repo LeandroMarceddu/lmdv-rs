@@ -406,6 +406,57 @@ fn the_english_words_find_a_command() {
     );
 }
 
+/// I-08: in a non-English UI every command label is localized, but its English
+/// title stays a search keyword (C-03).
+///
+/// The translator is process-wide and every unit test shares it (OI-176), so
+/// switching it here would race every other test's English assertions. The
+/// helper below runs alone in a child test process, where the switch can touch
+/// nothing else.
+#[test]
+fn a_non_english_palette_finds_print_by_its_english_name() {
+    let exe = std::env::current_exe().expect("the test binary's path");
+    let output = std::process::Command::new(exe)
+        .args(["--ignored", "italian_palette_finds_commands_by_their_english_names", "--test-threads=1"])
+        .output()
+        .expect("run the helper in a child test process");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "the Italian helper must run alone and pass:\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+/// The child half of [`a_non_english_palette_finds_print_by_its_english_name`].
+///
+/// It is ignored in the ordinary run: only the parent starts it, with
+/// `--ignored`, in a test process of its own.
+#[test]
+#[ignore = "spawned by a_non_english_palette_finds_print_by_its_english_name"]
+fn italian_palette_finds_commands_by_their_english_names() {
+    assert!(lmdv_i18n::set_locale("it"), "the Italian catalog is embedded");
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    with_notes(&mut state);
+
+    // I-08's fixture: the English word finds the Italian label.
+    let _tx = opened(&mut state, "print");
+    let print = state.palette.entry(row_of(&state, "c:share.print")).expect("the print command");
+    assert!(print.label.starts_with("Stampa"), "the Italian label is shown: {:?}", print.label);
+
+    // “toggle” lives only in the English title “Toggle file browser”: the
+    // Italian label and the keywords never spell it, so this fails unless the
+    // English title really is appended to the search text (palette.rs).
+    let mut tx = Tx::default();
+    state.set_palette_query("toggle", &mut tx);
+    let browser = state.palette.entry(row_of(&state, "c:view.toggle-browser")).expect("the browser toggle");
+    assert!(browser.label.starts_with("Mostra"), "the Italian label is shown: {:?}", browser.label);
+    assert!(browser.extra.contains("Toggle file browser"), "the English title is a keyword: {:?}", browser.extra);
+
+    assert!(lmdv_i18n::set_locale("en"), "restore the source locale");
+}
+
 // ---- ranking and recents (C-05/P-10) -------------------------------------
 
 #[test]

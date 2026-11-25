@@ -14,6 +14,12 @@
 //! never produces a missing parent, and a headless export must not create
 //! folders as a side effect. The stricter rule is deliberate (X-15).
 //! Network and `data:` sources never reach the filesystem.
+//!
+//! Mermaid diagrams are laid out by the reader's own `rune-mermaid` engine and
+//! serialized to static SVG (OI-106/OI-181). The style is the fixed light
+//! article style, never the reader's palette or size (X-10), so the same
+//! document exports byte-identically on any theme; DOCX rasterizes the SVG and
+//! PDF embeds it directly.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -159,7 +165,7 @@ pub(crate) fn reveal_path(path: &Path) -> Result<(), String> {
 
 /// Resolves a local picture through the document's path policy and returns its
 /// bytes and MIME type. Network URLs, `data:` URIs and pictures outside the
-/// document folder are refused; Mermaid stays a source block (OI-106).
+/// document folder are refused; a Mermaid diagram is serialized to static SVG.
 struct ExportAssets {
     root: Option<PathBuf>,
 }
@@ -198,11 +204,20 @@ impl AssetResolver for ExportAssets {
         self.picture(src)
     }
 
-    fn diagram(&self, _source: &str) -> Option<ExportedAsset> {
-        // No Mermaid raster in this slice: the exporter keeps the source as a
-        // code block and records a `DiagramFallback` warning (OI-076/OI-106).
-        None
+    fn diagram(&self, source: &str) -> Option<ExportedAsset> {
+        Some(ExportedAsset::new("image/svg+xml", diagram_svg(source)?))
     }
+}
+
+/// One Mermaid source as a static SVG, with the fixed light export style.
+///
+/// The caller runs on the export worker; a source outside the supported subset
+/// returns `None`, and the exporter keeps its code block with a
+/// `DiagramFallback` warning (OI-106). The SVG names the generic sans family
+/// and carries no script, image or remote reference (OI-181).
+pub(crate) fn diagram_svg(source: &str) -> Option<Vec<u8>> {
+    let style = rune_kit::mermaid::DiagramStyle::neutral(false);
+    rune_kit::mermaid::render_svg(source, &style).map(String::into_bytes)
 }
 
 /// The image MIME type for an embedded picture: the extension first, then the
@@ -221,7 +236,30 @@ fn mime_for(bytes: &[u8], path: &Path) -> &'static str {
         _ if bytes.starts_with(b"GIF8") => "image/gif",
         _ if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") => "image/webp",
         _ if bytes.starts_with(b"BM") => "image/bmp",
+        _ if is_avif(bytes) => "image/avif",
         _ if bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml") => "image/svg+xml",
         _ => "image/png",
+    }
+}
+
+/// Whether `bytes` start with an AVIF (`ftyp` + `avif`/`avis` brand) header.
+fn is_avif(bytes: &[u8]) -> bool {
+    let brand = bytes.get(8..12);
+    bytes.get(4..8) == Some(b"ftyp".as_slice())
+        && (brand == Some(b"avif".as_slice()) || brand == Some(b"avis".as_slice()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_extensionless_avif_is_recognized_by_its_header() {
+        let mut avif = vec![0, 0, 0, 0x20];
+        avif.extend_from_slice(b"ftypavif");
+        assert!(is_avif(&avif));
+        assert_eq!(mime_for(&avif, Path::new("picture")), "image/avif");
+        assert_eq!(mime_for(&avif, Path::new("picture.avif")), "image/avif");
+        assert!(!is_avif(b"\x89PNG\r\n\x1a\n"), "a PNG is not an AVIF");
     }
 }

@@ -30,6 +30,11 @@ use crate::windows::{CloseDoc, WindowKind, WindowOpenRequest, WindowSnapshot, cl
 /// How long a status notice stays visible, in virtual clock seconds.
 pub const NOTICE_SECONDS: f64 = 4.0;
 
+/// How long a tab opened behind keeps its Unread mark (T-15), in seconds. The
+/// kit rings it once for 900 ms; the dot stays a little longer so a glance away
+/// from the strip still finds the new tab.
+pub const TAB_PULSE_SECONDS: f64 = 2.4;
+
 /// How long a sticky notice stays: until the document changes, a save, a
 /// reload, an explicit dismiss, or its tab closing (R-29/T-26).
 /// `f64::INFINITY` keeps the ordinary deadline arithmetic honest.
@@ -73,6 +78,16 @@ impl TabSource {
     pub fn is_start(&self) -> bool {
         matches!(self, Self::Start)
     }
+}
+
+/// One background tab's T-15 mark: a kit Unread dot and one ring, until it is
+/// activated or the interval ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabPulse {
+    /// The ring's sequence: the kit re-rings a tab whose value changes.
+    pub seq: u32,
+    /// Virtual-clock time at which the mark is cleared.
+    pub until: f64,
 }
 
 /// Per-tab view state that must survive tab switches.
@@ -151,6 +166,8 @@ pub struct TabView {
     /// The reading time is drawn after the tab's name; this remembers whether it
     /// is on, so the strip's 2-point margin does not make it flicker (T-35).
     pub reading_meta: std::cell::Cell<bool>,
+    /// A tab opened behind lights up briefly (T-15); activation clears it.
+    pub pulse: Option<TabPulse>,
 }
 
 /// One tab in a window.
@@ -354,6 +371,10 @@ pub struct UiState {
     pub quit_requested: bool,
     /// The preview block whose context menu is open (E-04).
     pub block_menu: Option<crate::preview_nav::BlockMenu>,
+    /// The link whose context menu is open (OI-195).
+    pub link_menu: Option<crate::links::LinkMenu>,
+    /// A background tab to reveal in the strip on the next poll (T-15).
+    pub(crate) reveal_tab: Option<TabId>,
     /// Clock time at which a changed session fragment is written.
     pub(crate) session_due: Option<f64>,
     pub(crate) last_now: f64,
@@ -512,6 +533,8 @@ pub struct WindowState {
     /// The reader's single-key state: the j/k target, the `g g` window and the
     /// pinned heading (R-06–R-09/O-04).
     pub(crate) reading_keys: crate::reading_keys::ReadingKeys,
+    /// Middle-drag and empty-margin drag-to-scroll (D-06/R-28).
+    pub(crate) reader_pan: crate::reader::ScrollPan,
     /// The section line's path, timers and double-press guard (O-07–O-10).
     pub(crate) section_line: crate::section::SectionLineState,
     /// The outline's filter field; its text mirrors the active tab's `toc_filter`.
@@ -531,6 +554,9 @@ pub struct WindowState {
     waker: RefCell<Option<Waker>>,
     /// One link handler per window, shared by every article frame.
     link_wire: LinkWire,
+    /// The editor preview's link handler: links open, but a secondary press
+    /// stays the block's (E-04), so OI-195's menu is the reader's alone.
+    preview_link_wire: LinkWire,
     /// The modifiers the window last reported, for link-click placement (L-11).
     link_mods: rune::Mods,
     /// One task-checkbox control handler per window, attached only to viewer
@@ -590,6 +616,8 @@ pub struct WindowState {
     /// T-14: the last background tab this window opened. The next background
     /// open joins after it; any tab coming forward forgets the queue.
     pub(crate) background_queue: Option<TabId>,
+    /// The next T-15 ring's sequence; 0 is the kit's “no ring”.
+    pub(crate) tab_pulse_seq: u32,
     next_tab: TabId,
 }
 
@@ -650,6 +678,7 @@ impl WindowState {
             reading: ReadingState::default(),
             reader_magnify: 0.0,
             reading_keys: crate::reading_keys::ReadingKeys::default(),
+            reader_pan: crate::reader::ScrollPan::default(),
             section_line: crate::section::SectionLineState::default(),
             outline_filter: TextEdit::default(),
             worker,
@@ -661,6 +690,12 @@ impl WindowState {
             images: OnceCell::new(),
             waker: RefCell::new(None),
             link_wire: Rc::new(|e: rune::El| {
+                e.on_link(|state: &mut WindowState, dest: &str, tx: &mut Tx| state.open_link(dest, tx))
+                    .on_link_secondary(|state: &mut WindowState, dest: &str, press: rune::PointerPress, _: &mut Tx| {
+                        state.show_link_menu(dest, press);
+                    })
+            }),
+            preview_link_wire: Rc::new(|e: rune::El| {
                 e.on_link(|state: &mut WindowState, dest: &str, tx: &mut Tx| state.open_link(dest, tx))
             }),
             link_mods: rune::Mods::default(),
@@ -691,6 +726,7 @@ impl WindowState {
             session_publish: RefCell::new(crate::session::PublishedSession::default()),
             saved_flash_docs: BTreeSet::new(),
             background_queue: None,
+            tab_pulse_seq: 1,
             next_tab: 1,
         };
         state.push_start_tab();
@@ -841,6 +877,11 @@ impl WindowState {
         &self.link_wire
     }
 
+    /// The editor preview's link wire (E-04 keeps its secondary press).
+    pub(crate) fn cached_preview_link_wire(&self) -> &LinkWire {
+        &self.preview_link_wire
+    }
+
     /// The modifiers this window last reported, for link-click placement.
     pub(crate) fn link_modifiers(&self) -> rune::Mods {
         self.link_mods
@@ -982,6 +1023,8 @@ impl WindowState {
         self.ui.help = None;
         self.ui.notice = None;
         self.ui.block_menu = None;
+        self.ui.link_menu = None;
+        self.ui.reveal_tab = None;
         self.close_palette();
         self.close_tab_list();
         self.share.menu_open = false;
@@ -1051,6 +1094,11 @@ impl WindowState {
         if let Some(index) = self.index_of_document(doc.id) {
             if !place.background() {
                 self.switch_to_index(index);
+            } else if let Some(tab) = self.tabs.get(index).map(|tab| tab.id) {
+                // T-15/T-11: a background open of an already-open document
+                // pulses its tab and reveals it, so the reader sees where the
+                // file already lives.
+                self.pulse_tab(tab);
             }
             let tab = self.tabs[index].id;
             if !place.background() {
@@ -1197,6 +1245,13 @@ impl WindowState {
         // join the same way, without an export.
         let pinned = self.export_pinned_document().and_then(|doc| self.index_of_document(doc));
         let keep_front = background || pinned.is_some();
+        // T-15: a tab that opens behind rings once and keeps an Unread dot for a
+        // short interval, so the eye finds it in the strip; activation clears it.
+        if keep_front && !self.restoring_tabs {
+            tab.view.pulse = Some(TabPulse { seq: self.tab_pulse_seq, until: self.ui.last_now + TAB_PULSE_SECONDS });
+            self.tab_pulse_seq = self.tab_pulse_seq.wrapping_add(1).max(1);
+            self.ui.reveal_tab = Some(tab_id);
+        }
         let replacing_start = !keep_front
             && index.is_none()
             && !self.restoring_tabs
@@ -1316,6 +1371,7 @@ impl WindowState {
         self.editor.goto_line = None;
         self.editor.format_menu = None;
         self.ui.block_menu = None;
+        self.ui.link_menu = None;
         self.share.menu_open = false;
         self.tables.preview = None;
         self.tables.target = None;
@@ -1350,6 +1406,11 @@ impl WindowState {
     pub(crate) fn note_active_tab(&mut self) {
         self.hide_tab_card();
         self.background_queue = None;
+        // T-15: the mark was the strip's way of asking to be looked at; the tab
+        // coming forward answers it.
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.view.pulse = None;
+        }
         let Some(id) = self.tabs.get(self.active).map(|tab| tab.id) else { return };
         self.tab_recent.retain(|other| *other != id);
         self.tab_recent.insert(0, id);
@@ -1830,6 +1891,53 @@ impl WindowState {
         true
     }
 
+    /// Arms T-15's mark for one tab (an open behind, or an existing document
+    /// opened behind) and asks the next poll to reveal it in the strip.
+    fn pulse_tab(&mut self, tab: TabId) {
+        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else { return };
+        // Nothing to find when the document is already in front.
+        if index == self.active {
+            return;
+        }
+        let pulse = TabPulse { seq: self.tab_pulse_seq, until: self.ui.last_now + TAB_PULSE_SECONDS };
+        self.tab_pulse_seq = self.tab_pulse_seq.wrapping_add(1).max(1);
+        self.tabs[index].view.pulse = Some(pulse);
+        self.ui.reveal_tab = Some(tab);
+    }
+
+    /// T-15: scrolls the strip to a tab just opened behind, so the ring and dot
+    /// are where the eye can see them. The tab stays behind the front one.
+    fn apply_pending_tab_reveal(&mut self, tx: &mut Tx) -> bool {
+        let Some(tab) = self.ui.reveal_tab else { return false };
+        self.ui.reveal_tab = None;
+        if self.tab(tab).is_none() {
+            return false;
+        }
+        tx.scroll_into_view_in(crate::tab_list::TAB_STRIP_SCROLL_KEY, format!("t-{}", tab_key(tab)));
+        false
+    }
+
+    /// T-15: expires the Unread mark of tabs opened behind, waking the frame
+    /// when the next one is due. A tab that came forward already cleared its
+    /// mark in [`Self::note_active_tab`].
+    fn poll_tab_pulses(&mut self, now: f64, tx: &mut Tx) -> bool {
+        let mut changed = false;
+        let mut next: Option<f64> = None;
+        for tab in &mut self.tabs {
+            let Some(pulse) = tab.view.pulse else { continue };
+            if now >= pulse.until {
+                tab.view.pulse = None;
+                changed = true;
+            } else {
+                next = Some(next.map_or(pulse.until, |due: f64| due.min(pulse.until)));
+            }
+        }
+        if let Some(due) = next {
+            tx.wake_at(due);
+        }
+        changed
+    }
+
     /// Drains worker and UI mailboxes, pumps timers and updates the registry.
     ///
     /// Returns whether the view reads anything that changed. Close and quit
@@ -1926,6 +2034,19 @@ impl WindowState {
         changed |= self.poll_lightbox();
         changed |= self.poll_reading(now, tx);
         changed |= self.poll_reading_keys(now);
+        // One context menu at a time: a right-click that reaches a block after a
+        // link's menu was open replaces it (OI-195).
+        if self.ui.block_menu.is_some() && self.ui.link_menu.take().is_some() {
+            changed = true;
+        }
+        // The link menu is the reader's; leaving reading mode drops it.
+        if self.ui.link_menu.is_some() && self.active_tab().is_none_or(|tab| tab.view.mode != Mode::Viewer) {
+            self.ui.link_menu = None;
+            changed = true;
+        }
+        changed |= self.poll_tab_pulses(now, tx);
+        changed |= self.poll_scroll_pan(now, tx);
+        self.apply_pending_tab_reveal(tx);
         changed |= self.poll_landing(now, tx);
         changed |= self.poll_section_line(now, tx);
         changed |= self.expire_line_flash(now);
@@ -3014,6 +3135,39 @@ mod tests {
         assert_eq!(state.tabs().len(), 1, "the start page was replaced");
         assert_eq!(state.active_tab().map(|tab| tab.id), Some(tab));
         assert_eq!(state.active_tab().map(Tab::title).as_deref(), Some("Notes"));
+    }
+
+    #[test]
+    fn a_background_tab_pulses_until_it_is_activated_or_the_interval_ends() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let mut state = WindowState::new(shared.clone());
+        let front = state.open_synthetic("Front", "# Front\n");
+        ready_doc(&shared, "/tmp/lmdv-app-test/behind.md", "# Behind\n");
+        let behind = state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/behind.md"));
+
+        // T-15: opening behind rings and marks the tab Unread.
+        let pulse = state.tab(behind).and_then(|tab| tab.view.pulse).expect("the background tab pulses");
+        assert_eq!(pulse.until, TAB_PULSE_SECONDS);
+        assert!(state.tab(front).is_some_and(|tab| tab.view.pulse.is_none()), "the front tab does not");
+
+        // Activation answers the mark at once.
+        assert!(state.activate_tab(behind));
+        assert!(state.tab(behind).is_some_and(|tab| tab.view.pulse.is_none()), "activation clears the pulse");
+
+        // T-15/T-11: opening the same document behind again pulses its tab
+        // rather than silently doing nothing, once another tab is in front.
+        assert!(state.activate_tab(front));
+        assert_eq!(state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/behind.md")), behind);
+        assert!(state.tab(behind).is_some_and(|tab| tab.view.pulse.is_some()), "the existing tab pulses");
+
+        // A second background tab expires on the clock and wakes the frame.
+        ready_doc(&shared, "/tmp/lmdv-app-test/later.md", "# Later\n");
+        let later = state.open_path_background(PathBuf::from("/tmp/lmdv-app-test/later.md"));
+        let until = state.tab(later).and_then(|tab| tab.view.pulse).map(|pulse| pulse.until).expect("a pulse");
+        let mut tx = Tx::default();
+        state.poll(until + 0.01, &mut tx);
+        assert!(state.tab(later).is_some_and(|tab| tab.view.pulse.is_none()), "the interval clears the mark");
     }
 
     #[test]

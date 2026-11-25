@@ -21,7 +21,7 @@ use std::rc::Rc;
 
 use lmdv_md::{Block, HtmlChild, HtmlNode, HtmlTag, Inline, InlineObjectKind, MdDoc};
 use lmdv_render::{DocTheme, Highlight, ImageResolver, MathResolver, RenderOptions, RenderWires, heading_key, render};
-use rune::{Color, Cx, El, KeyEvent, ScrollSpec, Tx, col};
+use rune::{Color, Cursor, Cx, Drag, El, KeyEvent, Phase, PointerButton, ScrollSpec, Tx, col};
 use rune_kit::markdown::MarkdownStyle;
 
 use crate::window::WindowState;
@@ -30,6 +30,12 @@ use crate::window::WindowState;
 pub const ARTICLE_SCROLL_KEY: &str = "article-scroll";
 /// The reading column's key.
 pub const ARTICLE_KEY: &str = "article";
+/// Pointer travel, in points, before a press becomes a drag-to-scroll (D-06).
+pub const PAN_THRESHOLD: f32 = 3.0;
+/// The edge band, in points, that starts the drag-to-scroll autoscroll (D-06).
+pub const AUTOSCROLL_BAND: f32 = 28.0;
+/// The fastest autoscroll, in points a second, at the very edge (D-06).
+pub const AUTOSCROLL_MAX_SPEED: f32 = 1400.0;
 /// Reading column width in points, padding included (R-02).
 pub const READER_MAX_WIDTH: f32 = 760.0;
 /// Reading column side padding in points (R-02).
@@ -397,6 +403,214 @@ pub fn column_padding(width: f32) -> (f32, f32) {
     }
 }
 
+/// The gesture a drag-to-scroll press is in (D-06/R-28).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PanPhase {
+    /// No press of ours.
+    #[default]
+    Idle,
+    /// The press may become a pan; nothing has moved yet, so a click stays a
+    /// click.
+    Armed,
+    /// Past the 3-point threshold: the article follows the pointer.
+    Dragging,
+}
+
+/// Middle-drag anywhere and left-drag on the article's empty margin, with the
+/// 3-point threshold, a grab cursor and edge autoscroll (D-06/R-28).
+///
+/// The scroll viewport's and the article column's `on_drag` feed this. Rune's
+/// own middle-click autoscroll never starts because both opt in to the middle
+/// button. A primary press on the rendered text is excluded by its position, so
+/// text selection keeps the drag; a primary press on the column's side padding
+/// or the margin around it pans, as the original's `#content-pane` does.
+#[derive(Debug, Default)]
+pub(crate) struct ScrollPan {
+    phase: PanPhase,
+    /// The viewport's offset when the press went down.
+    start_offset: f32,
+    /// The pan's current target, in points.
+    offset: f32,
+    /// The pointer's last window point.
+    at: [f32; 2],
+    /// When the autoscroll last stepped.
+    tick: f64,
+    /// The scroll viewport's unscrolled rect, from the last frame.
+    viewport: Cell<Option<[f32; 4]>>,
+    /// The reading column's unscrolled rect and side padding, from the last
+    /// frame: the empty margin is outside its text band.
+    column: Cell<Option<[f32; 4]>>,
+    /// The rendered document's unscrolled rect: its top and bottom padding are
+    /// empty margin too.
+    doc: Cell<Option<[f32; 4]>>,
+    pad_x: Cell<f32>,
+}
+
+impl ScrollPan {
+    /// Remembers the last frame's geometry: the viewport, the column and the
+    /// column's side padding.
+    pub(crate) fn record_geometry(
+        &self,
+        viewport: Option<[f32; 4]>,
+        column: Option<[f32; 4]>,
+        doc: Option<[f32; 4]>,
+        pad_x: f32,
+    ) {
+        self.viewport.set(viewport);
+        self.column.set(column);
+        self.doc.set(doc);
+        self.pad_x.set(pad_x.max(0.0));
+    }
+
+    /// The cursor the article shows: an open hand on an armed press, a closed
+    /// one while the page follows the pointer.
+    pub(crate) fn cursor(&self) -> Cursor {
+        match self.phase {
+            PanPhase::Idle => Cursor::Default,
+            PanPhase::Armed => Cursor::Grab,
+            PanPhase::Dragging => Cursor::Grabbing,
+        }
+    }
+
+    /// Whether a press of `button` at `point` may start a pan.
+    ///
+    /// The middle button may anywhere. The primary one only on the empty
+    /// margin: the column's side padding, or the space beside the column. The
+    /// text band itself keeps selection.
+    fn may_start(&self, button: PointerButton, point: [f32; 2], offset: f32) -> bool {
+        match button {
+            PointerButton::Middle => true,
+            PointerButton::Primary => {
+                let Some(column) = self.column.get() else { return false };
+                let pad = self.pad_x.get();
+                let inner_left = column[0] + pad;
+                let inner_right = column[0] + column[2] - pad;
+                if point[0] < inner_left || point[0] > inner_right {
+                    return true;
+                }
+                // Above the first block or below the last one the column's top
+                // and bottom padding is margin as well.
+                self.doc.get().is_some_and(|doc| {
+                    let top = doc[1] - offset;
+                    point[1] < top || point[1] > top + doc[3]
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// The Down half: arms a pan when the press may start one. Returns whether
+    /// the state changed, so the frame redraws the grab cursor.
+    fn press(&mut self, button: PointerButton, point: [f32; 2], offset: f32, now: f64) -> bool {
+        self.clear();
+        if !self.may_start(button, point, offset) {
+            return false;
+        }
+        self.phase = PanPhase::Armed;
+        self.start_offset = offset.max(0.0);
+        self.offset = self.start_offset;
+        self.at = point;
+        self.tick = now;
+        true
+    }
+
+    /// The Move half: crosses the threshold and returns the offset the article
+    /// should follow to, or `None` while the gesture is a still click.
+    fn moved(&mut self, dx: f32, dy: f32, window: [f32; 2], scroll: ScrollSnapshot, now: f64) -> Option<f32> {
+        if self.phase == PanPhase::Idle {
+            return None;
+        }
+        self.at = window;
+        if self.phase == PanPhase::Armed {
+            if dx.hypot(dy) < PAN_THRESHOLD {
+                return None;
+            }
+            self.phase = PanPhase::Dragging;
+        }
+        self.tick = now;
+        self.offset = (self.start_offset - dy).clamp(0.0, scroll.max.max(0.0));
+        Some(self.offset)
+    }
+
+    /// One autoscroll step while the pointer rests in an edge band; the target
+    /// and the time the next step is due.
+    fn autoscroll(&mut self, scroll: ScrollSnapshot, now: f64) -> Option<(f32, f64)> {
+        if self.phase != PanPhase::Dragging {
+            return None;
+        }
+        let viewport = self.viewport.get()?;
+        let (top, bottom) = (viewport[1], viewport[1] + viewport[3]);
+        let y = self.at[1];
+        let speed = if y < top + AUTOSCROLL_BAND {
+            -AUTOSCROLL_MAX_SPEED * ((top + AUTOSCROLL_BAND - y) / AUTOSCROLL_BAND).clamp(0.0, 1.0)
+        } else if y > bottom - AUTOSCROLL_BAND {
+            AUTOSCROLL_MAX_SPEED * ((y - (bottom - AUTOSCROLL_BAND)) / AUTOSCROLL_BAND).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if speed == 0.0 {
+            return None;
+        }
+        let dt = (now - self.tick).clamp(0.0, 0.05);
+        self.tick = now;
+        self.offset = (self.offset + speed * dt as f32).clamp(0.0, scroll.max.max(0.0));
+        Some((self.offset, now + 1.0 / 60.0))
+    }
+
+    /// Ends the gesture; true when one was in hand.
+    fn release(&mut self) -> bool {
+        let active = self.phase != PanPhase::Idle;
+        self.clear();
+        active
+    }
+
+    fn clear(&mut self) {
+        self.phase = PanPhase::Idle;
+    }
+}
+
+impl WindowState {
+    /// D-06/R-28: the article's press, move and release. The viewport's
+    /// `on_drag` calls this; the middle button never reaches Rune's own
+    /// autoscroll because the viewport opts in to it.
+    pub(crate) fn article_pan(&mut self, drag: &Drag, tx: &mut Tx) -> bool {
+        let scroll = self.reading.scroll.get();
+        let now = tx.clock();
+        match drag.phase {
+            Phase::Down => self.reader_pan.press(tx.button(), drag.window_point(), scroll.offset, now),
+            Phase::Move => {
+                let started = self.reader_pan.phase != PanPhase::Dragging;
+                match self.reader_pan.moved(drag.dx, drag.dy, drag.window_point(), scroll, now) {
+                    Some(target) => {
+                        if started {
+                            self.reading_keys.release_pin();
+                            self.cancel_landing(now, tx);
+                        } else {
+                            // The page follows the hand; only the start of the
+                            // drag changes what the view draws (the cursor).
+                            tx.live_only();
+                        }
+                        tx.scroll_to_y(ARTICLE_SCROLL_KEY, target);
+                        started
+                    }
+                    None => false,
+                }
+            }
+            Phase::Up => self.reader_pan.release(),
+        }
+    }
+
+    /// D-06: keeps the article scrolling while a pan holds the pointer in an
+    /// edge band, one frame at a time.
+    pub(crate) fn poll_scroll_pan(&mut self, now: f64, tx: &mut Tx) -> bool {
+        let scroll = self.reading.scroll.get();
+        let Some((target, wake)) = self.reader_pan.autoscroll(scroll, now) else { return false };
+        tx.scroll_to_y(ARTICLE_SCROLL_KEY, target);
+        tx.wake_at(wake);
+        true
+    }
+}
+
 /// The article inside its scroll viewport.
 pub struct ReaderView<'a> {
     doc: &'a MdDoc,
@@ -420,6 +634,8 @@ pub struct ReaderView<'a> {
     scale: f32,
     background: Color,
     scroll_margin: f32,
+    /// D-06: the pointer shape the article shows (an armed or held pan).
+    cursor: Cursor,
     /// The app state the article's handlers capture, when it may be reused
     /// ([`ReaderView::memo`]).
     memo: Option<u64>,
@@ -450,6 +666,7 @@ impl<'a> ReaderView<'a> {
             scale: 1.0,
             background: Color::TRANSPARENT,
             scroll_margin: 0.0,
+            cursor: Cursor::Default,
             memo: None,
         }
     }
@@ -526,6 +743,12 @@ impl<'a> ReaderView<'a> {
         if points.is_finite() {
             self.scroll_margin = points.max(0.0);
         }
+        self
+    }
+
+    /// D-06: the pointer shape the article shows while a pan is armed or held.
+    pub fn article_cursor(mut self, cursor: Cursor) -> Self {
+        self.cursor = cursor;
         self
     }
 
@@ -619,6 +842,16 @@ impl<'a> ReaderView<'a> {
         if let Some(max_width) = self.max_width {
             column = column.max_w(max_width);
         }
+        // D-06/R-28: the column's own side padding is empty margin, but its
+        // focusable selection group stops a press before the viewport's drag
+        // handler, so the column takes the same gesture. The text band itself
+        // still refuses to pan, so selection is untouched.
+        column =
+            column.pointer_buttons([PointerButton::Middle]).drag_threshold(PAN_THRESHOLD).cursor(self.cursor).on_drag(
+                |state: &mut WindowState, drag: &mut Drag, tx: &mut Tx| {
+                    state.article_pan(drag, tx);
+                },
+            );
         let scroll = Rc::clone(&self.scroll);
         let signal = self.signal.clone();
 
@@ -631,6 +864,16 @@ impl<'a> ReaderView<'a> {
             .scroll(ScrollSpec { stick_bottom: false })
             .scroll_edge_fade(12.0)
             .scroll_margin(self.scroll_margin)
+            // D-06/R-28: the middle button pans anywhere and never starts Rune's
+            // own middle-click autoscroll; the primary button pans on the empty
+            // margin only (the text keeps selection). A press becomes a pan
+            // after 3 points, so a click stays a click.
+            .pointer_buttons([PointerButton::Middle])
+            .drag_threshold(PAN_THRESHOLD)
+            .cursor(self.cursor)
+            .on_drag(|state: &mut WindowState, drag: &mut Drag, tx: &mut Tx| {
+                state.article_pan(drag, tx);
+            })
             // R-07: Space pages the article even when a clicked block owns the
             // focus, which Rune's focus machine would otherwise press.
             .on_key(|state: &mut WindowState, event: &KeyEvent, tx: &mut Tx| state.article_space(event, tx))
@@ -658,7 +901,12 @@ impl<'a> ReaderView<'a> {
 mod tests {
     use std::collections::HashMap;
 
+    use rune::{Cursor, PointerButton, Runtime, Tx};
+    use tempfile::TempDir;
+
     use super::*;
+    use crate::test_support;
+    use crate::window::WindowState;
 
     const FIXTURE: &str = r#"# A quiet page
 
@@ -868,5 +1116,243 @@ Closing paragraph.
         assert_eq!(block_at_y(bottoms.len(), 3999.0, probe), Some(3), "past the last clamps to it");
         assert_eq!(block_at_y(0, 10.0, probe), None, "an empty document");
         assert_eq!(block_at_y(2, 10.0, |_| None), Some(1), "unmeasurable blocks fall back to the last");
+    }
+
+    // ---- D-06/R-28: drag-to-scroll ------------------------------------------
+
+    fn snapshot(offset: f32, max: f32, viewport: f32) -> ScrollSnapshot {
+        ScrollSnapshot { offset, max, viewport }
+    }
+
+    #[test]
+    fn the_middle_button_may_pan_anywhere_and_the_primary_only_on_the_margin() {
+        let pan = ScrollPan::default();
+        // A 760-point column at x 20 in an 800-point viewport, padded 48.
+        pan.record_geometry(
+            Some([0.0, 40.0, 800.0, 600.0]),
+            Some([20.0, 40.0, 760.0, 2000.0]),
+            Some([68.0, 100.0, 664.0, 1000.0]),
+            48.0,
+        );
+        assert!(pan.may_start(PointerButton::Middle, [400.0, 300.0], 0.0), "the middle button pans over the text");
+        assert!(!pan.may_start(PointerButton::Primary, [400.0, 300.0], 0.0), "the text keeps selection");
+        assert!(pan.may_start(PointerButton::Primary, [30.0, 300.0], 0.0), "the column's side padding is empty margin");
+        assert!(pan.may_start(PointerButton::Primary, [750.0, 300.0], 0.0), "so is the space beside the column");
+        assert!(!pan.may_start(PointerButton::Primary, [80.0, 300.0], 0.0), "just inside the text band does not pan");
+        assert!(pan.may_start(PointerButton::Primary, [400.0, 60.0], 0.0), "above the first block is margin");
+        assert!(pan.may_start(PointerButton::Primary, [400.0, 1200.0], 0.0), "below the last block is margin");
+        assert!(!pan.may_start(PointerButton::Primary, [400.0, 300.0], 200.0), "a scrolled page's text still selects");
+        assert!(!pan.may_start(PointerButton::Back, [30.0, 300.0], 0.0), "only the middle and primary buttons pan");
+    }
+
+    #[test]
+    fn a_pan_starts_after_three_points_and_clamps() {
+        let mut pan = ScrollPan::default();
+        pan.record_geometry(
+            Some([0.0, 40.0, 800.0, 600.0]),
+            Some([20.0, 40.0, 760.0, 2000.0]),
+            Some([68.0, 100.0, 664.0, 1000.0]),
+            48.0,
+        );
+        let at = [30.0, 300.0];
+        assert!(pan.press(PointerButton::Middle, at, 300.0, 1.0), "a press arms the pan");
+        assert_eq!(pan.cursor(), Cursor::Grab, "the press shows an open hand");
+        let scroll = snapshot(300.0, 1000.0, 600.0);
+        assert_eq!(pan.moved(2.0, -2.0, at, scroll, 1.0), None, "2 points is still a click");
+        assert_eq!(pan.moved(0.0, -80.0, [30.0, 220.0], scroll, 1.1), Some(380.0));
+        assert_eq!(pan.cursor(), Cursor::Grabbing, "the held pan shows a closed hand");
+        assert_eq!(pan.moved(0.0, -2000.0, [30.0, -1700.0], scroll, 1.2), Some(1000.0), "the offset clamps at the end");
+        assert!(pan.release(), "the release ends the gesture");
+        assert_eq!(pan.cursor(), Cursor::Default);
+        assert!(!pan.release(), "a second release is nothing");
+    }
+
+    #[test]
+    fn the_edge_bands_autoscroll_toward_the_pointer() {
+        let mut pan = ScrollPan::default();
+        pan.record_geometry(
+            Some([0.0, 100.0, 800.0, 600.0]),
+            Some([20.0, 100.0, 760.0, 2000.0]),
+            Some([68.0, 160.0, 664.0, 1000.0]),
+            48.0,
+        );
+        pan.press(PointerButton::Middle, [400.0, 400.0], 300.0, 1.0);
+        pan.moved(0.0, -30.0, [400.0, 695.0], snapshot(300.0, 1000.0, 600.0), 1.0);
+        let scroll = snapshot(300.0, 1000.0, 600.0);
+        let (target, wake) = pan.autoscroll(scroll, 1.1).expect("the bottom band scrolls down");
+        assert!(target > 300.0, "toward the end: {target}");
+        assert!((wake - (1.1 + 1.0 / 60.0)).abs() < 1e-6);
+
+        pan.moved(0.0, -30.0, [400.0, 300.0], scroll, 1.1);
+        assert_eq!(pan.autoscroll(scroll, 1.2), None, "the middle of the page is still");
+
+        pan.moved(0.0, -30.0, [400.0, 105.0], scroll, 1.2);
+        let (up, _) = pan.autoscroll(snapshot(300.0, 1000.0, 600.0), 1.3).expect("the top band scrolls up");
+        assert!(up < 300.0, "toward the start: {up}");
+    }
+
+    /// A reader runtime laid out twice, so the toolbar and article have sizes.
+    fn reader_runtime(temp: &TempDir, width: f32) -> Runtime<WindowState> {
+        let mut state = WindowState::new(test_support::shared(temp));
+        crate::view::scene_reader(&mut state);
+        let mut runtime = Runtime::new(state, crate::view::view, (width, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime
+    }
+
+    fn rect(runtime: &Runtime<WindowState>, key: &str) -> [f32; 4] {
+        runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .map(|element| element.rect)
+            .expect(key)
+    }
+
+    fn offset(runtime: &Runtime<WindowState>) -> f32 {
+        runtime.state.reading.scroll.get().offset
+    }
+
+    #[test]
+    fn a_middle_drag_over_the_text_pans_the_article() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = reader_runtime(&temp, 1100.0);
+        let scroll = rect(&runtime, ARTICLE_SCROLL_KEY);
+        let (x, y) = (scroll[0] + scroll[2] * 0.5, scroll[1] + scroll[3] * 0.5);
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.button_down(x, y, PointerButton::Middle);
+        runtime.frame(0.0);
+        assert_eq!(runtime.state.reader_pan.cursor(), Cursor::Grab);
+        runtime.pointer_move(x, y - 140.0);
+        runtime.frame(0.0);
+        runtime.pointer_move(x, y - 160.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.button_up(x, y - 160.0, PointerButton::Middle);
+        runtime.frame(0.0);
+        assert!(offset(&runtime) > 80.0, "the middle drag moved the article: {}", offset(&runtime));
+        assert_eq!(runtime.state.reader_pan.cursor(), Cursor::Default);
+    }
+
+    #[test]
+    fn a_left_drag_pans_only_on_the_empty_margin() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = reader_runtime(&temp, 1100.0);
+        let scroll = rect(&runtime, ARTICLE_SCROLL_KEY);
+        let y = scroll[1] + scroll[3] * 0.5;
+        // The column is centred at 170 points, 760 wide, padded 48: 30 is margin.
+        let margin = scroll[0] + 30.0;
+        runtime.pointer_move(margin, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(margin, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(margin, y - 90.0);
+        runtime.frame(0.0);
+        runtime.pointer_move(margin, y - 120.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.pointer_up(margin, y - 120.0);
+        runtime.frame(0.0);
+        assert!(offset(&runtime) > 60.0, "the margin drag moved the article: {}", offset(&runtime));
+
+        // The column's own side padding (760 wide at x 170, padded 48) is
+        // margin too, and its focusable group would otherwise swallow the press.
+        let mut runtime = reader_runtime(&temp, 1100.0);
+        let scroll = rect(&runtime, ARTICLE_SCROLL_KEY);
+        let x = scroll[0] + 170.0;
+        let y = scroll[1] + scroll[3] * 0.5;
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(x, y - 90.0);
+        runtime.frame(0.0);
+        runtime.pointer_move(x, y - 120.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.pointer_up(x, y - 120.0);
+        runtime.frame(0.0);
+        assert!(offset(&runtime) > 60.0, "the column's padding pans: {}", offset(&runtime));
+
+        // From the text, the same gesture is a selection, not a pan.
+        let mut runtime = reader_runtime(&temp, 1100.0);
+        let scroll = rect(&runtime, ARTICLE_SCROLL_KEY);
+        let x = scroll[0] + scroll[2] * 0.5;
+        let y = scroll[1] + scroll[3] * 0.5;
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(x, y - 90.0);
+        runtime.frame(0.0);
+        runtime.pointer_up(x, y - 90.0);
+        runtime.frame(0.0);
+        assert_eq!(offset(&runtime), 0.0, "a text drag stays selection");
+    }
+
+    #[test]
+    fn a_two_point_move_is_still_a_click() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = reader_runtime(&temp, 1100.0);
+        let scroll = rect(&runtime, ARTICLE_SCROLL_KEY);
+        let x = scroll[0] + 30.0;
+        let y = scroll[1] + scroll[3] * 0.5;
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(x, y - 2.0);
+        runtime.frame(0.0);
+        runtime.pointer_move(x, y - 2.5);
+        runtime.frame(0.0);
+        assert_eq!(offset(&runtime), 0.0, "under three points nothing moves");
+        runtime.pointer_move(x, y - 40.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        assert!(offset(&runtime) > 20.0, "past the threshold the article follows: {}", offset(&runtime));
+        runtime.pointer_up(x, y - 40.0);
+        runtime.frame(0.0);
+    }
+
+    #[test]
+    fn holding_the_pointer_in_an_edge_band_keeps_scrolling() {
+        let temp = TempDir::new().unwrap();
+        let mut runtime = reader_runtime(&temp, 1100.0);
+        runtime.poll = Some(|state: &mut WindowState, now, tx: &mut Tx| state.poll(now, tx));
+        let scroll = rect(&runtime, ARTICLE_SCROLL_KEY);
+        let margin = scroll[0] + 30.0;
+        let middle = scroll[1] + scroll[3] * 0.5;
+        // First get the page away from the top.
+        runtime.pointer_move(margin, middle);
+        runtime.frame(0.0);
+        runtime.pointer_down(margin, middle);
+        runtime.frame(0.0);
+        runtime.pointer_move(margin, middle - 300.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        runtime.pointer_up(margin, middle - 300.0);
+        runtime.frame(0.0);
+        let start = offset(&runtime);
+        assert!(start > 200.0, "the first drag scrolled: {start}");
+
+        // A held press near the bottom edge scrolls on by itself.
+        runtime.pointer_move(margin, middle);
+        runtime.frame(0.0);
+        runtime.pointer_down(margin, middle);
+        runtime.frame(0.0);
+        runtime.pointer_move(margin, scroll[1] + scroll[3] - 6.0);
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let before = offset(&runtime);
+        for _ in 0..12 {
+            runtime.frame(0.05);
+        }
+        let after = offset(&runtime);
+        assert!(after > before + 20.0, "the edge autoscroll continued: {before} -> {after}");
+        runtime.pointer_up(margin, scroll[1] + scroll[3] - 6.0);
+        runtime.frame(0.0);
     }
 }
