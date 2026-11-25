@@ -52,12 +52,12 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
 | Window chrome | 10 | 2 | 3 | 1 | 0 | 4 |
-| Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
+| Drag and drop | 8 | 3 | 2 | 2 | 1 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
 | Accessibility | 15 | 12 | 0 | 3 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **242** | **54** | **23** | **5** | **18** |
+| **All** | **342** | **243** | **54** | **23** | **4** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -374,7 +374,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 - [x] **D-01** Drop overlay (P1 · Drag file over window: overlay.) — done
 - [x] **D-02** File drop (P0 · Drop 3 files on tab 2: tabs inserted there.) — done
-- [ ] **D-03** Image drop in editor (P1 · Drop PNG while editing inserts image.) — missing
+- [x] **D-03** Image drop in editor (P1 · Drop PNG while editing inserts image.) — done
 - [~] **D-04** Tab drag (P0 · Reorder and tear-off.) — partial
 - [x] **D-05** Cross-window ghost (P1 · Ghost follows pointer over other window.) — substitute
 - [ ] **D-06** Drag-to-scroll (P1 · Middle-drag scrolls.) — missing

@@ -18,7 +18,7 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 242 done, 54 substitute, 23 partial, 5 missing, 18 n/a.
+**342 rows:** 243 done, 54 substitute, 23 partial, 4 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
@@ -34,12 +34,12 @@ matches this audit.
 | Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
 | Window chrome | 10 | 2 | 3 | 1 | 0 | 4 |
-| Drag and drop | 8 | 2 | 2 | 2 | 2 | 0 |
+| Drag and drop | 8 | 3 | 2 | 2 | 1 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
 | Accessibility | 15 | 12 | 0 | 3 | 0 | 0 |
 | Internationalization | 11 | 4 | 3 | 3 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **242** | **54** | **23** | **5** | **18** |
+| **All** | **342** | **243** | **54** | **23** | **4** | **18** |
 
 ## P0 gaps (8)
 

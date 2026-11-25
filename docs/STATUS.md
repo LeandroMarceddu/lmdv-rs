@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-24
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (242 done, 54 substitutes, 23 partial, 5 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.10.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (243 done, 54 substitutes, 23 partial, 4 missing, 18 n/a), the app-side P0s and a broad P1/P2 batch are implemented, the default Markdown handler covers Windows and Linux, the table/scroll/PDF/editor fixes are in, and v0.10.0 is released. Remaining: 8 P0 partials (Rune/rune-kit or X-02), the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
