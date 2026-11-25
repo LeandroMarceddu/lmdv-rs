@@ -1,7 +1,7 @@
 # Status
 
-**Updated:** 2026-11-24
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (257 done, 54 substitutes, 13 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.10.0 is released. Remaining: 7 P0 partials (Rune/rune-kit), six P1/P2 clauses, the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
+**Updated:** 2026-11-25
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (257 done, 54 substitutes, 13 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.10.0 is released. Remaining: 7 P0 partials (kit patches, two small Rune patches or app-side wiring), six P1/P2 clauses, the scheduled Rune port (OI-189), reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -530,13 +530,32 @@
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
 - Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 36 open OIs. Post-0.10.0; no new tag.
 
+## Rune upstream — 2026-11-25
+
+- Two read-only probes measured the delta from pin `cca5df6` to `f4ec14e`:
+  **927 commits** (764 since the last survey, ~250/day); `dev` is the default
+  branch and there is no `main`.
+- Patch 0002 (close veto) is now upstream (`CloseResponse` /
+  `on_close_request`); delete it. 0001/0003/0004 move into `rune-text`; 0005
+  moves into `rune-mermaid/canvas/`. 0001 has two new traps: `1 << 61` is now
+  `SPAN_BOX`, and layout hashing gates on `affects_layout`.
+- The bump makes L-12 SVG vectors (`Path::from_svg`/`El::shape`/`El::inline`),
+  C-01 (`TextEdit::is_composing`), O-14's Alt+arrows (`on_key_preview`),
+  A-05/A-06 (`controls`/`owns`/`position_in_set`), V-02 pinch and D-08
+  drag-cancel app-side. T-01/T-03/D-04/I-10 still need kit patches; E-29 stays
+  large.
+- The vendor bump adds `naga`, `sctk-adwaita`, `accesskit_atspi_common` to
+  `[patch.crates-io]` and moves `tiny-skia-path`; `check-vendor.sh` needs the
+  new path. Estimate 25–39 h. Details:
+  `docs/RUNE_DELTA_2026-11-25.md`.
+
 ## Next up
 
 **Next when work resumes:**
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
-2. Close or accept the 7 remaining P0 rows: Rune/rune-kit blocks T-01/T-03/D-04/O-14/C-01/L-11/I-10. Remaining P1/P2 clauses are A-05/A-06 (tab/tree ARIA, kit), E-29 (multi-cursor, Rune), L-12 (inline SVG vector shapes, OI-195), V-02 (inline hover, OI-182) and D-08 (kit drag-cancel).
-3. The scheduled Rune port to `63ad0209` (OI-189, `docs/RUNE_DELTA_2026-11-22.md`); queued, **not started** — now includes patch 0005 (Mermaid SVG).
+2. Close or accept the 7 remaining P0 rows: T-01/T-03/D-04/I-10 need rune-kit patches (OI-190); O-14's browser-key half and L-11's middle-drag release need small Rune patches; C-01 is app-side (`TextEdit::is_composing`). After the bump, L-12 (SVG vectors), A-05/A-06, O-14's Alt+arrows, V-02 and D-08 become app-side work; E-29 stays a large Rune patch or an accepted gap.
+3. The Rune port (OI-189) to a rev pinned at the start — measured at `f4ec14ed` (2026-11-25): 927 commits past the pin, 0002 now upstream, four patches to port, 25–39 h (~3–5 days). See `docs/RUNE_DELTA_2026-11-25.md`. Queued, **not started**.
 4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime is implemented but needs the manual checklist in OI-155.
 
 **Known-failing:** none in the workspace gate; only the unrelated macOS Rune smoothing test fails on Linux.

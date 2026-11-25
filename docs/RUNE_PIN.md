@@ -4,8 +4,9 @@
 - Snapshot commit: `cca5df6fafb4721d96fe105f126ebfd2ec351bb6`
 - Branch: `dev`
 - Snapshot date: 2026-11-17
-- Upstream head checked 2026-11-22: `63ad0209edc9a3a7d2208b7f6c66f9e353da315d`
-  (163 commits ahead; port [OI-189](OPEN_ITEMS.md) queued, pin unchanged)
+- Upstream head checked 2026-11-25: `f4ec14ed32256ae0c36e73476825f9245437de5b`
+  (927 commits ahead; `dev` is the default branch and there is no `main`; port
+  [OI-189](OPEN_ITEMS.md) queued, pin unchanged)
 - License: MIT
 - Toolchain pinned by upstream: Rust `1.99.1` (`rust-toolchain.toml`)
 

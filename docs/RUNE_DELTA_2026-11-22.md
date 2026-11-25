@@ -1,5 +1,9 @@
 # Rune upstream delta — 2026-11-22
 
+> Superseded by [`RUNE_DELTA_2026-11-25.md`](RUNE_DELTA_2026-11-25.md).
+> The upstream head moved 764 commits in three days; this file is kept for
+> the patch mapping as it stood at `63ad0209`.
+
 Research against the pin in [`RUNE_PIN.md`](RUNE_PIN.md). Supersedes
 [`RUNE_DELTA_2026-11-20.md`](RUNE_DELTA_2026-11-20.md).
 
