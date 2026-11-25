@@ -241,6 +241,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | OI-196 | P6-V lightbox | SVG image files could not be copy/saved | Fixed: public `lmdv_export::raster::svg_to_png(bytes, scale)` (+sized), intrinsic×scale, 4096 cap, opaque white, bundled fonts; `lightbox::read_png` rasterizes SVG before the PNG path. Tests + clipboard proof. | P6 | fixed |
 | OI-197 | P6-R reader menu | The reader block menu had no “Find in document” entry | Fixed: viewer-only `block-menu-item1` calls `find_in_document_from_block_menu` (same prefill/focus path); absent in the editor. Test + tree proof. | P6 | fixed |
 | OI-198 | P6-O outline | The outline filter had no keyboard cursor | Fixed: first visible row after typing, ↑/↓ among visible rows with clamp, Enter-to-cursor, Esc/clear drop, per-tab reset; the cursor row draws select-only so the field keeps focus. Tests + tree proof. | P6 | fixed |
+| OI-199 | P7-PERF app | Closing a large document frees its `Document`, parse and registry entry, but RSS stays high: `developer-guide.md` (951 KB) took a release build from ~30 MB to ~600 MB, and stayed ~600 MB after close. A deferred `malloc_trim` two frames later dropped it to ~385 MB; the remaining ~350 MB survived Rune's 10 s rest, 30 s idle, an explicit memo clear and a minimize. | Add a deferred post-close heap trim (glibc arenas) and identify/evict the remaining Rune layout/render state; then add an RSS regression scene. | P7 | open |
 | OI-180 | P6-SAFE app | A watcher-observed external rename is rekeyed by the first window that processes the shared event; later windows keep the old Back/Forward spelling until reopened | `rename_history_paths` now broadcasts `UiMsg::DocumentRenamed` through `broadcast_window_rename`, so every window renames its places and refreshes the document's titles, including windows that never show the file. Tested with three windows. | P6 | fixed |
 
 ## 2. Resolved actions (examples)
@@ -270,7 +271,7 @@ These came directly from worker “known limitations” and were acted on:
 
 Derived from the register rows above. Behavior-level status is in `docs/PARITY_AUDIT.md`.
 
-- **Open (35):** OI-001, 024, 025, 026, 041, 042, 044, 049, 051, 054, 055, 058, 059, 061, 074, 093, 094, 096, 097, 102, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 155, 176, 182, 190, 195
+- **Open (36):** OI-001, 024, 025, 026, 041, 042, 044, 049, 051, 054, 055, 058, 059, 061, 074, 093, 094, 096, 097, 102, 111, 112, 117, 120, 121, 122, 123, 124, 125, 126, 155, 176, 182, 190, 195, 199
 - **Scheduled (4):** OI-003, 023, 027, 050
 - **Accepted (32):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 141, 150, 154, 157, 161, 163, 166, 174, 175, 177, 179
 - **Fixed (104):** kept for history.
