@@ -80,9 +80,22 @@ impl Span {
     /// What [`Self::affects_layout`] depends on, hashed into a layout's key.
     pub(crate) fn hash_layout(&self, h: &mut impl std::hash::Hasher) {
         use std::hash::Hash;
+        (self.start, self.end, self.layout_attr_key()).hash(h);
+    }
+
+    /// Non-range fields that affect shaping, line metrics, or decorations.
+    ///
+    /// Paragraph-key reuse compares this directly (`paragraphs/keying.rs`), so the image's
+    /// pixels and geometry and the rise's bits are part of it: a changed formula must never
+    /// reuse a layout shaped for another picture or baseline.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn layout_attr_key(
+        &self,
+    ) -> (bool, Option<u32>, Option<u32>, bool, bool, Option<u32>, bool, u32, Option<((u64, u64), [u32; 4])>) {
+        let image = self.image.as_deref().map(|i| {
+            (i.pixels.signature(), [i.width.to_bits(), i.height.to_bits(), i.ascent.to_bits(), i.descent.to_bits()])
+        });
         (
-            self.start,
-            self.end,
             self.mono,
             self.weight.map(f32::to_bits),
             self.size.map(f32::to_bits),
@@ -91,18 +104,8 @@ impl Span {
             self.bg.map(|_| self.bg_pad.to_bits()),
             self.underline.is_some(),
             self.rise.to_bits(),
+            image,
         )
-            .hash(h);
-        if let Some(image) = &self.image {
-            (
-                image.pixels.signature(),
-                image.width.to_bits(),
-                image.height.to_bits(),
-                image.ascent.to_bits(),
-                image.descent.to_bits(),
-            )
-                .hash(h);
-        }
     }
 
     /// A rounded `color` background padded by `pad` points, as inline code draws.
@@ -241,6 +244,8 @@ pub struct PillChip {
     pub fg: Option<Color>,
     pub ring: Option<(Color, f32)>,
     pub radius: Option<f32>,
+    pub pad_x: Option<f32>,
+    pub margin_x: Option<f32>,
     pub bare: Option<Box<BareIcon>>,
 }
 
@@ -297,6 +302,7 @@ pub(crate) fn is_hidden_size(font_size: f32) -> bool {
 /// A pill chip's horizontal geometry in points for text of `size` points: the room before its
 /// label (outer margin, padding, then any icon and its gap) and after it (padding, margin).
 #[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PillMetrics {
     pub margin: f32,
     pub pad: f32,
@@ -314,6 +320,15 @@ impl PillMetrics {
         }
     }
 
+    /// Resolves defaults with any per-chip `pad_x` / `margin_x` overrides (clamped to `>= 0.0`).
+    pub fn for_chip(&self, chip: &PillChip) -> Self {
+        Self {
+            margin: chip.margin_x.map_or(self.margin, nonneg_pt),
+            pad: chip.pad_x.map_or(self.pad, nonneg_pt),
+            ..*self
+        }
+    }
+
     /// Room before the label, inside the chip and out.
     pub fn lead(&self, icon: bool) -> f32 {
         self.margin + self.pad + if icon { self.icon + self.icon_gap } else { 0.0 }
@@ -324,18 +339,28 @@ impl PillMetrics {
     }
 }
 
-/// Tags the inline boxes around pill labels: the rest of the id is the pill's index shifted
+/// Tags the inline boxes around pill labels: the lower bits carry the pill's index shifted
 /// left once, with the low bit set on the box after the label.
 pub(crate) const PILL_BOX: u64 = 1 << 62;
+
+/// Set alongside [`PILL_BOX`] for a bare inline icon (no chip box, not a replaced image), whose
+/// leading box only needs to stay on the line of its label's first characters.
+pub(crate) const PILL_BARE: u64 = 1 << 59;
+
+/// Pill slice index stored in a [`PILL_BOX`] inline box id.
+pub(crate) const fn pill_index(id: u64) -> usize {
+    ((id & !(PILL_BOX | PILL_BARE)) >> 1) as usize
+}
 
 /// Tags the inline boxes around padded [`SpanBox`] ranges: the rest of the id is the box's index
 /// shifted left once, with the low bit set on the trailing spacer.
 pub(crate) const SPAN_BOX: u64 = 1 << 61;
 
 /// Tags an inline image's box: the rest of the id is the image span's index in the layout's
-/// spans (see [`Span::image`]). A bit of its own: `SPAN_BOX` and `INLINE_BOX` already sit at
-/// `1 << 61` and `1 << 60`, and `cursor.rs`, `line_break.rs` and `pill_chips.rs` read those.
-pub(crate) const IMAGE_BOX: u64 = 1 << 59;
+/// spans (see [`Span::image`]). Its own bit: `PILL_BOX`, `PILL_BARE`, `SPAN_BOX` and
+/// `INLINE_BOX` already sit at `1 << 62`, `1 << 59`, `1 << 61` and `1 << 60`, and
+/// `cursor.rs`, `line_break.rs` and `pill_chips.rs` read those. `1 << 58` is free.
+pub(crate) const IMAGE_BOX: u64 = 1 << 58;
 
 /// Tags in-flow element [`InlineBox`] slots: the lower bits carry the index into the slice of
 /// [`InlineBoxRun`]s passed to shaping.
@@ -646,6 +671,7 @@ pub fn flatten_spans(spans: &[Span]) -> Vec<Span> {
             if s.underline.is_some() {
                 m.underline = s.underline;
             }
+            m.italic |= s.italic;
             // An image draws at its span's first byte: the interval starting there keeps it,
             // and the rest of a split span keeps its look but no second copy of the image.
             if s.image.is_some() && a == s.start {
@@ -654,7 +680,6 @@ pub fn flatten_spans(spans: &[Span]) -> Vec<Span> {
             if s.rise != 0.0 {
                 m.rise = s.rise;
             }
-            m.italic |= s.italic;
         }
         if let Some(m) = merged {
             if let Some(last) = out.last_mut()
@@ -691,6 +716,8 @@ pub struct Link {
     #[doc(hidden)]
     pub id: String,
     #[doc(hidden)]
+    pub href: Option<String>,
+    #[doc(hidden)]
     pub role: &'static str,
     #[doc(hidden)]
     pub label: Option<String>,
@@ -711,6 +738,7 @@ impl Link {
             start: range.start as u32,
             end: range.end as u32,
             id: id.into(),
+            href: None,
             role: "link",
             label: None,
             hover: LinkPaint::default(),
@@ -718,6 +746,21 @@ impl Link {
             focused: None,
             help: None,
         }
+    }
+    /// Real address behind this link (such as an `http:`, `https:` or `mailto:` URL) when `id`
+    /// is an internal key rather than a URL. Used by Rune's default link context menu
+    /// (`Copy Link`) and accessibility metadata; an empty string sets none.
+    ///
+    /// ```
+    /// use rune_text::Link;
+    ///
+    /// let link = Link::new(0..4, "doc-42").href("https://example.com/42");
+    /// assert_eq!(link.href.as_deref(), Some("https://example.com/42"));
+    /// ```
+    pub fn href(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        self.href = (!url.is_empty()).then_some(url);
+        self
     }
     /// Accessibility role, such as "button" for a file chip.
     pub fn role(mut self, role: &'static str) -> Self {

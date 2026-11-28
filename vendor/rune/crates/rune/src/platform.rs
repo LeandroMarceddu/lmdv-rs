@@ -1,6 +1,10 @@
 pub(crate) mod accent;
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 pub(crate) mod activation;
+#[cfg(target_os = "android")]
+pub mod android;
+#[cfg(all(test, not(target_os = "android")))]
+pub(crate) mod android;
 pub(crate) mod app_icon;
 #[cfg(target_os = "linux")]
 pub(crate) mod cpu_frames;
@@ -9,9 +13,9 @@ pub(crate) mod desktop_settings;
 pub(crate) mod display_link;
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) mod display_link_machine;
-#[cfg(target_vendor = "apple")]
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
 pub mod embed;
-#[cfg(any(test, target_vendor = "apple"))]
+#[cfg(any(test, target_vendor = "apple", target_os = "android"))]
 pub(crate) mod embed_frame;
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) mod gl_links;
@@ -21,6 +25,8 @@ pub(crate) mod languages;
 pub(crate) mod layer_shell;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) mod layer_shell_machine;
+#[cfg(any(test, target_os = "linux"))]
+pub(crate) mod linux_color_scheme;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
 #[cfg(target_os = "macos")]
@@ -34,6 +40,7 @@ pub(crate) mod preferences;
 pub(crate) mod ready_signal;
 pub(crate) mod reopen;
 pub(crate) mod scroll_bars;
+pub(crate) mod text_scale;
 #[cfg(any(test, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 pub(crate) mod wayland;
 #[cfg(target_arch = "wasm32")]

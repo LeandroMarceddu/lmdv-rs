@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::render::{Gpu, OFFSCREEN_FORMAT, OFFSCREEN_FORMAT_LINEAR, Offscreen, Renderer};
 use crate::runtime::{AppDriver, Env, RuntimeCore, Waker};
-use crate::tooling::{AppSpec, Args, runtime_for, tree_json_core};
+use crate::tooling::{AppSpec, Args, runtime_for_configured, tree_json_core};
 
 thread_local! {
     static ORIGINAL_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -331,12 +331,16 @@ fn control_input_core(core: &mut RuntimeCore, app: &mut dyn AppDriver, command: 
 /// `{"id":3,"pause":true}`, `{"id":4,"step":0.05}`, or `{"id":5,"quit":true}`.
 /// Every request and patch publishes a PNG + JSON tree, then a flushed completion marker.
 #[inline]
-fn headless<S: 'static>(spec: &AppSpec<S>, state: S, args: Args, runtime: crate::app::RuntimeConfig<S>) {
+fn headless<S: 'static>(spec: &AppSpec<S>, state: S, args: Args, mut runtime: crate::app::RuntimeConfig<S>) {
     assert!(enabled(), "--snap-on-patch requires --hot or RUNE_HOT=1 (use scripts/rune-dev)");
+    runtime.respect_user_font_smoothing = false;
+    if let Some(mode) = args.font_smoothing {
+        runtime.font_smoothing = mode;
+    }
     let size = args.size.unwrap_or(spec.size);
     let scale = args.scale.unwrap_or(2.0);
     let (wake, sleep) = std::sync::mpsc::channel();
-    let mut rt = runtime_for(
+    let mut rt = runtime_for_configured(
         spec,
         state,
         size,
@@ -344,8 +348,8 @@ fn headless<S: 'static>(spec: &AppSpec<S>, state: S, args: Args, runtime: crate:
         Arc::new(move || {
             wake.send(()).ok();
         }),
+        Some(runtime),
     );
-    rt.configure(runtime);
     let state_addr = format!("{:p}", crate::runtime::handler_state_ref(&rt.state) as *const dyn Any as *const ());
     let (core, mut app) = rt.split_mut();
     headless_core(core, &mut app, state_addr, size, scale, args, sleep);

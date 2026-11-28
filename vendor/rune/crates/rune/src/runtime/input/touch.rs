@@ -86,8 +86,9 @@ impl HoldState {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(in crate::runtime) enum HoldEvent {
-    /// A hold-eligible touch began at runtime clock `now` with event timestamp `event_time`.
-    Start { now: f64, event_time: f64, policy: TouchHoldPolicy },
+    /// A hold-eligible touch began at runtime clock `now` with event timestamp `event_time` and
+    /// configured long-press delay `delay` (seconds).
+    Start { now: f64, event_time: f64, policy: TouchHoldPolicy, delay: f64 },
     /// A frame ticked at runtime clock `now`.
     Tick { now: f64, policy: TouchHoldPolicy },
     /// The host's low-priority confirmation turn ran for `attempt`.
@@ -110,13 +111,22 @@ pub(in crate::runtime) enum HoldEffect {
     Fire,
 }
 
-/// Hold timeout duration for `policy` (`LONG_PRESS` for direct/confirming timers,
-/// `HOST_HOLD_FALLBACK` behind the browser's live `contextmenu` under `HostContextMenu`).
+/// Validates a host-supplied touch long-press delay in seconds: positive finite values override
+/// [`LONG_PRESS`]; zero, negative, or non-finite values fall back to [`LONG_PRESS`].
 #[inline]
-pub(in crate::runtime) fn hold_duration(policy: TouchHoldPolicy) -> f64 {
+fn sanitize_long_press(secs: f64) -> Option<f64> {
+    (secs.is_finite() && secs > 0.0).then_some(secs)
+}
+
+/// Hold timeout duration for `policy` and host-configured `long_press` delay (`long_press` or
+/// [`LONG_PRESS`] for direct/confirming timers, at least `HOST_HOLD_FALLBACK` behind the browser's
+/// live `contextmenu` under `HostContextMenu`).
+#[inline]
+pub(in crate::runtime) fn hold_duration(policy: TouchHoldPolicy, long_press: f64) -> f64 {
+    let base = sanitize_long_press(long_press).unwrap_or(LONG_PRESS);
     match policy {
-        TouchHoldPolicy::DirectTimer | TouchHoldPolicy::ConfirmingTimer => LONG_PRESS,
-        TouchHoldPolicy::HostContextMenu => HOST_HOLD_FALLBACK,
+        TouchHoldPolicy::DirectTimer | TouchHoldPolicy::ConfirmingTimer => base,
+        TouchHoldPolicy::HostContextMenu => HOST_HOLD_FALLBACK.max(base),
     }
 }
 
@@ -126,8 +136,13 @@ pub(in crate::runtime) fn hold_duration(policy: TouchHoldPolicy) -> f64 {
 /// (`kCompensateGestureDetectorTimeouts` with `kCompensateGestureTimeoutsForLongDelayedSequences = false`):
 /// a malformed/future timestamp or a press delayed by `>= timeout` arms a full `timeout` instead
 /// of firing immediately.
-pub(in crate::runtime) fn compensated_hold_due(now: f64, event_time: f64, policy: TouchHoldPolicy) -> f64 {
-    let timeout = hold_duration(policy);
+pub(in crate::runtime) fn compensated_hold_due(
+    now: f64,
+    event_time: f64,
+    policy: TouchHoldPolicy,
+    long_press: f64,
+) -> f64 {
+    let timeout = hold_duration(policy, long_press);
     if policy == TouchHoldPolicy::DirectTimer || !event_time.is_finite() {
         return now + timeout;
     }
@@ -138,10 +153,10 @@ pub(in crate::runtime) fn compensated_hold_due(now: f64, event_time: f64, policy
 /// Pure transition function for touch long-press recognition.
 pub(in crate::runtime) fn step_hold(seq: &mut Seq, state: &mut HoldState, event: HoldEvent) -> Effects<HoldEffect> {
     match event {
-        HoldEvent::Start { now, event_time, policy } => {
+        HoldEvent::Start { now, event_time, policy, delay } => {
             let cancel = matches!(*state, HoldState::Confirming { .. });
             let attempt = seq.next();
-            let due = compensated_hold_due(now, event_time, policy);
+            let due = compensated_hold_due(now, event_time, policy, delay);
             *state = HoldState::Armed { attempt, due };
             if cancel {
                 Effects::two(HoldEffect::CancelConfirm, HoldEffect::WakeAt(due))
@@ -200,6 +215,8 @@ pub(in crate::runtime) struct Touch {
     hold_seq: Seq,
     hold: HoldState,
     policy: TouchHoldPolicy,
+    /// Host-supplied long-press delay in seconds (`None` uses [`LONG_PRESS`]).
+    long_press: Option<f64>,
     hold_command: Option<TouchHoldCommand>,
     /// [`Drag::data`] kept across an `El::on_edge_drag` gesture's phases.
     pub(in crate::runtime) edge_data: f32,
@@ -278,6 +295,20 @@ impl RuntimeCore {
         self.pointer.touch.policy = policy;
     }
 
+    /// Configures the touch long-press delay in seconds (for example from Android's
+    /// `ViewConfiguration.getLongPressTimeout()`). Non-positive or non-finite values fall back
+    /// to [`LONG_PRESS`] (0.5 s).
+    #[inline]
+    pub(crate) fn set_touch_long_press(&mut self, secs: f64) {
+        self.pointer.touch.long_press = sanitize_long_press(secs);
+    }
+
+    /// Active touch long-press delay in seconds (defaults to [`LONG_PRESS`], 0.5 s).
+    #[inline]
+    pub(crate) fn touch_long_press(&self) -> f64 {
+        self.pointer.touch.long_press.unwrap_or(LONG_PRESS)
+    }
+
     /// Takes the latest host-side confirmation command produced by the touch hold state machine.
     #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
     #[inline]
@@ -289,6 +320,24 @@ impl RuntimeCore {
     /// Web, mapped onto the runtime clock from `PointerEvent.timeStamp`). A host with touches
     /// calls this for every one; `id` tells fingers apart.
     pub(crate) fn touch(&mut self, app: &mut dyn AppDriver, id: u64, phase: TouchPhase, x: f32, y: f32, time: f64) {
+        self.touch_with_pointer(app, id, phase, x, y, time, cx::PrimaryPointer::Touch);
+    }
+
+    /// Like [`Self::touch`], tagging the native pointer class (`Touch` for fingers, `Hover` for
+    /// Windows `WM_POINTER*` pens that winit also forwards as `WindowEvent::Touch`).
+    pub(crate) fn touch_with_pointer(
+        &mut self,
+        app: &mut dyn AppDriver,
+        id: u64,
+        phase: TouchPhase,
+        x: f32,
+        y: f32,
+        time: f64,
+        pointer: cx::PrimaryPointer,
+    ) {
+        if phase != TouchPhase::Cancelled {
+            self.sync_primary_pointer(pointer);
+        }
         match phase {
             TouchPhase::Started => self.touch_down(app, id, x, y, time),
             TouchPhase::Moved => self.touch_move(app, id, x, y, time),
@@ -381,6 +430,13 @@ impl RuntimeCore {
                 }
                 TouchEffect::PanMove { scroll, along } => self.touch_scroll_move(scroll, along),
                 TouchEffect::EndScroll { scroll, velocity } => self.touch_scroll_end(scroll, velocity),
+                TouchEffect::BeginTouchSelectionDrag { origin: (x, y) } => self.begin_touch_selection_drag(x, y),
+                TouchEffect::CommitTap((x, y)) => self.commit_touch_tap(app, x, y),
+                TouchEffect::CommitWindowDragTap => {
+                    if self.kbd.focus.path().is_some() {
+                        self.frame.queue.push(Action::Blur);
+                    }
+                }
                 TouchEffect::PointerMove((x, y)) => self.pointer_move(app, x, y),
                 TouchEffect::PointerUp((x, y)) => self.pointer_up(app, x, y),
                 TouchEffect::PointerLeave => self.pointer_leave(),
@@ -429,7 +485,7 @@ impl RuntimeCore {
         let has_edge = edge_drag::any_candidate(edge);
         let scroll = self.touch_scroll_start(x, y);
         self.pointer_move(app, x, y);
-        self.press_down(app, x, y, true);
+        let tap_focus = self.press_down(app, x, y, true);
         let now = self.now_clock();
         let policy = self.pointer.touch.policy;
         let (mode, start_hold) = if self.host.titlebar.resize.is_some() {
@@ -455,11 +511,14 @@ impl RuntimeCore {
                     (Mode::Drag, false)
                 }
                 // An at-once drag in an edge zone waits for the slop, but still has no long press.
-                None => (Mode::Pending { scroll, edge }, !(has_edge && self.press_drags_at_once())),
+                None => (Mode::Pending { scroll, edge, tap_focus }, !(has_edge && self.press_drags_at_once())),
             }
         };
-        let hold_event =
-            if start_hold { HoldEvent::Start { now, event_time: time, policy } } else { HoldEvent::Cancel };
+        let hold_event = if start_hold {
+            HoldEvent::Start { now, event_time: time, policy, delay: self.touch_long_press() }
+        } else {
+            HoldEvent::Cancel
+        };
         let hold_effects = step_hold(&mut self.pointer.touch.hold_seq, &mut self.pointer.touch.hold, hold_event);
         let _ = self.apply_hold_effects(hold_effects);
         let finger = Finger { id, origin: (x, y), pos: (x, y), last: 0.0, at: time, velocity: 0.0, mode };
@@ -557,6 +616,56 @@ impl RuntimeCore {
             .is_some_and(|i| self.tree.nodes[i].handlers.touch_at_once && self.tree.nodes[i].handlers.on_drag.is_some())
     }
 
+    /// A non-scrollable finger crossed `TOUCH_SLOP` off any `on_drag` control: start selection
+    /// dragging only if it landed on selectable text (cancelling a dragged press on a text input
+    /// so it neither steals focus nor fires a press).
+    fn begin_touch_selection_drag(&mut self, x: f32, y: f32) {
+        let target = self.primary_target(x, y);
+        if target.and_then(|t| self.textbox_input(t)).is_some() {
+            if let Some(held) = self.pointer.press.held_mut() {
+                held.hit = capture::Hit::Cancelled;
+            }
+            return;
+        }
+        if !target.is_some_and(|t| self.press_keeps_selection(t))
+            && (self.selectable_at(x, y).is_some() || self.marker_anchor_at(x, y).is_some())
+        {
+            self.press_selection(target, x, y);
+        }
+    }
+
+    /// Finger lifted within `TOUCH_SLOP` as a tap: commit the focus, blur and selection changes
+    /// that `press_down` deferred so pans, pinches, edge swipes and long presses keep the active
+    /// field's focus and soft keyboard undisturbed.
+    fn commit_touch_tap(&mut self, app: &dyn ViewDriver, x: f32, y: f32) {
+        self.move_pointer(app, x, y, false);
+        if self.pointer.press.held().is_some_and(|h| !h.inside()) {
+            return;
+        }
+        let target = self.primary_target(x, y);
+        if target.and_then(|t| self.textbox_input(t)).is_none() {
+            self.edit.clear_input_click();
+        }
+        self.press_selection(target, x, y);
+        if target.is_some_and(|t| {
+            self.tree.nodes[t].handlers.on_drag.is_some() || self.tree.nodes[t].handlers.drag_out.is_some()
+        }) {
+            self.select_step(selectable::phase::Event::Release);
+        }
+        let Some(ti) = target else {
+            if self.kbd.focus.path().is_some() && !self.armed_marker_in_focused_caret_host() {
+                self.frame.queue.push(Action::Blur);
+            }
+            return;
+        };
+        if let Some(ji) = self.textbox_input(ti) {
+            self.input_tap_up(ji, (x, y), ji == ti);
+            return;
+        }
+        let on_link = self.link_at(ti, x, y).filter(|_| !self.edit.selectable.phase.dragging()).is_some();
+        self.apply_press_focus(ti, x, y, on_link);
+    }
+
     /// Whether the held press is on an element that drags, so a finger drags it, not the page.
     fn press_drags(&self) -> bool {
         let Some(path) = self.pointer.press.path() else { return false };
@@ -576,3 +685,7 @@ mod pinch_tests;
 #[cfg(test)]
 #[path = "touch_multi_tests.rs"]
 mod multi_tests;
+
+#[cfg(test)]
+#[path = "touch_controls_tests.rs"]
+mod controls_tests;

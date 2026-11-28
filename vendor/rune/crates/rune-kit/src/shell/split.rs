@@ -69,7 +69,8 @@ impl SidebarToggle {
             hide_label: None,
         }
     }
-    /// The button's size: 16, 20, 24, 28 or 36 points.
+    /// The button's size: 16, 20, 24, 28 or 36 points by default (or the kit's
+    /// [`IconButtonMetrics`](crate::IconButtonMetrics) when themed).
     pub fn size(mut self, s: ControlSize) -> Self {
         self.size = s;
         self
@@ -122,16 +123,6 @@ impl SidebarToggle {
         self.show_label = (!show.trim().is_empty()).then_some(show);
         self.hide_label = (!hide.trim().is_empty()).then_some(hide);
         self
-    }
-
-    fn side(&self) -> f32 {
-        match self.size {
-            ControlSize::Mini => 16.0,
-            ControlSize::Small => 20.0,
-            ControlSize::Large => 28.0,
-            ControlSize::ExtraLarge => 36.0,
-            _ => 24.0,
-        }
     }
 }
 
@@ -197,18 +188,23 @@ impl SplitView {
     }
     /// The leading pane. `access` finds its state in the app's; the grip and the toggle button
     /// write to it. `content` is usually a built `Sidebar`.
-    pub fn sidebar<S: 'static>(mut self, state: &PaneState, access: fn(&mut S) -> &mut PaneState, content: El) -> Self {
-        self.sidebar = Some(pane(*state, access, content, 1.0, true));
+    pub fn sidebar<S: 'static>(
+        mut self,
+        state: &PaneState,
+        access: impl for<'a> Fn(&'a mut S) -> &'a mut PaneState + 'static,
+        content: El,
+    ) -> Self {
+        self.sidebar = Some(pane(*state, Rc::new(access), content, 1.0, true));
         self
     }
     /// The trailing pane, resized from its leading edge.
     pub fn inspector<S: 'static>(
         mut self,
         state: &PaneState,
-        access: fn(&mut S) -> &mut PaneState,
+        access: impl for<'a> Fn(&'a mut S) -> &'a mut PaneState + 'static,
         content: El,
     ) -> Self {
-        self.inspector = Some(pane(*state, access, content, -1.0, false));
+        self.inspector = Some(pane(*state, Rc::new(access), content, -1.0, false));
         self
     }
     /// The band above the main pane (and the inspector). Without one the band is empty and
@@ -299,7 +295,7 @@ impl SplitView {
     pub fn build(self, k: &Kit) -> El {
         let c = &k.c;
         let t = self.toggle;
-        let side = t.side();
+        let side = k.icon_button_metrics(t.size).size;
         let frame = self.frame.unwrap_or(if self.flat { 0.0 } else { DEFAULT_FRAME_INSET });
         let top = if self.in_panel { frame } else { 0.0 };
         let sidebar_state = self.sidebar.as_ref().map(|p| p.state);
@@ -596,62 +592,76 @@ impl Page {
     }
 }
 
+type PaneAccess<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut PaneState>;
+
 /// Handlers for a pane's grip and toggle, typed by the app's state.
-fn pane<S: 'static>(
-    state: PaneState,
-    access: fn(&mut S) -> &mut PaneState,
-    content: El,
-    sign: f32,
-    toggle: bool,
-) -> Pane {
+fn pane<S: 'static>(state: PaneState, access: PaneAccess<S>, content: El, sign: f32, toggle: bool) -> Pane {
+    let drag_access = access.clone();
     let drag: Apply = Box::new(move |e: El| {
+        let (a1, a2, a3, a4) = (drag_access.clone(), drag_access.clone(), drag_access.clone(), drag_access);
         e.on_drag(move |s: &mut S, d: &mut Drag, tx: &mut Tx| {
-            let p = access(s);
+            let p = a1(s);
             match d.phase {
                 Phase::Down => p.press_grip(d.window_point()),
                 Phase::Move => {
-                    tx.instant();
-                    p.drag_grip(d.window_point(), sign * d.dx);
+                    if p.drag_grip(d.window_point(), sign * d.dx) {
+                        tx.instant();
+                    } else {
+                        tx.live_only();
+                    }
                 }
                 Phase::Up => p.release_grip(d.cancelled()),
             }
         })
-        .on_double_press(move |s: &mut S| access(s).reset_width())
+        .on_double_press(move |s: &mut S| a2(s).reset_width())
         .on_step(move |s: &mut S, steps, _| {
-            let p = access(s);
+            let p = a3(s);
             p.set_width(p.width() + steps as f32 * GRIP_STEP);
         })
         .on_set_value(move |s: &mut S, value, _| {
-            access(s).set_width(value as f32);
+            a4(s).set_width(value as f32);
         })
     });
-    let toggle: Option<Apply> =
-        toggle.then(|| Box::new(move |e: El| e.on_press(move |s: &mut S| access(s).toggle())) as Apply);
+    let toggle: Option<Apply> = toggle.then(|| {
+        let toggle_access = access.clone();
+        Box::new(move |e: El| e.on_press(move |s: &mut S| toggle_access(s).toggle())) as Apply
+    });
     // A drag whose release is lost (the grip unmounted, a modal took the pointer) ends on blur
     // or once the pointer moves where the drag doesn't hear it. Blur also ends a peek.
-    let clear = (state.is_resizing() || state.is_peeking()).then(|| {
-        Box::new(move |e: El| {
-            e.on_window_focus(move |s: &mut S, focused, _| {
-                if !focused {
-                    access(s).lose_grip();
-                    access(s).end_peek();
+    let resizing = state.is_resizing();
+    let peeking = state.is_peeking();
+    let clear = (resizing || peeking).then(|| {
+        let clear_access = access.clone();
+        Box::new(move |mut e: El| {
+            let blur_access = clear_access.clone();
+            e = e.on_window_focus(move |s: &mut S, focused, tx| {
+                if focused || !blur_access(s).blur_clear() {
+                    tx.live_only();
                 }
-            })
-            .on_pointer_move(move |s: &mut S, p| access(s).pointer_grip([p.x, p.y]))
+            });
+            if resizing {
+                e = e.on_pointer_move_local(move |s: &mut S, p, tx| {
+                    if !clear_access(s).pointer_grip([p.window_x, p.window_y]) {
+                        tx.live_only();
+                    }
+                });
+            }
+            e
         }) as Apply
     });
     let hover = (sign > 0.0).then(|| {
         Rc::new(move |e: El, enter: Duration, leave: Duration, mode: PeekHover| {
+            let hover_access = access.clone();
             e.hover_delays(enter, leave).on_hover_change(move |s: &mut S, inside, tx: &mut Tx| match mode {
                 PeekHover::Open(zone) => {
                     if inside {
-                        access(s).peek_from(zone);
+                        hover_access(s).peek_from(zone);
                     } else {
                         tx.live_only();
                     }
                 }
                 PeekHover::Hold(zone) => {
-                    if !access(s).peek_hover(zone, inside) {
+                    if !hover_access(s).peek_hover(zone, inside) {
                         tx.live_only();
                     }
                 }

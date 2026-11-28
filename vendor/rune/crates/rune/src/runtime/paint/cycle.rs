@@ -324,7 +324,7 @@ impl RuntimeCore {
                 "a cycle with children"
             } else if n.vis.layer_opacity != 1.0 || n.vis.paint_alpha != 1.0 {
                 "a cycle that fades itself"
-            } else if parent.in_cache || parent.skip_paint || parent.turn != 0 {
+            } else if parent.in_cache() || parent.skip_paint() || parent.turn != 0 {
                 "a cycle in a layer"
             } else if n.handlers.get().is_some() || n.focus.get().is_some() || n.vis_flags.hit() {
                 "a cycle that takes input"

@@ -164,7 +164,7 @@ define_flags! {
     Settle => {
         name: "--settle",
         value: FlagValue::None,
-        description: "run up to 3 zero-dt layout-callback passes before --snap/--tree capture",
+        description: "settle layout callbacks (and App::settle_ready) before --snap/--tree capture",
     },
     At => {
         name: "--at",
@@ -190,6 +190,11 @@ define_flags! {
         name: "--scroll-bars",
         value: FlagValue::Required("MODE"),
         description: "scroll bar mode: when-scrolling, always, or automatic",
+    },
+    FontSmoothing => {
+        name: "--font-smoothing",
+        value: FlagValue::Required("MODE"),
+        description: "font smoothing mode: on, off, windfoil, windfoil-chromium, windfoil-rgb, slug, hinted-gpu, hinted, direct-write, or clear-type",
     },
     Script => {
         name: "--script",

@@ -206,8 +206,17 @@ impl RuntimeCore {
 
     /// Window point (x, y) as node `i`'s handlers see it.
     pub(crate) fn pointer_event(&self, i: usize, x: f32, y: f32) -> PointerEvent {
+        let r = self.tree.nodes[i].target;
         let [lx, ly] = self.to_local(i, x, y);
-        PointerEvent { x: lx, y: ly, window_x: x, window_y: y, pressing: self.pointer.any_button_down() }
+        PointerEvent {
+            x: lx,
+            y: ly,
+            w: (r[2] - r[0]).max(0.0),
+            h: (r[3] - r[1]).max(0.0),
+            window_x: x,
+            window_y: y,
+            pressing: self.pointer.any_button_down(),
+        }
     }
 
     /// Window point (x, y) in node `i`'s own layout points: from its top-left as drawn, divided
@@ -458,10 +467,16 @@ impl RuntimeCore {
             if Some(i) == primary {
                 return primary;
             }
-            if std::iter::successors(Some(i), |&k| self.tree.nodes[k].parent)
-                .take_while(|&k| !shared_ancestor(k))
-                .any(|k| self.tree.nodes[k].handlers.cursor.is_some())
-            {
+            if std::iter::successors(Some(i), |&k| self.tree.nodes[k].parent).take_while(|&k| !shared_ancestor(k)).any(
+                |k| {
+                    self.tree.nodes[k].handlers.cursor.is_some()
+                        && !(self.tree.nodes[k]
+                            .text
+                            .as_ref()
+                            .is_some_and(|t| t.flags.has(crate::el::TextFlags::SELECTABLE_CURSOR))
+                            && !self.is_selectable(k))
+                },
+            ) {
                 return Some(i);
             }
         }
@@ -567,7 +582,9 @@ impl RuntimeCore {
             || n.role == "textbox"
             || n.window_drag != crate::el::WindowDrag::None
             || n.focus.get().is_some_and(|f| f.enabled)
-            || n.text.as_ref().is_some_and(|t| t.selectable || !t.cold.links.is_empty()))
+            || n.vis.cold.get().is_some_and(|c| c.image_menu.is_some())
+            || self.is_selectable(i)
+            || (n.text.as_ref().is_some_and(|t| !t.cold.links.is_empty()) && !self.is_text_hidden(i)))
             && !self.subtree_exiting(i)
             && self.allowed(i)
             && effective_opacity > 0.001
@@ -700,3 +717,7 @@ impl RuntimeCore {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "hit_tests.rs"]
+mod tests;

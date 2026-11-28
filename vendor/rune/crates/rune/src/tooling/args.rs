@@ -15,6 +15,7 @@ pub struct Args {
     pub scale: Option<f32>,
     pub theme: Option<String>,
     pub scroll_bars: Option<crate::ScrollBars>,
+    pub font_smoothing: Option<crate::FontSmoothing>,
     pub script: Option<PathBuf>,
     pub frames: Option<usize>,
     pub start: f64,
@@ -105,7 +106,12 @@ pub(crate) fn mark_time(v: &str) -> Option<String> {
 /// and in release builds compiled with Rune's `tooling` (or `hot`) feature.
 #[inline]
 pub(crate) const fn dev_tooling_enabled() -> bool {
-    cfg!(any(feature = "tooling", feature = "hot", debug_assertions))
+    cfg!(all(not(target_arch = "wasm32"), any(feature = "tooling", feature = "hot", debug_assertions)))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn set_extra_args(argv: Vec<String>) {
+    EXTRA.set(argv).ok();
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -139,12 +145,17 @@ impl Args {
 
     pub fn parse() -> Args {
         #[cfg(target_arch = "wasm32")]
-        let argv = Vec::new();
+        {
+            EXTRA.set(Vec::new()).ok();
+            Args::defaults()
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        let argv = process_argv();
-        let (args, extra) = Args::parse_process_argv(argv, dev_tooling_enabled());
-        EXTRA.set(extra).ok();
-        args
+        {
+            let argv = process_argv();
+            let (args, extra) = Args::parse_process_argv(argv, dev_tooling_enabled());
+            EXTRA.set(extra).ok();
+            args
+        }
     }
 
     /// Parses `argv` (without the program name); unrecognised arguments become `extra_args`.
@@ -158,15 +169,19 @@ impl Args {
     /// set it.
     fn parse_process() -> Args {
         #[cfg(target_arch = "wasm32")]
-        let argv = Vec::new();
+        {
+            Args::defaults()
+        }
         #[cfg(not(target_arch = "wasm32"))]
-        let argv = process_argv();
-        Args::parse_process_argv(argv, dev_tooling_enabled()).0
+        {
+            Args::parse_process_argv(process_argv(), dev_tooling_enabled()).0
+        }
     }
 
     /// Splits a process command line into Rune's flags and app arguments. When `dev_tooling` is
     /// false (a release build without Rune's `tooling` or `hot` feature), Rune parses no process
     /// flags and leaves every argument untouched for the app (`extra_args`).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     pub(crate) fn parse_process_argv(argv: Vec<String>, dev_tooling: bool) -> (Args, Vec<String>) {
         if dev_tooling { Args::parse_split(argv) } else { (Args::defaults(), argv) }
     }
@@ -206,6 +221,9 @@ impl Args {
                 Some(FlagId::Theme) => a.theme = Some(val(&mut i)),
                 Some(FlagId::ScrollBars) => {
                     a.scroll_bars = Some(parse_scroll_bars(&val(&mut i)).unwrap_or_else(|e| die(&e)))
+                }
+                Some(FlagId::FontSmoothing) => {
+                    a.font_smoothing = Some(parse_font_smoothing(&val(&mut i)).unwrap_or_else(|e| die(&e)))
                 }
                 Some(FlagId::Script) => a.script = Some(val(&mut i).into()),
                 Some(FlagId::Frames) => a.frames = Some(num(&val(&mut i)) as usize),
@@ -394,10 +412,12 @@ pub(super) const HELP: &str = "usage: <app> [window]
                         one on the stage, or anywhere in the window with --whole-window)
   --at SECONDS          virtual time of the snapshot/tree (default: end of frames or script);
                         mark:NAME or mark:NAME+0.5 for a script mark's time (also --start)
-  --settle              run up to 3 zero-dt layout-callback passes before --snap/--tree capture
+  --settle              settle layout callbacks (and App::settle_ready) before --snap/--tree capture
   --size WxH            viewport in points      --scale N   device scale (default 2)
   --theme dark|light    system appearance
   --scroll-bars MODE    scroll bars: when-scrolling (headless default), always, automatic
+  --font-smoothing MODE font smoothing: on, off, windfoil, windfoil-chromium, windfoil-rgb,
+                        slug, hinted-gpu, hinted, direct-write, clear-type
   --script FILE.json    timestamped input, replayed headless (move/down/up/tap/drag, keys,
                         {\"focus\":false}); a key with \"repeat\":true is a held key's auto-repeat;
                         {\"type\":\"mark\",\"name\":N} marks a time;
@@ -483,5 +503,24 @@ pub(crate) fn parse_scroll_bars(v: &str) -> Result<crate::ScrollBars, String> {
         "when-scrolling" => Ok(crate::ScrollBars::WhenScrolling),
         "automatic" | "auto" => Ok(crate::ScrollBars::Automatic),
         _ => Err(format!("--scroll-bars is when-scrolling, always or automatic: {v}")),
+    }
+}
+
+pub(crate) fn parse_font_smoothing(v: &str) -> Result<crate::FontSmoothing, String> {
+    use crate::FontSmoothing;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "on" => Ok(FontSmoothing::On),
+        "off" => Ok(FontSmoothing::Off),
+        "windfoil" => Ok(FontSmoothing::Windfoil),
+        "windfoil-chromium" | "windfoilchromium" => Ok(FontSmoothing::WindfoilChromium),
+        "windfoil-rgb" | "windfoilrgb" => Ok(FontSmoothing::WindfoilRgb),
+        "slug" => Ok(FontSmoothing::Slug),
+        "hinted-gpu" | "hintedgpu" => Ok(FontSmoothing::HintedGpu),
+        "hinted" => Ok(FontSmoothing::Hinted),
+        "direct-write" | "directwrite" => Ok(FontSmoothing::DirectWrite),
+        "clear-type" | "cleartype" => Ok(FontSmoothing::ClearType),
+        _ => Err(format!(
+            "--font-smoothing is on, off, windfoil, windfoil-chromium, windfoil-rgb, slug, hinted-gpu, hinted, direct-write or clear-type: {v}"
+        )),
     }
 }

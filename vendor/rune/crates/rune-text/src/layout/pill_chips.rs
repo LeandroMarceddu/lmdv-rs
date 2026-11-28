@@ -49,7 +49,7 @@ pub fn bare_icons(
             if b.id & PILL_BOX == 0 || b.id & 1 == 1 {
                 continue;
             }
-            let i = ((b.id & !PILL_BOX) >> 1) as usize;
+            let i = pill_index(b.id);
             let Some((pill, bare)) = pills.get(i).and_then(|p| Some((p, p.bare.as_deref()?))) else { continue };
             if bare.replace.is_some() {
                 out.push((i, [(origin[0] + b.x).round(), (origin[1] + b.y).round()], [b.width, b.height]));
@@ -141,7 +141,7 @@ fn pill_chips_into(
             .collect();
         // Pills whose chip starts on this line, then those whose label wrapped onto it.
         let mut starts: Vec<(usize, Option<&parley::PositionedInlineBox>)> =
-            boxes.iter().filter(|b| b.id & 1 == 0).map(|b| (((b.id & !PILL_BOX) >> 1) as usize, Some(b))).collect();
+            boxes.iter().filter(|b| b.id & 1 == 0).map(|b| (pill_index(b.id), Some(b))).collect();
         let text = line.text_range();
         for (i, p) in pills.iter().enumerate() {
             let inside = (p.start as usize) < text.start && text.start < p.end as usize;
@@ -166,8 +166,9 @@ fn pill_chips_into(
                     }
                 }
             }
-            let margin = pm.margin * scale;
-            let pad = pm.pad * scale;
+            let chip_pm = pm.for_chip(pill);
+            let margin = chip_pm.margin * scale;
+            let pad = chip_pm.pad * scale;
             let radius_pt = pill.radius.map_or(5.0, |r| if r.is_finite() && r > 0.0 { r } else { 0.0 });
             let ring = pill.ring.and_then(|(c, w)| (w > 0.0 && w.is_finite()).then_some((c, w * scale)));
             let byte = text.end.min(pill.end as usize).saturating_sub(1) as u32;
@@ -178,7 +179,9 @@ fn pill_chips_into(
                 if gr_x0 > gr_x1 {
                     continue;
                 }
-                let x1 = trail.filter(|t| (t.x - gr_x1).abs() < 1.0).map_or(gr_x1 + pad, |t| t.x + t.width - margin);
+                let x1 = trail
+                    .filter(|t| (t.x - gr_x1).abs() < 1.0)
+                    .map_or(gr_x1 + pad, |t| t.x + t.width - margin.min(t.width));
                 let x1 = if trail.is_none() { line_end } else { x1 };
                 let base = origin[1] + m.baseline;
                 let (top, bot) = ((base - asc - 1.0 * scale).round(), (base + desc + 1.0 * scale).round());
@@ -188,24 +191,25 @@ fn pill_chips_into(
                 out.push(PaintedDeco::new(Deco { rect, color: pill.bg.unwrap_or(bg), radius }, ring, byte));
                 continue;
             };
+            let lead_margin = margin.min(lead.width);
             let rtl_lead = gr_x0 <= gr_x1 && (lead.x - gr_x1).abs() < 1.0;
             let x0 = if gr_x0 <= gr_x1 {
-                if rtl_lead { gr_x0 - pad } else { (gr_x0 - (lead.width - margin)).max(lead.x + margin) }
+                if rtl_lead { gr_x0 - pad } else { (gr_x0 - (lead.width - lead_margin)).max(lead.x + lead_margin) }
             } else {
-                lead.x + margin
+                lead.x + lead_margin
             };
             let x1 = if gr_x0 <= gr_x1 {
                 if let Some(t) = trail.filter(|t| (t.x - gr_x1).abs() < 1.0) {
-                    t.x + t.width - margin
+                    t.x + t.width - margin.min(t.width)
                 } else if rtl_lead {
-                    lead.x + lead.width - margin
+                    lead.x + lead.width - lead_margin
                 } else if trail.is_none() {
                     line_end
                 } else {
                     gr_x1 + pad
                 }
             } else {
-                trail.map_or(line_end, |t| t.x + t.width - margin)
+                trail.map_or(line_end, |t| t.x + t.width - margin.min(t.width))
             };
             if asc == 0.0 {
                 (asc, desc) = (size * scale * 0.95, size * scale * 0.25);
@@ -217,8 +221,8 @@ fn pill_chips_into(
             let radius = (radius_pt * scale).min(rect[2].min(rect[3]) * 0.5);
             out.push(PaintedDeco::new(Deco { rect, color: pill.bg.unwrap_or(bg), radius }, ring, byte));
             if pill.has_lead_visual() {
-                let px = (pm.icon * scale).round().max(1.0);
-                let ix = if rtl_lead { rect[0] + rect[2] - pm.pad * scale - px } else { rect[0] + pm.pad * scale };
+                let px = (chip_pm.icon * scale).round().max(1.0);
+                let ix = if rtl_lead { rect[0] + rect[2] - pad - px } else { rect[0] + pad };
                 let at = [ix.round(), ((top + bot - px) * 0.5).round()];
                 if let Some(pixels) = &pill.image {
                     if let Some(images) = images.as_deref_mut() {

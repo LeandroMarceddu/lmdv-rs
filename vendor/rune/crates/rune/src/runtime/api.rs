@@ -416,12 +416,28 @@ impl<S: 'static> Runtime<S> {
         self.core_mut().set_system_increased_contrast(on);
     }
     #[inline(always)]
+    pub fn set_system_reduced_transparency(&mut self, reduced: bool) {
+        self.core_mut().set_system_reduced_transparency(reduced);
+    }
+    #[inline(always)]
+    pub fn system_reduced_transparency(&self) -> bool {
+        self.core().host.system_reduced_transparency()
+    }
+    #[inline(always)]
     pub fn set_system_reduced_motion(&mut self, reduced: bool) {
         self.core_mut().set_system_reduced_motion(reduced);
     }
     #[inline(always)]
     pub fn system_reduced_motion(&self) -> bool {
         self.core().host.system_reduced_motion()
+    }
+    #[inline(always)]
+    pub fn set_system_text_scale(&mut self, scale: f32) {
+        self.core_mut().set_system_text_scale(scale);
+    }
+    #[inline(always)]
+    pub fn system_text_scale(&self) -> f32 {
+        self.core().system_text_scale()
     }
     /// Sets the preferred language list reported by [`Cx::system_languages`] and [`Cx::locale`]
     /// as BCP 47 tags in preference order, overriding the lazily queried platform languages.
@@ -478,6 +494,17 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn overlay_scroll_bars(&self) -> bool {
         self.core().host.overlay_scroll_bars()
+    }
+    /// Whether [`Cx::touch_controls`] currently reports native coarse touch controls.
+    #[inline(always)]
+    pub fn touch_controls(&self) -> bool {
+        self.core().touch_controls()
+    }
+    /// Sets whether [`Cx::touch_controls`] (and [`Cx::hover_none`]) report coarse touch controls
+    /// natively. A change re-runs the view and its memos.
+    #[inline(always)]
+    pub fn set_touch_controls(&mut self, touch: bool) {
+        self.core_mut().set_touch_controls(touch);
     }
 
     /// Registers font bytes (TTF, OTF, TTC, or variable font) into the process-wide font
@@ -780,14 +807,35 @@ impl<S: 'static> Runtime<S> {
 
     // ── Motion, live, timers, paint, clipboard, memo & URLs ────────────────────────────────────
 
+    /// Events whose handler called [`Tx::live_only`](crate::Tx::live_only) and so didn't re-run
+    /// the view, since the runtime started.
     #[inline(always)]
     pub fn live_only_events(&self) -> u64 {
         self.core().live_only_events()
     }
+
+    /// Whether debug builds check [`Tx::live_only`](crate::Tx::live_only) handlers (on by
+    /// default): a live-only event a quarter second or more after the last commit still commits,
+    /// and Rune warns when the view built something else. A test counting
+    /// [`FrameStats::commits`](crate::runtime::FrameStats::commits) turns it off; release builds never
+    /// check.
+    ///
+    /// ```
+    /// use rune::{Env, Runtime, el};
+    ///
+    /// let mut rt = Runtime::new((), |_: &(), _| el(), (200.0, 120.0), Env::new(true, 1.0));
+    /// rt.check_live_only(false);
+    /// rt.frame(0.0);
+    /// assert_eq!(rt.live_only_warnings().len(), 0);
+    /// ```
     #[inline(always)]
     pub fn check_live_only(&mut self, on: bool) {
         self.core_mut().check_live_only(on);
     }
+
+    /// The stale-view warnings debug builds have printed for
+    /// [`Tx::live_only`](crate::Tx::live_only) handlers, each naming the element and property
+    /// that differed, so a test can assert there are none. Always empty in release builds.
     #[inline(always)]
     pub fn live_only_warnings(&self) -> &[String] {
         self.core().live_only_warnings()
@@ -880,6 +928,17 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub(crate) fn rests(&self) -> bool {
         self.core().rests()
+    }
+    /// Releases state not needed to redraw the current view, as `window::rest` does after
+    /// `REST_AFTER`.
+    #[doc(hidden)]
+    #[inline(always)]
+    pub fn rest(&mut self) {
+        let core = self.core_mut();
+        if !core.live_visible() {
+            core.drop_images();
+        }
+        core.rest();
     }
 
     #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
@@ -1149,6 +1208,12 @@ impl<S: 'static> Runtime<S> {
     pub(crate) fn web_secure_replace(&mut self, key: &str, text: String) {
         let (core, mut app) = self.split_mut();
         core.web_secure_replace(&mut app, key, text);
+    }
+    #[cfg(any(test, target_arch = "wasm32"))]
+    #[inline(always)]
+    pub(crate) fn web_autofill(&mut self, key: &str, text: String, secure: bool) {
+        let (core, mut app) = self.split_mut();
+        core.web_autofill(&mut app, key, text, secure);
     }
     #[cfg(any(test, target_arch = "wasm32"))]
     #[inline(always)]

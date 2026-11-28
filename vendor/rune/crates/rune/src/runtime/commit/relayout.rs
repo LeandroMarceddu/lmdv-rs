@@ -73,13 +73,12 @@ pub(in crate::runtime) fn apply_root_sizing(
 }
 
 /// Whether a commit can lay `n` out again as it is. Layout rewrites the styles of
-/// `aspect_fit` elements and fitted anchored overlays, and pictures can change their aspect.
+/// `aspect_fit` elements and fitted anchored overlays; pictures with unchanged decoded aspects
+/// are checked separately via [`pixel_aspects_unchanged`].
 /// Live bindings only own scene properties: moving the node retains their sources, sampled
 /// values and exact fill, while `apply` leaves their scene tracks alone.
 pub(in crate::runtime) fn reusable(n: &Node) -> bool {
-    n.cold
-        .get()
-        .is_none_or(|c| c.aspect_fit.is_none() && c.above.as_ref().is_none_or(|a| !a.fit) && c.pixel_aspect.is_none())
+    n.cold.get().is_none_or(|c| c.aspect_fit.is_none() && c.above.as_ref().is_none_or(|a| !a.fit))
 }
 
 /// How a commit measures, decided once before it starts.
@@ -282,6 +281,7 @@ impl Measurement<'_> {
             titlebar: self.titlebar,
             caret_read: self.caret_read,
             wm_state_read: None,
+            primary_pointer_read: None,
             layout_reads: self.layout_reads,
             memo_flattened: None,
             memo_reused: reused,
@@ -549,6 +549,11 @@ pub(in crate::runtime) fn lay_out_text(text: &mut TextSystem, n: &mut Node, w: f
 fn lay_out_text_inner(text: &mut TextSystem, n: &mut Node, w: f32, scale: f32, live: bool) {
     n.clear_tabular_layout();
     let Some(spec) = &n.text else { return };
+    if spec.positioned().is_some() {
+        n.text_layout = None;
+        n.elided = None;
+        return;
+    }
     // A cell of a run draws from the run's layout (and keeps it cached) instead of its own.
     let run = spec.cold.advance_in.as_ref().map(|(run, at)| (text.run_layout(run, spec.style, scale), *at));
     if let Some((r, _)) = run.filter(|(r, at)| r.x(*at).is_some()) {

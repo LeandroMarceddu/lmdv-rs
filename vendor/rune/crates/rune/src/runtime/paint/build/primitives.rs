@@ -11,9 +11,11 @@ impl RuntimeCore {
         s: f32,
         now: f64,
         pinh: &Inh,
+        pcold: &InhCold,
         r: [f32; 4],
         r_exact: [f32; 4],
         raw_edges: [f32; 4],
+        (snaps, origin_pt, shape_size): (bool, [f32; 2], [f32; 2]),
         radii: [f32; 4],
         w: f32,
         h: f32,
@@ -43,14 +45,15 @@ impl RuntimeCore {
         skip_paint: bool,
         loop_vis: bool,
         gliding: bool,
-        turned: bool,
+        turn_index: u32,
         caret: Option<[f32; 4]>,
         video_clock: crate::video::Clock,
         sel_ranges: &[(usize, usize, usize)],
         mark_ranges: &[(usize, usize, usize)],
         video_signature: &mut u64,
         glyph_count: &mut usize,
-    ) -> Option<usize> {
+    ) -> (Option<usize>, Option<usize>) {
+        let turned = turn_index != 0;
         let n = &self.tree.nodes[i];
         let mut faded_slot = None;
         // Disabled styling is distributed to each authored paint leaf at build time.
@@ -60,22 +63,24 @@ impl RuntimeCore {
         // Subtree blur runs once after rasterization, never on each primitive as well.
         let blur = 0.0;
         let k_px = sc * s;
-        let (native_material, wayland_candidate) = match n.material {
+        let (native_material, wayland_candidate, material_draw) = match n.material {
             // A dimmed-out element takes no native view: its fallback draws nothing and does not
             // count as a cap fallback.
-            Some(material) if effective_opacity * n.vis.paint_alpha > 0.001 => {
+            Some((material, params)) if effective_opacity * n.vis.paint_alpha > 0.001 => {
                 if self.paint.materials.len() < self.paint.max_native_materials {
                     let radius = crate::system_material::clamp_radius(radii, w, h);
                     let continuous = n.vis_flags.continuous_corners();
                     let material_opacity = effective_opacity * n.vis.paint_alpha;
-                    self.paint.materials.push(crate::system_material::MaterialDraw {
+                    let draw = crate::system_material::MaterialDraw {
                         id: n.id,
                         material,
                         rect: [r[0], r[1], w, h],
                         radius,
                         continuous,
                         opacity: material_opacity,
-                    });
+                        params,
+                    };
+                    self.paint.materials.push(draw);
                     let hole_r = if continuous { -radius } else { radius };
                     let native = self.paint.native_materials.then_some(hole_r);
                     let wayland = (!self.paint.native_materials && self.paint.wayland_blur_materials).then_some((
@@ -83,16 +88,17 @@ impl RuntimeCore {
                         hole_r,
                         material_opacity,
                     ));
-                    (native, wayland)
+                    (native, wayland, Some((draw, hole_r)))
                 } else {
                     self.paint.material_fallbacks.push(n.id);
-                    (None, None)
+                    (None, None, None)
                 }
             }
-            _ => (None, None),
+            _ => (None, None, None),
         };
-        let stuck_k =
-            if self.tree.has_sticky { (self.scroll.stuck[i].abs() / sticky::SHADOW_RAMP).min(1.0) } else { 0.0 };
+        #[cfg(not(any(test, all(target_os = "windows", feature = "windows-system-material"))))]
+        let _ = material_draw;
+        let stuck_k = self.stuck_shadow_alpha(i);
         let stuck_shadows: (f32, &[crate::el::Shadow]) = match &n.sticky {
             Some(s) if stuck_k > 0.0 => (stuck_k, &s.shadows),
             _ => (0.0, &[]),
@@ -110,6 +116,15 @@ impl RuntimeCore {
             0.0
         };
         let mut wayland_blur_hole = None;
+        let mut windows_blur_hole = None;
+        #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+        let windows_candidate = (!self.paint.native_materials
+            && !self.paint.wayland_blur_materials
+            && self.paint.windows_acrylic_materials)
+            .then_some(material_draw)
+            .flatten();
+        #[cfg(not(any(test, all(target_os = "windows", feature = "windows-system-material"))))]
+        let windows_candidate: Option<(crate::system_material::MaterialDraw, f32)> = None;
         let (resolved_fill, fill_replace_w) = if native_material.is_some() {
             (Color::TRANSPARENT, 0.0)
         } else if let Some((radius, hole_r, material_opacity)) = wayland_candidate {
@@ -135,7 +150,44 @@ impl RuntimeCore {
                 }
             }
             (resolved, w_rep)
+        } else if let Some((draw, hole_r)) = windows_candidate {
+            #[cfg(not(any(test, all(target_os = "windows", feature = "windows-system-material"))))]
+            let _ = draw;
+            let rest_fill = self.color(n.id, P_FILL, n.vis.fill);
+            let (resolved, w_rep) = paint_tracks::replace_color(
+                rest_fill,
+                if focus_flat { None } else { n.vis.hover_fill },
+                hov_v,
+                n.vis.press_fill,
+                prs_v,
+            );
+            if resolved.a * o < 1.0 {
+                // Wayland-aligned fill rules for Windows 11 Acrylic: opaque fills stay opaque and
+                // unblurred; translucent fills tint above Acrylic; empty fills paint transparent so
+                // the Acrylic brush supplies the theme-aware tint.
+                windows_blur_hole = Some(hole_r);
+                #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+                self.paint.windows_material_draws.push(draw);
+            }
+            (resolved, w_rep)
         } else {
+            #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+            if let Some((draw, _)) = material_draw {
+                // Even before Windows Acrylic activates (Frame 1 or while effects are off), record
+                // non-opaque material elements so opaque-only windows stay Idle with zero DWM/WinRT
+                // calls while non-opaque materials can activate on Frame 1 or when effects return.
+                let authored = self.color(n.id, P_FILL, n.vis.fill);
+                let (authored_resolved, _) = paint_tracks::replace_color(
+                    authored,
+                    if focus_flat { None } else { n.vis.hover_fill },
+                    hov_v,
+                    n.vis.press_fill,
+                    prs_v,
+                );
+                if authored_resolved.a * o < 1.0 {
+                    self.paint.windows_material_draws.push(draw);
+                }
+            }
             let rest_fill = match n.material {
                 Some(_) => {
                     self.color(n.id, P_FILL, crate::system_material::fallback_fill(n.vis.fill, self.env.system_dark))
@@ -153,6 +205,7 @@ impl RuntimeCore {
         let casts = !n.vis.shadows.is_empty()
             && native_material.is_none()
             && wayland_blur_hole.is_none()
+            && windows_blur_hole.is_none()
             && blur_hole.is_none()
             && n.material.is_none();
         let fill_a = if casts { resolved_fill.a } else { 0.0 };
@@ -177,7 +230,7 @@ impl RuntimeCore {
             srgb,
             clip,
             fade,
-            hole: native_material.or(wayland_blur_hole).or(blur_hole).or(dim_hole),
+            hole: native_material.or(wayland_blur_hole).or(windows_blur_hole).or(blur_hole).or(dim_hole),
             opaque,
         };
         for (k, sh) in n.vis.shadows.iter().chain(stuck_shadows.1).enumerate() {
@@ -484,8 +537,9 @@ impl RuntimeCore {
                     && self.instances.len() == primitive_start
                     && n.text.is_none()
                     && n.input.is_none()
-                    && n.vis.shape.is_none()
+                    && !n.vis.has_shape()
                     && n.vis.pixels.is_none()
+                    && n.vis.web_image.is_none()
                     && n.vis.effect.is_none()
                     && n.vis.shadows.is_empty()
                     && n.handlers.get().is_none()
@@ -595,7 +649,9 @@ impl RuntimeCore {
         }
         let content_clip =
             if n.collapsing && n.vis.clip.is_none() && n.scroll.is_none() { intersect(clip, r) } else { clip };
-        self.paint_content(
+        let has_web_image = n.vis.cold.get().is_some_and(|c| c.web_image.is_some());
+        let web_border_inset = if border_a > 0.0005 || dashed.is_some() { padding } else { [0.0; 4] };
+        let text_start = self.paint_content(
             i,
             paint_content::LeafBox {
                 r,
@@ -605,15 +661,19 @@ impl RuntimeCore {
                 // Under an offset (`El::offset`, a translation as CSS transforms are) it moves
                 // with its box, as it did before this: a glide toward a moving offset keeps
                 // the text on its card, and lands as a card that never moved draws.
-                exact_off: if pinh.snap.shifted || n.vis.offset != [0.0; 2] {
+                exact_off: if pinh.snap_shifted() || n.vis.offset != [0.0; 2] {
                     [0.0; 2]
                 } else {
-                    let o = snap_rest.map_or([0.0; 2], |p| p.exact_off(pinh.snap.steady.map(|v| v * s)));
-                    let c = pinh.snap.contain.map(|v| v * s);
+                    let o = snap_rest.map_or([0.0; 2], |p| p.exact_off(pcold.snap_steady.map(|v| v * s)));
+                    let c = pcold.snap_contain.map(|v| v * s);
                     [o[0] + (c[0] + 0.5).floor() - c[0], o[1] + (c[1] + 0.5).floor() - c[1]]
                 },
                 raw_size: [raw_edges[2] - raw_edges[0], raw_edges[3] - raw_edges[1]],
-                contain: pinh.snap.contain.map(|v| v * s),
+                origin_pt,
+                shape_size,
+                rigid: pinh.rigid.map(|v| v * s),
+                snaps,
+                contain: pcold.snap_contain.map(|v| v * s),
                 radii,
                 sc,
                 o,
@@ -626,15 +686,15 @@ impl RuntimeCore {
                 loop_value,
                 cover,
                 scale_motion,
-                rest: pinh.still.0,
+                rest: pcold.still.0,
                 gliding,
                 caret,
-                shown: if !turned && !pinh.in_cache {
+                shown: if !turned && !pinh.in_cache() {
                     [content_clip[1].max(vp[1] - m), content_clip[3].min(vp[3] + m)]
                 } else {
                     [content_clip[1], content_clip[3]]
                 },
-                shown_x: if !turned && !pinh.in_cache {
+                shown_x: if !turned && !pinh.in_cache() {
                     [content_clip[0].max(vp[0] - m), content_clip[2].min(vp[2] + m)]
                 } else {
                     [content_clip[0], content_clip[2]]
@@ -644,7 +704,19 @@ impl RuntimeCore {
             mark_ranges,
             glyph_count,
         );
-        faded_slot
+        if has_web_image {
+            self.record_web_image(
+                i,
+                r,
+                radii,
+                web_border_inset,
+                effective_opacity,
+                pinh.clip,
+                content_clip,
+                turn_index,
+            );
+        }
+        (faded_slot, text_start)
     }
 }
 

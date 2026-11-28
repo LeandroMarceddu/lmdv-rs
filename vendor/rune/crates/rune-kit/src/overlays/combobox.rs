@@ -5,7 +5,7 @@ use super::popup_list::{PopupHandlers, PopupListCore};
 use crate::list_nav::{NavAction, NavPolicy, page_size};
 use crate::{Kit, Placement, Popover, PopupItem, Select, SelectAppearance, TextInput};
 use rune::machine::Effects;
-use rune::{El, TextEdit, Tx, col, el, icon, row};
+use rune::{Color, El, TextEdit, Tx, col, el, icon, row};
 use std::rc::Rc;
 
 #[derive(Clone, Debug)]
@@ -292,7 +292,7 @@ struct ComboboxCore {
     options: Rc<Vec<ComboboxOption>>,
     current: Option<String>,
     placeholder: String,
-    search_placeholder: String,
+    search_placeholder: Option<String>,
     search_label: Option<String>,
     empty: String,
     width: f32,
@@ -302,6 +302,8 @@ struct ComboboxCore {
     disabled: bool,
     animate_filtering: bool,
     label: Option<String>,
+    backdrop_blur: Option<f32>,
+    surface_fill: Option<Color>,
 }
 
 impl ComboboxCore {
@@ -312,7 +314,7 @@ impl ComboboxCore {
             options: Rc::new(options.to_vec()),
             current: None,
             placeholder: String::new(),
-            search_placeholder: "Search".into(),
+            search_placeholder: None,
             search_label: None,
             empty: "No results".into(),
             width: 280.0,
@@ -322,6 +324,8 @@ impl ComboboxCore {
             disabled: false,
             animate_filtering: false,
             label: None,
+            backdrop_blur: None,
+            surface_fill: None,
         }
     }
 
@@ -342,33 +346,40 @@ impl ComboboxCore {
         if !self.disabled {
             trigger = bind.bind_trigger(trigger, self.current.clone(), self.key.clone());
         }
-        let popover = bind.bind_popover(
-            Popover::new(&self.key)
-                .trigger(trigger)
-                .label(name.clone())
-                .placement(self.placement)
-                .padding(0.0)
-                .width(self.width)
-                .open(self.state.is_open() && !self.disabled),
-        );
+        let mut popover = Popover::new(&self.key)
+            .trigger(trigger)
+            .label(name.clone())
+            .placement(self.placement)
+            .padding(0.0)
+            .width(self.width)
+            .open(self.state.is_open() && !self.disabled);
+        if let Some(sigma) = self.backdrop_blur {
+            popover = popover.backdrop_blur(sigma);
+        }
+        if let Some(fill) = self.surface_fill {
+            popover = popover.surface_fill(fill);
+        }
+        let popover = bind.bind_popover(popover);
         if !self.state.is_open() || self.disabled {
             return popover.build(k, layer);
         }
         let choices = filtered(&self.options, &self.state.search.text);
         let active = self.state.active_index(&self.options, &choices);
-        let page = page_size(self.max_height, 28.0);
+        let page = page_size(self.max_height, k.popup_row_metrics().height);
         // The search field sits borderless over a divider: the open popover is its frame, and the
         // caret shows its focus.
-        let search_label = self
-            .search_label
-            .filter(|l| !l.trim().is_empty())
-            .unwrap_or_else(|| if name.is_empty() { "Search".to_owned() } else { format!("Search {name}") });
+        let search_placeholder =
+            self.search_placeholder.unwrap_or_else(|| rune::labels::label(rune::Label::Search(None)));
+        let search_label = self.search_label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| {
+            let target = (!name.is_empty()).then_some(name.as_str());
+            rune::labels::label(rune::Label::Search(target))
+        });
         let mut field = TextInput::new(&self.state.search)
             .plain()
             .leading_icon(k.glyph.search)
             .height(36.0)
             .width(None)
-            .placeholder(self.search_placeholder)
+            .placeholder(search_placeholder)
             .label(search_label)
             .auto_complete(rune::AutoComplete::List)
             .active_descendant(active.map(|i| format!("{}-option-{}", self.key, self.options[i].id)));
@@ -445,7 +456,7 @@ impl<S: 'static> Combobox<S> {
         self
     }
     pub fn search_placeholder(mut self, text: impl Into<String>) -> Self {
-        self.core.search_placeholder = text.into();
+        self.core.search_placeholder = Some(text.into());
         self
     }
     /// The accessible name for the popover's search input (the web's `aria-label`), for
@@ -486,6 +497,19 @@ impl<S: 'static> Combobox<S> {
     }
     pub fn placement(mut self, placement: Placement) -> Self {
         self.core.placement = placement;
+        self
+    }
+    /// Blurs what the window draws behind the open popover surface ([`El::backdrop_blur`](rune::El::backdrop_blur)),
+    /// overriding [`Kit::metrics`](crate::Kit::metrics)'s `popup_backdrop`. `0.0` turns blur off;
+    /// negative or non-finite values clamp to `0.0`.
+    pub fn backdrop_blur(mut self, sigma: f32) -> Self {
+        self.core.backdrop_blur = Some(crate::tokens::metrics::non_neg(sigma));
+        self
+    }
+    /// Replaces the open popover's surface fill colour (for example a translucent tint over
+    /// [`Self::backdrop_blur`]), overriding the theme fill and `Kit::metrics.popup_backdrop`.
+    pub fn surface_fill(mut self, fill: Color) -> Self {
+        self.core.surface_fill = Some(fill);
         self
     }
     /// Replaces the default field trigger (the chosen label and a chevron) with any element;

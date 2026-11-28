@@ -204,15 +204,26 @@ impl Press {
     }
 }
 
+/// Which kind of link a secondary press began on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SecondaryLink {
+    /// Explicit `El::on_link_secondary` handler: wins over ancestors and claims `"app"` on web.
+    Explicit(usize),
+    /// Default Open Link / Copy Link menu: yields to ancestors and leaves web mouse right-clicks
+    /// to the browser's `<a href>` menu.
+    Default(usize),
+}
+
 /// The secondary button's hold: the element whose menu it opens on release, the link of its
-/// text it began on (`on_link_secondary`), and whether the pointer left the window meanwhile.
+/// text it began on (`on_link_secondary` or default link menu), and whether the pointer left
+/// the window meanwhile.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) enum Secondary {
     #[default]
     Up,
     Held {
         path: String,
-        link: Option<usize>,
+        link: Option<SecondaryLink>,
         left: bool,
     },
     /// An outside secondary press dismissed (or was swallowed by) an active modal; release does
@@ -310,6 +321,30 @@ impl GestureOwners {
     }
 }
 
+/// Basis for caching [`crate::el::HoverSnapshot`] on [`PointerState`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(in crate::runtime) struct HoverBasis {
+    pub(in crate::runtime) commits: u64,
+    pub(in crate::runtime) commit_gen: u64,
+    pub(in crate::runtime) build_gen: u64,
+    pub(in crate::runtime) built: bool,
+    pub(in crate::runtime) pos: Option<(u32, u32)>,
+    pub(in crate::runtime) pressing: bool,
+    pub(in crate::runtime) press_inside: bool,
+    pub(in crate::runtime) secondary_held: bool,
+    pub(in crate::runtime) captured: Option<String>,
+    pub(in crate::runtime) held: bool,
+    pub(in crate::runtime) modal: Option<usize>,
+}
+
+/// Cached [`crate::el::HoverSnapshot`] plus the last snapshot computed on built frame geometry.
+#[derive(Default)]
+pub(in crate::runtime) struct HoverCache {
+    pub(in crate::runtime) basis: Option<HoverBasis>,
+    pub(in crate::runtime) snapshot: Option<std::rc::Rc<crate::el::HoverSnapshot>>,
+    pub(in crate::runtime) last_built: Option<(Option<(u32, u32)>, std::rc::Rc<crate::el::HoverSnapshot>)>,
+}
+
 /// Currently hovered link reported to a text node's [`crate::El::on_link_hover`] handler.
 #[derive(Clone)]
 pub(in crate::runtime) struct HoveredLink {
@@ -379,6 +414,10 @@ pub(in crate::runtime) struct PointerState {
     pub(super) pointer_lock: super::pointer_lock::PointerLock,
     /// Locked owners for phased magnify, rotate, and touch-wheel gestures (`runtime/input/gesture.rs`).
     pub(super) gesture_owners: GestureOwners,
+    /// Path of the topmost live hover hit (`top_hover_hit`), held across `HoverHold`.
+    pub(in crate::runtime) hover_hit: Option<String>,
+    /// Cached `Tx::hovered` / `Tx::is_hovered` snapshot keyed by pointer, capture, modal and build.
+    pub(in crate::runtime) hover_cache: std::cell::RefCell<HoverCache>,
 }
 
 impl PointerState {
@@ -415,7 +454,20 @@ impl PointerState {
             other_buttons_down: Vec::new(),
             pointer_lock: super::pointer_lock::PointerLock::new(),
             gesture_owners: GestureOwners::default(),
+            hover_hit: None,
+            hover_cache: std::cell::RefCell::new(HoverCache::default()),
         }
+    }
+
+    /// Drops any cached hover snapshot (called when the pointer leaves or a modal cancels hover).
+    #[inline]
+    pub(in crate::runtime) fn clear_hover_cache(&self) {
+        *self.hover_cache.borrow_mut() = HoverCache::default();
+    }
+
+    #[inline]
+    pub(in crate::runtime) fn hover_held(&self) -> bool {
+        self.hover_hold.held()
     }
 
     const BTN_PRIMARY: u8 = 1 << 0;
@@ -487,7 +539,7 @@ impl PointerState {
     }
 
     #[inline]
-    pub(super) fn captured_path(&self) -> Option<&str> {
+    pub(in crate::runtime) fn captured_path(&self) -> Option<&str> {
         self.press.path().or(self.secondary.path())
     }
 
@@ -504,6 +556,11 @@ impl PointerState {
     #[inline]
     pub(in crate::runtime) fn hold_press(&mut self, held: Held) {
         self.press.hold(held);
+    }
+    pub(in crate::runtime) fn clear_press_link(&mut self) {
+        if let Some(h) = self.press.held_mut() {
+            h.link = None;
+        }
     }
 
     /// Whether the pointer left the window while a press holds capture.
@@ -642,7 +699,7 @@ impl PointerState {
     }
 
     #[inline]
-    pub(super) fn secondary_held(&self) -> bool {
+    pub(in crate::runtime) fn secondary_held(&self) -> bool {
         self.secondary.is_held()
     }
 

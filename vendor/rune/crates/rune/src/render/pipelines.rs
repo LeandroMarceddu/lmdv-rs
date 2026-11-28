@@ -2,7 +2,7 @@
 //! the sampled textures the CPU fills, and the bind group the uber shader reads.
 
 use super::{
-    ATLAS_START_ROWS, Blend, CLIP_WGSL, Globals, Instance, Renderer, dxbc, metallib,
+    ATLAS_START_ROWS, Blend, Globals, Instance, Renderer, dxbc, metallib,
     shader_check::{self, ShaderError, UberCheck},
     variant,
     warmup::WarmRenderer,
@@ -99,11 +99,7 @@ impl Renderer {
                     Self::pipeline(device, &layout, shader, format, vertex_entry, Blend::SourceOver)
                 };
                 let res = if properties.is_some() {
-                    let source = format!(
-                        "{CLIP_WGSL}\n{}\n{}",
-                        include_str!("../shaders/shader.wgsl"),
-                        crate::gpu::springs::SHADER
-                    );
+                    let source = format!("{}\n{}", super::uber_wgsl::classic(), crate::gpu::springs::SHADER);
                     shader_check::checked_sync(device, || {
                         let shader = dxbc::Shaders::one(device.create_shader_module(wgpu::ShaderModuleDescriptor {
                             label: Some("uber"),
@@ -195,9 +191,7 @@ impl Renderer {
                 crate::pixels::limit_side(max);
                 max
             },
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             clear_quad: std::sync::OnceLock::new(),
-            #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
             damage: Default::default(),
         })
     }
@@ -325,8 +319,14 @@ impl Renderer {
             self.add_layer_format(device, format);
         }
         let [vw, vh] = self.target_frame(None).1;
-        if !self.backdrops.is_empty() && vw > 0 && vh > 0 {
-            self.ensure_backdrop(device, format, (vw, vh));
+        // A format that joins while backdrops are pooled gets its copy before the next draw, at
+        // the place and size of the ones the last frame made.
+        if let Some((origin, size)) =
+            self.backdrops.first().map(|b| (b.origin, [b.texture.width(), b.texture.height()]))
+            && vw > 0
+            && vh > 0
+        {
+            self.ensure_backdrop(device, format, origin, size);
         }
         if let Some(s) = &mut self.surfaces {
             s.add_format(device, format);
@@ -382,6 +382,7 @@ impl Renderer {
             self.pinned_extra.push((self.format, pinned));
         }
         self.format = format;
+        self.invalidate_damage();
         self.lcd = variant::Lcd::Unbuilt;
         match self.pinned_extra.iter().position(|(f, _)| *f == format) {
             Some(i) => self.pinned = Some(self.pinned_extra.swap_remove(i).1),
@@ -392,8 +393,14 @@ impl Renderer {
             self.add_layer_format(device, format);
         }
         let [vw, vh] = self.target_frame(None).1;
-        if !self.backdrops.is_empty() && vw > 0 && vh > 0 {
-            self.ensure_backdrop(device, format, (vw, vh));
+        // A format that joins while backdrops are pooled gets its copy before the next draw, at
+        // the place and size of the ones the last frame made.
+        if let Some((origin, size)) =
+            self.backdrops.first().map(|b| (b.origin, [b.texture.width(), b.texture.height()]))
+            && vw > 0
+            && vh > 0
+        {
+            self.ensure_backdrop(device, format, origin, size);
         }
         if let Some(s) = &mut self.surfaces {
             s.set_srgb_blend(self.srgb_blend);

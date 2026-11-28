@@ -21,6 +21,10 @@ use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 use zeroize::Zeroizing;
 
+#[cfg(any(target_os = "android", test))]
+mod android;
+#[cfg(test)]
+mod android_tests;
 mod content;
 mod html;
 #[cfg(target_os = "macos")]
@@ -36,7 +40,7 @@ pub(crate) mod tx;
 #[cfg(target_arch = "wasm32")]
 mod web;
 pub(crate) mod web_file;
-use content::valid_image_size;
+pub(crate) use content::valid_image_size;
 pub use content::{ClipboardContent, ClipboardImage, CopyImageError, MAX_IMAGE_BYTES};
 pub use html::sanitize_html;
 #[cfg(target_os = "macos")]
@@ -70,14 +74,21 @@ impl WriteStamp {
     }
 }
 
+/// An image or pixel handle waiting to be encoded as PNG off the event thread.
+#[derive(Clone)]
+enum PendingImage {
+    Image(crate::Image),
+    Pixels(crate::Pixels),
+}
+
 /// A pending clipboard write. Debug output never includes its contents.
 #[derive(Clone)]
 pub struct ClipboardWrite {
     content: ClipboardContent,
     clear_after: Option<Duration>,
     secret: Option<Arc<Unwritten>>,
-    /// A decoded image to copy, encoded as PNG where the write is carried out.
-    image: Option<crate::Image>,
+    /// A decoded image or `Pixels` handle to copy, encoded as PNG where the write is carried out.
+    image: Option<PendingImage>,
     /// Straight-alpha sRGB RGBA8 retained beside the encoded PNG so Windows (`CF_DIBV5`) and
     /// Linux (`arboard`) write without decoding the PNG back to pixels.
     #[cfg(any(
@@ -108,11 +119,47 @@ impl ClipboardWrite {
     }
     /// `Tx::copy_image`: the image alone, encoded off the event thread on native platforms.
     pub(crate) fn image(image: crate::Image) -> Self {
-        Self { image: Some(image), ..Self::new(ClipboardContent::default()) }
+        Self { image: Some(PendingImage::Image(image)), ..Self::new(ClipboardContent::default()) }
+    }
+    /// Internal `Pixels` copy path (for default image context menus): copies any `El::pixels`
+    /// or `El::pixels_fit` element off the event thread without storing an `Image` handle.
+    #[allow(dead_code)]
+    pub(crate) fn pixels(pixels: crate::Pixels) -> Self {
+        Self { image: Some(PendingImage::Pixels(pixels)), ..Self::new(ClipboardContent::default()) }
     }
     #[cfg(target_arch = "wasm32")]
     fn has_pending_image(&self) -> bool {
         self.image.is_some()
+    }
+    /// Copies mip-0 or straight RGBA bytes directly into a `Uint8Array` for off-main-thread
+    /// un-premultiplication and PNG encoding in a Web Worker, avoiding per-pixel work on the UI thread.
+    #[cfg(target_arch = "wasm32")]
+    fn extract_web_pixels(&mut self) -> Result<(u32, u32, js_sys::Uint8Array, bool), CopyImageError> {
+        let Some(pending) = self.image.take() else {
+            return Err(CopyImageError::NotReady);
+        };
+        let pack = |cp: rune_image::CopyPixels<'_>| -> Result<(u32, u32, js_sys::Uint8Array, bool), CopyImageError> {
+            let (w, h, slice, premul) = match &cp {
+                rune_image::CopyPixels::Straight { width, height, bytes } => (*width, *height, bytes.as_ref(), false),
+                rune_image::CopyPixels::PremulMip0 { width, height, bytes } => (*width, *height, *bytes, true),
+            };
+            if !valid_image_size(w, h) {
+                return Err(CopyImageError::TooLarge);
+            }
+            Ok((w, h, js_sys::Uint8Array::from(slice), premul))
+        };
+        match pending {
+            PendingImage::Image(image) => {
+                if let Some(err) = image.error() {
+                    return Err(CopyImageError::DecodeFailed(err.clone()));
+                }
+                if !image.is_ready() {
+                    return Err(CopyImageError::NotReady);
+                }
+                image.with_copy_pixels(pack).unwrap_or(Err(CopyImageError::NotReady))
+            }
+            PendingImage::Pixels(pixels) => pixels.with_copy_pixels(pack).unwrap_or(Err(CopyImageError::NotReady)),
+        }
     }
     pub(crate) fn set_copy_image_id(&mut self, id: u64) {
         self.copy_image_id = Some(id);
@@ -138,15 +185,26 @@ impl ClipboardWrite {
     /// when the image is still decoding, failed to decode, or exceeds clipboard size limits;
     /// the write then leaves the clipboard as it was.
     fn encode_image(&mut self) -> Result<(), CopyImageError> {
-        let Some(image) = self.image.take() else { return Ok(()) };
-        if let Some(err) = image.error() {
-            return Err(CopyImageError::DecodeFailed(err.clone()));
-        }
-        if !image.is_ready() {
-            return Err(CopyImageError::NotReady);
-        }
-        let Some((w, h, rgba)) = image.to_rgba() else {
-            return Err(CopyImageError::NotReady);
+        let Some(pending) = self.image.take() else { return Ok(()) };
+        let (w, h, rgba) = match pending {
+            PendingImage::Image(image) => {
+                if let Some(err) = image.error() {
+                    return Err(CopyImageError::DecodeFailed(err.clone()));
+                }
+                if !image.is_ready() {
+                    return Err(CopyImageError::NotReady);
+                }
+                let Some(px) = image.to_rgba() else {
+                    return Err(CopyImageError::NotReady);
+                };
+                px
+            }
+            PendingImage::Pixels(pixels) => {
+                let Some(px) = pixels.to_rgba() else {
+                    return Err(CopyImageError::NotReady);
+                };
+                px
+            }
         };
         if !valid_image_size(w, h) {
             return Err(CopyImageError::TooLarge);
@@ -453,10 +511,10 @@ struct Board {
 /// The OS clipboard's current change counter, when the platform exposes one without reading
 /// the clipboard's contents.
 ///
-/// Returns `Some(n)` on macOS (`NSPasteboard.changeCount`) and Windows
-/// (`GetClipboardSequenceNumber`), where the counter changes on every write to the system
-/// clipboard. Returns `None` on Linux, web, iOS and Android, which expose no portable
-/// generation counter.
+/// Returns `Some(n)` on macOS (`NSPasteboard.changeCount`), Windows
+/// (`GetClipboardSequenceNumber`), and Android (from `OnPrimaryClipChangedListener` once a
+/// `RuneView` has initialized), where the counter changes on every write to the system
+/// clipboard. Returns `None` on Linux, web, and iOS, which expose no portable generation counter.
 ///
 /// Reading the counter never opens or reads the clipboard's contents and starts no background
 /// work. Compare two readings for inequality (`!=`) rather than ordering, as the Windows
@@ -596,7 +654,7 @@ trait Backend {
 /// How often the worker checks that a held secret is still on the clipboard. Where there is no
 /// change count (Linux) it compares the text's fingerprint, so it checks less often.
 #[cfg(not(target_arch = "wasm32"))]
-const WATCH: Duration = if cfg!(any(target_os = "macos", target_os = "windows")) {
+const WATCH: Duration = if cfg!(any(target_os = "macos", target_os = "windows", target_os = "android")) {
     Duration::from_millis(250)
 } else {
     Duration::from_secs(1)

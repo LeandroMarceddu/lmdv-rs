@@ -44,6 +44,11 @@ pub(crate) struct TextInputState {
     pub(super) links: links::LinkState,
     /// Multi-click and drag selection state for `text_input`.
     pub(in crate::runtime) input_click: input_click::InputClick,
+    /// Native touch selection handle drag state (`touch_ui`).
+    pub(in crate::runtime) handle_drag: super::touch_ui::HandleDrag,
+    /// Monotonic counter bumped on touch taps / field-menu opens / caret-handle releases so the
+    /// touch selection host knows when to show the 4-second caret handle.
+    pub(in crate::runtime) touch_selection_rev: u64,
     /// Sideways scroll of focused single-line fields, in points, keyed by node path.
     pub(crate) input_scroll: HashMap<String, f32>,
     /// The focused field's caret (path, window rect) the next view sees through `Cx::caret`.
@@ -62,6 +67,9 @@ pub(crate) struct TextInputState {
     pub(crate) ime_option_as_alt: crate::OptionAsAlt,
     /// The shell cancels native composition before enabling the new text focus.
     pub(crate) ime_reset: bool,
+    /// A finger tap landed on an editable text field since the host last polled it, so mobile
+    /// hosts can re-show a soft keyboard hidden by Back while the field kept focus.
+    pub(crate) field_tap: bool,
     /// The focused spellchecked field's word at the caret (`spell::pause`).
     pub(in crate::runtime) spell_watch: Option<crate::spell::pause::Watch>,
     /// Linux's primary selection (`runtime/input/primary_selection.rs`).
@@ -95,6 +103,8 @@ impl TextInputState {
             sel_heard: Default::default(),
             links: Default::default(),
             input_click: Default::default(),
+            handle_drag: Default::default(),
+            touch_selection_rev: 0,
             input_scroll: HashMap::default(),
             caret: None,
             caret_watch: false,
@@ -103,6 +113,7 @@ impl TextInputState {
             app_ime_comp: Default::default(),
             ime_option_as_alt: crate::OptionAsAlt::None,
             ime_reset: false,
+            field_tap: false,
             spell_watch: None,
             #[cfg(any(target_os = "linux", test))]
             primary: Default::default(),
@@ -192,6 +203,11 @@ impl TextInputState {
     #[inline]
     pub(in crate::runtime) fn set_shift(&mut self, shift: bool) {
         self.selectable.shift = shift;
+    }
+
+    #[inline]
+    pub(in crate::runtime) fn bump_touch_selection_rev(&mut self) {
+        self.touch_selection_rev = self.touch_selection_rev.wrapping_add(1);
     }
 }
 
@@ -290,14 +306,19 @@ impl RuntimeCore {
             self.reveal_row(app, &ScrollReveal::into_view(None, path), true);
             self.step_scroll(0.0);
         }
-        let Some(i) =
-            self.caret_browse_focus_in(&self.tree.nodes).map(|(fi, _, _)| fi).or_else(|| self.focused_index())
-        else {
-            return;
+        let follow_target = |rt: &Self| -> Option<(usize, [f32; 4])> {
+            if let Some((fi, byte, affinity)) = rt.caret_browse_focus_in(&rt.tree.nodes) {
+                return rt.caret_browse_node_rect(&rt.tree.nodes, fi, byte, affinity).map(|r| (fi, r));
+            }
+            if let Some(i) = rt.focused_index()
+                && let Some(r) = rt.caret_rect(&rt.tree.nodes, i)
+            {
+                return Some((i, r));
+            }
+            let (fi, byte, affinity) = rt.selectable_focus_mounted()?;
+            rt.caret_browse_node_rect(&rt.tree.nodes, fi, byte, affinity).map(|r| (fi, r))
         };
-        if self.caret_rect(&self.tree.nodes, i).is_none() {
-            return;
-        }
+        let Some((i, _)) = follow_target(self) else { return };
         let mut scrolled = false;
         for horizontal in [false, true] {
             let mut cur = Some(i);
@@ -308,12 +329,16 @@ impl RuntimeCore {
                 if !(self.tree.nodes[v].scroll.is_some() && self.tree.nodes[v].scroll_axes.has(horizontal)) {
                     continue;
                 }
-                let Some(r) = self.caret_rect(&self.tree.nodes, i) else { return };
+                let Some((_, r)) = follow_target(self) else { return };
                 let a = usize::from(!horizontal);
                 let mut start = scroll_offsets(&self.scroll.scrolls, &self.tree.nodes, v)
                     .fold(self.tree.nodes[v].target[a], |p, o| p - o[a]);
                 let mut end = start + (self.tree.nodes[v].target[a + 2] - self.tree.nodes[v].target[a]);
-                if !horizontal && let Some((vis_top, vis_bottom)) = self.host.visual_viewport_y {
+                let visible_y = self.host.visual_viewport_y.or_else(|| {
+                    let kb = self.host.keyboard_inset();
+                    (kb > 0.0).then(|| (0.0, (self.viewport.1 - kb).max(0.0)))
+                });
+                if !horizontal && let Some((vis_top, vis_bottom)) = visible_y {
                     let zoom = self.host.zoom().max(1e-3);
                     let clipped_start = start.max(vis_top / zoom);
                     let clipped_end = end.min(vis_bottom / zoom);

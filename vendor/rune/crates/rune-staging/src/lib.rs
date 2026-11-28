@@ -51,6 +51,19 @@ pub fn set_direct_texture(direct: DirectTexture) {
     DIRECT_TEXTURE.set(direct).ok();
 }
 
+/// Writes a tightly packed `width × height` rectangle of texels into `texture` at `(x, y)` in
+/// place, for the commands recorded after it, or returns false to have it staged. Commands
+/// recorded before it keep reading what they would have, so the write lands no later than a
+/// flush would land it.
+pub type DirectTextureRect = fn(&wgpu::Texture, u32, u32, u32, u32, &[u8]) -> bool;
+
+static DIRECT_TEXTURE_RECT: OnceLock<DirectTextureRect> = OnceLock::new();
+
+/// Registers the process's `DirectTextureRect` writer. The first one stays.
+pub fn set_direct_texture_rect(direct: DirectTextureRect) {
+    DIRECT_TEXTURE_RECT.set(direct).ok();
+}
+
 /// The size of a new chunk; a larger write up to `KEEP_CHUNK_MAX` gets its next power of two.
 const CHUNK: u64 = 128 * 1024;
 /// Returned normal chunks kept for reuse, by count and in bytes.
@@ -106,11 +119,13 @@ struct Chunk {
 
 enum Dst {
     Buffer(wgpu::Buffer, u64),
-    /// Full-width texture rows from `y`, `rows` of them, `bytes_per_row` apart in the chunk.
-    Rows {
+    /// `width × height` texture rectangle at `(x, y)`, `bytes_per_row` apart in the chunk.
+    Rect {
         texture: wgpu::Texture,
+        x: u32,
         y: u32,
-        rows: u32,
+        width: u32,
+        height: u32,
         bytes_per_row: u32,
     },
 }
@@ -238,14 +253,41 @@ impl Staging {
             return;
         }
         let byte_len = row as usize * count as usize;
-        if let Some(direct) = DIRECT_TEXTURE.get() {
+        self.write_texture_rect(texture, 0, y, texture.width(), count, &rows[..byte_len]);
+    }
+
+    /// Stages a write of a tightly packed `width × height` rectangle into `texture` at `(x, y)`.
+    pub fn write_texture_rect(&self, texture: &wgpu::Texture, x: u32, y: u32, width: u32, height: u32, data: &[u8]) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        let block = texture.format().block_copy_size(None).expect("a color format");
+        let row = width * block;
+        let Some(byte_len) = (row as usize).checked_mul(height as usize) else {
+            return;
+        };
+        if data.len() < byte_len {
+            return;
+        }
+        let data = &data[..byte_len];
+        let full_width = x == 0 && width == texture.width();
+        if DIRECT_TEXTURE_RECT.get().is_some() || (full_width && DIRECT_TEXTURE.get().is_some()) {
             let has_pending = self.busy() && self.lock().has_pending_texture(texture);
-            if !has_pending && direct(texture, y, &rows[..byte_len]) {
-                let mut s = self.lock();
-                s.stats.direct += 1;
-                s.stats.writes += 1;
-                s.stats.bytes += byte_len as u64;
-                return;
+            if !has_pending {
+                let wrote = if let Some(direct) = DIRECT_TEXTURE_RECT.get() {
+                    direct(texture, x, y, width, height, data)
+                } else if full_width && let Some(direct) = DIRECT_TEXTURE.get() {
+                    direct(texture, y, data)
+                } else {
+                    false
+                };
+                if wrote {
+                    let mut s = self.lock();
+                    s.stats.direct += 1;
+                    s.stats.writes += 1;
+                    s.stats.bytes += byte_len as u64;
+                    return;
+                }
             }
         }
         let mut s = self.lock();
@@ -254,21 +296,21 @@ impl Staging {
                 wgpu::TexelCopyTextureInfo {
                     texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                    origin: wgpu::Origin3d { x, y, z: 0 },
                     aspect: wgpu::TextureAspect::All,
                 },
-                rows,
+                data,
                 wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
-                wgpu::Extent3d { width: texture.width(), height: count, depth_or_array_layers: 1 },
+                wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             );
         }
         let padded = u64::from(row).next_multiple_of(ROW_ALIGN);
-        let size = padded * u64::from(count);
+        let size = padded * u64::from(height);
         let (src, at) = s.stage(size, ROW_ALIGN, self, |view| {
             if padded == u64::from(row) {
-                return view.copy_from_slice(&rows[..size as usize]);
+                return view.copy_from_slice(data);
             }
-            for (r, line) in rows.chunks_exact(row as usize).enumerate() {
+            for (r, line) in data.chunks_exact(row as usize).enumerate() {
                 let start = r * padded as usize;
                 view.slice(start..start + line.len()).copy_from_slice(line);
             }
@@ -277,7 +319,7 @@ impl Staging {
             src,
             offset: at,
             size,
-            dst: Dst::Rows { texture: texture.clone(), y, rows: count, bytes_per_row: padded as u32 },
+            dst: Dst::Rect { texture: texture.clone(), x, y, width, height, bytes_per_row: padded as u32 },
         });
     }
 
@@ -371,7 +413,7 @@ impl Staging {
 
 impl Inner {
     fn has_pending_texture(&self, texture: &wgpu::Texture) -> bool {
-        self.pending.iter().any(|p| matches!(&p.dst, Dst::Rows { texture: t, .. } if t == texture))
+        self.pending.iter().any(|p| matches!(&p.dst, Dst::Rect { texture: t, .. } if t == texture))
     }
 
     fn oversized_bytes(&self) -> u64 {
@@ -552,7 +594,7 @@ impl Inner {
         for p in self.pending.drain(..) {
             match p.dst {
                 Dst::Buffer(buffer, offset) => encoder.copy_buffer_to_buffer(&p.src, p.offset, &buffer, offset, p.size),
-                Dst::Rows { texture, y, rows, bytes_per_row } => encoder.copy_buffer_to_texture(
+                Dst::Rect { texture, x, y, width, height, bytes_per_row } => encoder.copy_buffer_to_texture(
                     wgpu::TexelCopyBufferInfo {
                         buffer: &p.src,
                         layout: wgpu::TexelCopyBufferLayout {
@@ -564,10 +606,10 @@ impl Inner {
                     wgpu::TexelCopyTextureInfo {
                         texture: &texture,
                         mip_level: 0,
-                        origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                        origin: wgpu::Origin3d { x, y, z: 0 },
                         aspect: wgpu::TextureAspect::All,
                     },
-                    wgpu::Extent3d { width: texture.width(), height: rows, depth_or_array_layers: 1 },
+                    wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
                 ),
             }
         }

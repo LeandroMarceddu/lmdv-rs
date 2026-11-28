@@ -79,7 +79,6 @@ impl Layers {
     /// parent's pass, or into a target composited back at its own place, neither turned nor
     /// blurred, so a changed instance changes only the pixels its bounds cover
     /// (`Renderer::redraws_in_place`).
-    #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
     pub(super) fn in_place(&self) -> bool {
         self.plan.iter().enumerate().all(|(i, l)| match self.planner.dispositions.get(i) {
             Some(Disposition::Inline | Disposition::Skip) | None => true,
@@ -321,13 +320,57 @@ impl Renderer {
         });
     }
 
+    /// Where this frame's pooled backdrop copies sit in the window and their size, in device
+    /// pixels. An effect that reads what is below it reads a copy of the whole target, at the
+    /// target's own size. Blurs alone read only their regions: the copies hold those, in whole
+    /// steps so a region that grows or moves by a few pixels makes no texture, and a texture
+    /// stays while it holds them and isn't four times their area. (A frosted pill in a
+    /// 2560x1440 window keeps kilobytes where two copies of the window were 43 MB.)
+    pub(super) fn backdrop_frame(&self, (vw, vh): (u32, u32)) -> ([u32; 2], [u32; 2]) {
+        let mut reads: Option<[u32; 4]> = None;
+        for (_, i) in &self.effects {
+            let rect = if i.kind() == Some(Kind::BackdropBlur) {
+                let Some(plan) = backdrop_blur::plan_region(i, (vw, vh)) else { continue };
+                let r = plan.region;
+                [
+                    r[0].floor().max(0.0) as u32,
+                    r[1].floor().max(0.0) as u32,
+                    (r[2].ceil().max(0.0) as u32).min(vw),
+                    (r[3].ceil().max(0.0) as u32).min(vh),
+                ]
+            } else if i.params[0] != 0.0 {
+                return ([0, 0], [vw.max(1), vh.max(1)]);
+            } else {
+                continue;
+            };
+            reads = Some(match reads {
+                Some(b) => [b[0].min(rect[0]), b[1].min(rect[1]), b[2].max(rect[2]), b[3].max(rect[3])],
+                None => rect,
+            });
+        }
+        let b = reads.unwrap_or([0, 0, 1, 1]);
+        let need = [b[2].saturating_sub(b[0]), b[3].saturating_sub(b[1])]
+            .map(|v| v.max(1).next_multiple_of(pass::BACKDROP_STEP));
+        let area = |s: [u32; 2]| s[0] as u64 * s[1] as u64;
+        let size = match self
+            .backdrops
+            .iter()
+            .find(|bd| bd.format == self.format)
+            .map(|bd| [bd.texture.width(), bd.texture.height()])
+        {
+            Some(have) if have[0] >= need[0] && have[1] >= need[1] && area(have) <= 4 * area(need) => have,
+            _ => need,
+        };
+        ([b[0], b[1]], size)
+    }
     /// What a window at rest gives back (`window::rest`): every spare target (the first menu,
     /// hover or session after it makes its own again, within a frame's run-to-run spread on an
     /// Iris Xe), cache textures no layer drew last frame, GPU textures of image atlas pages that
     /// `ImageAtlas::rest` already freed, and the backdrop copies and blur pyramid when the last
     /// frame read none. With `all`, also the scratch targets of this screen's layers, every image
-    /// atlas texture (recreated from `ImageAtlas` on the next `upload_images`), and its backdrop
-    /// copies, which its next frame makes again (a few ms on an integrated GPU). It keeps the
+    /// atlas texture (recreated from `ImageAtlas` on the next `upload_images`), the retained
+    /// partial-damage frame texture, and its backdrop copies, which its next frame makes again (a
+    /// few ms on an integrated GPU). It keeps the
     /// textures of caches on screen, which the last frame's instances name instead of their
     /// contents, and takes the ones it drops out of `resident`, so their next frame paints them.
     /// What no submission still uses is freed here; the rest when the device next polls.
@@ -351,6 +394,7 @@ impl Renderer {
                 }
             }
             self.clear_images();
+            self.release_damage_retained();
         } else {
             self.prune_images(images);
         }
@@ -659,6 +703,10 @@ impl Renderer {
                         self.layers.spare.push(t);
                     }
                 }
+                Move::DropSlot(slot) => {
+                    self.layers.targets[slot] = None;
+                }
+                Move::Swap(a, b) => self.layers.targets.swap(a, b),
                 Move::Set { slot, from } => {
                     let mut t = match from {
                         Kept::Retained(at) => self.layers.retained.swap_remove(at),
@@ -1053,6 +1101,41 @@ impl Renderer {
     /// and before re-opening the layer's pass for `EffectPhase::Draw(pass)`.
     pub fn encode_layers_with_backdrop(&self, encoder: &mut wgpu::CommandEncoder, hook: &mut EffectBackdropHook<'_>) {
         self.encode_layers_timed(encoder, None, hook);
+    }
+
+    /// Resolves which pass will draw effect slot at instance index `at`, returning `None` when an
+    /// enclosing layer is skipped or reuses a cached texture. Returns `(target, inline_clip)`,
+    /// where `target` is `Some(layer_idx)` for an isolated layer pass or `None` for the main frame
+    /// pass, and `inline_clip` is the intersection of any enclosing inline layer clips in window
+    /// device pixels.
+    pub(super) fn effect_target(&self, at: u32) -> Option<(Option<usize>, Option<[f32; 4]>)> {
+        let mut layer = self.layers.plan.iter().rposition(|l| at > l.begin && at < l.end);
+        let mut clip: Option<[f32; 4]> = None;
+        while let Some(index) = layer {
+            let l = self.layers.plan[index];
+            let disposition = self.layers.planner.dispositions.get(index).copied().unwrap_or(Disposition::Skip);
+            match disposition {
+                Disposition::Skip | Disposition::Cached { .. } => return None,
+                Disposition::Render { .. } => {
+                    if self.layers.targets[index].is_some() {
+                        return Some((Some(index), clip));
+                    }
+                    return None;
+                }
+                Disposition::Inline => {
+                    if l.clip != NO_CLIP {
+                        clip = Some(match clip {
+                            Some(c) => {
+                                [c[0].max(l.clip[0]), c[1].max(l.clip[1]), c[2].min(l.clip[2]), c[3].min(l.clip[3])]
+                            }
+                            None => l.clip,
+                        });
+                    }
+                    layer = l.parent;
+                }
+            }
+        }
+        Some((None, clip))
     }
 
     /// Origin and size of a pass's target: a layer's bounds, or the frame viewport.

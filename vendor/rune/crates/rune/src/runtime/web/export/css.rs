@@ -2,7 +2,10 @@
 
 use std::fmt::Write;
 
-use taffy::style::{CompactLength, Display, FlexDirection, FlexWrap, Overflow, Position, Style};
+use taffy::style::{
+    CompactLength, Display, FlexDirection, FlexWrap, GridTemplateComponent, Overflow, Position, RepetitionCount, Style,
+    TrackSizingFunction,
+};
 
 use super::escape;
 use crate::color::Color;
@@ -28,6 +31,56 @@ fn len(raw: CompactLength) -> Option<String> {
         CompactLength::FIT_CONTENT_KEYWORD_TAG => Some("fit-content".into()),
         _ => None,
     }
+}
+
+fn track_len(raw: CompactLength) -> Option<String> {
+    match raw.tag() {
+        CompactLength::FR_TAG => Some(format!("{}fr", num(raw.value()))),
+        CompactLength::MIN_CONTENT_TAG => Some("min-content".into()),
+        CompactLength::MAX_CONTENT_TAG => Some("max-content".into()),
+        CompactLength::FIT_CONTENT_PX_TAG => Some(format!("fit-content({})", px(raw.value()))),
+        CompactLength::FIT_CONTENT_PERCENT_TAG => Some(format!("fit-content({}%)", num(raw.value() * 100.0))),
+        _ => len(raw),
+    }
+}
+
+fn track(t: TrackSizingFunction) -> Option<String> {
+    let (min, max) = (t.min.into_raw(), t.max.into_raw());
+    if min == max {
+        track_len(min)
+    } else if min.tag() == CompactLength::AUTO_TAG && max.tag() == CompactLength::FR_TAG {
+        track_len(max)
+    } else {
+        Some(format!("minmax({},{})", track_len(min)?, track_len(max)?))
+    }
+}
+
+fn grid_tracks<S: taffy::CheapCloneStr>(list: &[GridTemplateComponent<S>]) -> Option<String> {
+    if list.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(list.len());
+    for c in list {
+        match c {
+            GridTemplateComponent::Single(t) => parts.push(track(*t)?),
+            GridTemplateComponent::Repeat(r) => {
+                let count = match r.count {
+                    RepetitionCount::Count(n) => n.to_string(),
+                    RepetitionCount::AutoFill => "auto-fill".into(),
+                    RepetitionCount::AutoFit => "auto-fit".into(),
+                };
+                let mut tracks = Vec::with_capacity(r.tracks.len());
+                for t in &r.tracks {
+                    tracks.push(track(*t)?);
+                }
+                if tracks.is_empty() {
+                    return None;
+                }
+                parts.push(format!("repeat({count},{})", tracks.join(" ")));
+            }
+        }
+    }
+    Some(parts.join(" "))
 }
 
 /// A Rust variant name in CSS's spelling: `SpaceBetween` to `space-between`.
@@ -68,6 +121,9 @@ pub(super) fn layout(s: &Style, root: bool) -> Decls {
         Display::Grid => d.push(("display", "grid".into())),
         Display::None => d.push(("display", "none".into())),
         _ => d.push(("display", "block".into())),
+    }
+    if let Some(cols) = grid_tracks(&s.grid_template_columns) {
+        d.push(("grid-template-columns", cols));
     }
     if s.flex_direction != FlexDirection::Row {
         d.push(("flex-direction", kebab(format!("{:?}", s.flex_direction))));
@@ -182,7 +238,7 @@ pub(super) fn layout(s: &Style, root: bool) -> Decls {
 
 /// Fill, gradients, border, corners, shadows, opacity, blurs and soft clips, for an element
 /// `size` points big.
-pub(super) fn paint(v: &Visual, size: (f32, f32), d: &mut Decls) {
+pub(super) fn paint(v: &Visual, size: (f32, f32), reduced_transparency: bool, d: &mut Decls) {
     // Rune paints the fill, then gradients, then a wrapped/tiled image on top: CSS lists
     // background layers top first, with the colour last.
     let mut layers: Vec<String> = Vec::new();
@@ -267,7 +323,7 @@ pub(super) fn paint(v: &Visual, size: (f32, f32), d: &mut Decls) {
             d.push(("overflow", "hidden".into()));
         }
     }
-    if v.cold.backdrop_blur > 0.0 {
+    if v.cold.backdrop_blur > 0.0 && !reduced_transparency {
         d.push(("backdrop-filter", format!("blur({})", px(v.cold.backdrop_blur))));
     }
     if v.blur > 0.0 {
@@ -392,7 +448,8 @@ pub(super) fn text(spec: &TextSpec, d: &mut Decls) {
 /// The text with its spans (weight, size, colour, code backgrounds, underlines) and its links.
 pub(super) fn text_html(spec: &TextSpec) -> String {
     let content = &spec.content;
-    let hrefs: Vec<Option<String>> = spec.cold.links.iter().map(|l| crate::open_url::check_href(&l.id).ok()).collect();
+    let hrefs: Vec<Option<String>> =
+        spec.cold.links.iter().map(|l| crate::open_url::check_href(l.href.as_deref().unwrap_or(&l.id)).ok()).collect();
     let mut cuts: Vec<usize> = vec![0, content.len()];
     for s in &spec.spans {
         cuts.extend([s.start as usize, s.end as usize]);
@@ -512,6 +569,61 @@ pub(super) fn svg(shape: &crate::Shape, size: (f32, f32)) -> String {
                 let cap = if *cap == crate::shape::LineCap::Round { "round" } else { "butt" };
                 write!(out, "<{el} fill=\"none\" stroke=\"{}\" stroke-width=\"{}\" stroke-linecap=\"{cap}\" stroke-linejoin=\"round\" vector-effect=\"non-scaling-stroke\" points=\"{}\"/>",
                     color(*c), num(*width), points(pts)).ok();
+            }
+            crate::shape::Op::Rect { rect: [rx, ry, rw, rh], radii, color: c } => {
+                flush(&mut out, &mut fill);
+                let [mut tl, mut tr, mut br, mut bl] = radii.map(|r| r.max(0.0));
+                let mut f = 1.0f32;
+                if tl + tr > *rw {
+                    f = f.min(*rw / (tl + tr));
+                }
+                if bl + br > *rw {
+                    f = f.min(*rw / (bl + br));
+                }
+                if tl + bl > *rh {
+                    f = f.min(*rh / (tl + bl));
+                }
+                if tr + br > *rh {
+                    f = f.min(*rh / (tr + br));
+                }
+                [tl, tr, br, bl] = [tl * f, tr * f, br * f, bl * f];
+                if tl == 0.0 && tr == 0.0 && br == 0.0 && bl == 0.0 {
+                    write!(
+                        out,
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" fill=\"{}\"/>",
+                        num(*rx),
+                        num(*ry),
+                        num(*rw),
+                        num(*rh),
+                        color(*c)
+                    )
+                    .ok();
+                } else if tl == tr && tr == br && br == bl {
+                    write!(
+                        out,
+                        "<rect x=\"{}\" y=\"{}\" width=\"{}\" height=\"{}\" rx=\"{}\" ry=\"{}\" fill=\"{}\"/>",
+                        num(*rx),
+                        num(*ry),
+                        num(*rw),
+                        num(*rh),
+                        num(tl),
+                        num(tl),
+                        color(*c)
+                    )
+                    .ok();
+                } else {
+                    let (x0, y0, x1, y1) = (*rx, *ry, *rx + *rw, *ry + *rh);
+                    write!(
+                        out,
+                        "<path fill=\"{}\" d=\"M{},{} H{} A{},{},0,0,1,{},{} V{} A{},{},0,0,1,{},{} H{} A{},{},0,0,1,{},{} V{} A{},{},0,0,1,{},{} Z\"/>",
+                        color(*c),
+                        num(x0 + tl), num(y0),
+                        num(x1 - tr), num(tr), num(tr), num(x1), num(y0 + tr),
+                        num(y1 - br), num(br), num(br), num(x1 - br), num(y1),
+                        num(x0 + bl), num(bl), num(bl), num(x0), num(y1 - bl),
+                        num(y0 + tl), num(tl), num(tl), num(x0 + tl), num(y0),
+                    ).ok();
+                }
             }
         }
     }

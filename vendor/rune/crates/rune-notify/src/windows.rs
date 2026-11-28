@@ -454,8 +454,9 @@ pub(super) fn xml(n: &Notification, scheme: Option<&str>) -> String {
     } else {
         format!("<actions>{}{}</actions>", inputs.concat(), buttons.concat())
     };
+    let audio = if n.sound { "" } else { "<audio silent=\"true\"/>" };
     format!(
-        "<toast {launch}><visual><binding template=\"ToastGeneric\"><text>{}</text>{body}</binding></visual>{actions}<audio silent=\"true\"/></toast>",
+        "<toast {launch}><visual><binding template=\"ToastGeneric\"><text>{}</text>{body}</binding></visual>{actions}{audio}</toast>",
         escape(&n.title),
     )
 }

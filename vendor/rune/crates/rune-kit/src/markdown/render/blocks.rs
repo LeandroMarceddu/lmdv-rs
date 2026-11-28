@@ -159,7 +159,7 @@ impl Renderer {
                         open_tail: false,
                         allow_memo: false,
                         idx: 0,
-                        col: col().role("list").w_full(),
+                        col: list_container(*start),
                         pending_item: None,
                     }],
                     dirs,
@@ -366,7 +366,7 @@ impl Renderer {
                                     open_tail: child_open_tail,
                                     allow_memo: am,
                                     idx: 0,
-                                    col: col().role("list").w_full(),
+                                    col: list_container(*start),
                                     pending_item: None,
                                 });
                                 descended = true;
@@ -451,7 +451,9 @@ impl Renderer {
                                     .mt(gap_mt),
                             );
                         } else {
-                            let marker = self.list_marker(*start, k, *indent, *space);
+                            let marker = self.with_reveal(self.list_marker(*start, k, *indent, *space));
+                            let marker =
+                                if start.is_some() { marker.role("list-marker") } else { marker.a11y_hidden() };
                             *list_col = std::mem::replace(list_col, el()).child(
                                 row()
                                     .key(format!("i{k}"))
@@ -459,7 +461,7 @@ impl Renderer {
                                     .position_in_set(k + 1, real_n)
                                     .w_full()
                                     .mt(gap_mt)
-                                    .child(self.with_reveal(marker).a11y_hidden())
+                                    .child(marker)
                                     .child(item_body.shrink()),
                             );
                         }
@@ -576,7 +578,9 @@ impl Renderer {
                                     });
                                     self.next_source.set(src_at + src_n);
                                     self.next_task.set(task_at + task_n);
-                                    let marker = self.list_marker(st, k, ind, sp);
+                                    let marker = self.with_reveal(self.list_marker(st, k, ind, sp));
+                                    let marker =
+                                        if st.is_some() { marker.role("list-marker") } else { marker.a11y_hidden() };
                                     *list_col = std::mem::replace(list_col, el()).child(
                                         row()
                                             .key(format!("i{k}"))
@@ -584,7 +588,7 @@ impl Renderer {
                                             .position_in_set(k + 1, real_n)
                                             .w_full()
                                             .mt(gap_mt)
-                                            .child(self.with_reveal(marker).a11y_hidden())
+                                            .child(marker)
                                             .child(body),
                                     );
                                     continue;
@@ -650,6 +654,9 @@ impl Renderer {
             .a11y_hidden();
         if interactive {
             control = control.hover(t.hover);
+            if let Some((enter, exit)) = t.hover_motion {
+                control = control.token_hover_motion(enter, exit);
+            }
         }
         let mut r = row()
             .key(format!("i{k}"))
@@ -802,6 +809,14 @@ impl Renderer {
             Block::Rule => el().w_full().h(0.5).fill(s.rule),
             Block::List { .. } | Block::Quote(_) => unreachable!(),
         }
+    }
+}
+
+fn list_container(start: Option<u64>) -> El {
+    let c = col().role("list").w_full();
+    match start {
+        Some(n) => c.list_start(n),
+        None => c,
     }
 }
 

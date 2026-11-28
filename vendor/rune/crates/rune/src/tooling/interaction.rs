@@ -85,6 +85,9 @@ pub(crate) fn on() -> bool {
 /// Whether a timed frame is underway on this thread, so phases should time themselves.
 #[inline(always)]
 pub(crate) fn active() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return false;
+    #[cfg(not(target_arch = "wasm32"))]
     ACTIVE.get()
 }
 

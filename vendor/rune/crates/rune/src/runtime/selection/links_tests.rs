@@ -381,6 +381,8 @@ fn link_fx_decos_scans_each_lines_end_once_and_matches_underline_edges() {
                 fg: None,
                 ring: None,
                 radius: None,
+                pad_x: None,
+                margin_x: None,
                 bare: None,
             });
             if i + 1 < n {
@@ -578,6 +580,8 @@ fn link_fx_decos_bg_and_underline_scans_scale_linearly_with_boxes() {
                 fg: None,
                 ring: None,
                 radius: None,
+                pad_x: None,
+                margin_x: None,
                 bare: None,
             });
             if i + 1 < n {

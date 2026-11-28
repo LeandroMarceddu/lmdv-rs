@@ -8,7 +8,7 @@ use super::*;
 #[cfg(test)]
 #[cfg(test)]
 use crate::file_dialog::DialogOutcome;
-use crate::file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions};
+use crate::file_dialog::{FileDialogError, FileDialogKind, FileDialogOptions, FileHandle};
 #[cfg(any(test, target_arch = "wasm32"))]
 use crate::popup_menu::Show;
 use crate::popup_menu::{PopupMenu, PopupMenuError};
@@ -164,9 +164,30 @@ impl<S: 'static> Runtime<S> {
     pub fn wheel(&mut self, x: f32, y: f32, dy: f32) {
         self.core_mut().wheel(x, y, dy);
     }
+    /// Whether whole mouse-wheel notches ease smoothly rather than jumping immediately
+    /// (default `true`, configured by [`App::wheel_glide`](crate::App::wheel_glide) or
+    /// [`ConfiguredOverlay::wheel_glide`](crate::ConfiguredOverlay::wheel_glide)).
+    #[inline(always)]
+    pub fn wheel_glide(&self) -> bool {
+        self.core().wheel_glide()
+    }
+    /// Turns mouse-wheel notch easing on or off for this runtime (default `true`).
     #[inline(always)]
     pub fn set_wheel_glide(&mut self, on: bool) {
-        self.core_mut().scroll.set_wheel_glide(on);
+        self.core_mut().set_wheel_glide(on);
+    }
+    /// Configured window points per mouse-wheel line/notch, or `None` when using the platform
+    /// default (Windows `SPI_GETWHEELSCROLLLINES`, 120 pt on Linux, 40 pt on macOS and web).
+    #[inline(always)]
+    pub fn wheel_line(&self) -> Option<f32> {
+        self.core().wheel_line()
+    }
+    /// Overrides how many window points one mouse-wheel line/notch scrolls for this runtime.
+    /// Positive finite values override the platform default; `None`, zero, negative, or
+    /// non-finite values restore the platform default.
+    #[inline(always)]
+    pub fn set_wheel_line(&mut self, points: Option<f32>) {
+        self.core_mut().set_wheel_line(points);
     }
     #[inline(always)]
     pub fn fling(&mut self, x: f32, y: f32, velocity: f32) {
@@ -256,6 +277,30 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn touching(&self) -> bool {
         self.core().touching()
+    }
+    /// Sets how long a still finger must be held (in seconds) before firing a long-press
+    /// secondary click (for example Android's `ViewConfiguration.getLongPressTimeout()`).
+    /// Positive finite values override the `0.5` s default; zero, negative, or non-finite values
+    /// restore the default.
+    ///
+    /// ```
+    /// use rune::{Env, Runtime, el};
+    ///
+    /// let mut rt = Runtime::new((), |_: &(), _| el(), (200.0, 120.0), Env::default());
+    /// assert_eq!(rt.touch_long_press(), 0.5);
+    /// rt.set_touch_long_press(0.4);
+    /// assert_eq!(rt.touch_long_press(), 0.4);
+    /// rt.set_touch_long_press(0.0);
+    /// assert_eq!(rt.touch_long_press(), 0.5);
+    /// ```
+    #[inline(always)]
+    pub fn set_touch_long_press(&mut self, secs: f64) {
+        self.core_mut().set_touch_long_press(secs);
+    }
+    /// Active touch long-press delay in seconds (defaults to `0.5` s).
+    #[inline(always)]
+    pub fn touch_long_press(&self) -> f64 {
+        self.core().touch_long_press()
     }
 
     #[inline(always)]
@@ -482,8 +527,27 @@ impl<S: 'static> Runtime<S> {
         self.core_mut().drag_files(paths, at);
     }
     #[inline(always)]
+    pub fn drag_files_with(
+        &mut self,
+        paths: Vec<PathBuf>,
+        at: Option<(f32, f32)>,
+        mods: crate::Mods,
+        allowed: crate::DragOperations,
+    ) {
+        self.core_mut().drag_files_with(paths, at, mods, allowed);
+    }
+    #[inline(always)]
     pub fn drag_files_to(&mut self, at: Option<(f32, f32)>) -> bool {
         self.core_mut().drag_files_to(at)
+    }
+    #[inline(always)]
+    pub fn drag_files_to_with(
+        &mut self,
+        at: Option<(f32, f32)>,
+        mods: crate::Mods,
+        allowed: crate::DragOperations,
+    ) -> bool {
+        self.core_mut().drag_files_to_with(at, mods, allowed)
     }
     #[inline(always)]
     pub fn drag_files_leave(&mut self) {
@@ -492,6 +556,17 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn drop_files(&mut self, paths: Vec<PathBuf>, at: Option<(f32, f32)>) {
         self.core_mut().drop_files(paths, at);
+    }
+    #[inline(always)]
+    pub fn drop_files_with(
+        &mut self,
+        paths: Vec<PathBuf>,
+        at: Option<(f32, f32)>,
+        mods: crate::Mods,
+        allowed: crate::DragOperations,
+        operation: Option<crate::DragOperation>,
+    ) {
+        self.core_mut().drop_files_with(paths, at, mods, allowed, operation);
     }
     #[inline(always)]
     pub fn dragging_files(&self) -> bool {
@@ -504,6 +579,10 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn drop_rejected_hovered(&self) -> Option<String> {
         self.core().drop_rejected_hovered()
+    }
+    #[inline(always)]
+    pub fn drop_feedback(&self) -> Option<&crate::DropFeedback> {
+        self.core().drop_feedback()
     }
 
     #[inline(always)]
@@ -583,6 +662,26 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn set_safe_area(&mut self, insets: [f32; 4]) {
         self.core_mut().set_safe_area(insets);
+    }
+    /// Sets the bottom overlap of an on-screen software keyboard in logical points reported by
+    /// [`Cx::keyboard_inset`](crate::Cx::keyboard_inset) (for example, Android
+    /// `WindowInsets.Type.ime()` under `adjustNothing` or iOS `keyboardLayoutGuide`).
+    ///
+    /// Kept separate from [`Self::set_safe_area`] so hardware edge-drag bands
+    /// ([`El::on_edge_drag`](crate::El::on_edge_drag)) do not expand by the keyboard height.
+    /// When positive, automatic caret reveal scrolls focused fields into the visible band above
+    /// the keyboard. Negative and non-finite values clamp to `0.0`.
+    ///
+    /// ```
+    /// # use rune::{Cx, El, Env, Runtime, el};
+    /// # fn view(_: &f32, cx: &mut Cx<f32>) -> El { let _ = cx.keyboard_inset(); el() }
+    /// let mut rt = Runtime::new(0.0, view, (390.0, 844.0), Env::new(true, 1.0));
+    /// rt.set_keyboard_inset(312.0);
+    /// rt.frame(0.0);
+    /// ```
+    #[inline(always)]
+    pub fn set_keyboard_inset(&mut self, points: f32) {
+        self.core_mut().set_keyboard_inset(points);
     }
     #[cfg(test)]
     #[inline(always)]
@@ -673,6 +772,12 @@ impl<S: 'static> Runtime<S> {
     pub fn file_dialog_multiple(&self) -> bool {
         self.core().file_dialog_multiple()
     }
+    /// True when the pending file dialog accepts platform-neutral [`FileHandle`]s
+    /// ([`Tx::pick_file`], [`Tx::pick_files`], [`Tx::pick_save_file`]).
+    #[inline(always)]
+    pub fn file_dialog_handles(&self) -> bool {
+        self.core().file_dialog_handles()
+    }
     #[inline(always)]
     pub fn resolve_file_dialog(&mut self, path: Option<PathBuf>) -> Result<(), FileDialogError> {
         self.core_mut().resolve_file_dialog(path)
@@ -690,6 +795,16 @@ impl<S: 'static> Runtime<S> {
     #[inline(always)]
     pub fn resolve_file_dialog_files(&mut self, paths: Option<Vec<PathBuf>>) -> Result<(), FileDialogError> {
         self.core_mut().resolve_file_dialog_files(paths)
+    }
+    /// Answers the pending file dialog with a single [`FileHandle`], or cancels with `None`.
+    #[inline(always)]
+    pub fn resolve_file_dialog_handle(&mut self, handle: Option<FileHandle>) -> Result<(), FileDialogError> {
+        self.core_mut().resolve_file_dialog_handle(handle)
+    }
+    /// Answers the pending file dialog with one or more [`FileHandle`]s, or cancels with `None`.
+    #[inline(always)]
+    pub fn resolve_file_dialog_handles(&mut self, handles: Option<Vec<FileHandle>>) -> Result<(), FileDialogError> {
+        self.core_mut().resolve_file_dialog_handles(handles)
     }
     #[cfg(test)]
     #[inline(always)]

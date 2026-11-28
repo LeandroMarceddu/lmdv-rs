@@ -37,6 +37,7 @@ mod measure;
 #[doc(hidden)]
 pub mod outline;
 mod paragraphs;
+mod positioned;
 #[doc(hidden)]
 pub mod profile;
 mod raster;
@@ -85,6 +86,9 @@ pub use fonts::full_faces::add_font;
 pub use fonts::language::set_language;
 pub use fonts::system_fonts::InstalledFamily;
 pub use fonts::system_fonts::installed_families;
+pub use fonts::system_fonts::prewarm_system_fonts;
+pub use fonts::system_fonts::set_system_fonts;
+pub use fonts::system_fonts::system_fonts_enabled;
 #[doc(hidden)]
 pub use icon::Facing;
 pub use icon::Icon;
@@ -238,6 +242,11 @@ pub use paragraphs::common_end;
 pub use paragraphs::common_start;
 pub use parley;
 #[doc(hidden)]
+pub use positioned::PositionedA11yChunk;
+#[doc(hidden)]
+pub use positioned::PositionedA11yLines;
+pub use positioned::PositionedText;
+#[doc(hidden)]
 pub use raster::coretext_match;
 pub use raster::coretext_match::FontSmoothing;
 pub use raster::macos::smoothing::ApplePipeline;
@@ -260,7 +269,7 @@ use fonts::hidden_axes::hidden_axes;
 use fonts::platform_face;
 #[cfg(test)]
 use fonts::system_fonts::{CJK_FONT_FILES, system_font_files};
-use fonts::system_fonts::{LoadedFiles, family_list, load_installed, load_system_mono, named_list, names_system_mono};
+use fonts::system_fonts::{LoadedFiles, family_list, named_list, names_system_mono};
 use fonts::trak::{Trak, Traks, font_trak};
 use fonts::{fallback, families, system_fonts, system_weight};
 use icon::anim::AnimatedIcons;
@@ -272,7 +281,7 @@ use layout::cache::{Cache, Entry};
 use layout::decorations::Decoration;
 use layout::id::LayoutIds;
 use layout::rich::mono_tab_stops;
-use layout::span::{HIDDEN_SIZE, IMAGE_BOX, PILL_BOX, SPAN_BOX, is_hidden_size};
+use layout::span::{HIDDEN_SIZE, IMAGE_BOX, PILL_BARE, PILL_BOX, SPAN_BOX, is_hidden_size, pill_index};
 use layout::{cursor, hash, line_break, line_metrics, span};
 use raster::{macos, support, windfoil, windows};
 
@@ -392,6 +401,9 @@ pub struct TextSystem {
     pub smoothing: FontSmoothing,
     /// The mode the app asked for ([`Self::set_font_smoothing`]).
     requested: FontSmoothing,
+    /// Whether `FontSmoothing::On` honours the host macOS `AppleFontSmoothing` user setting
+    /// (`true` for live windows; `false` for deterministic headless runs and explicit overrides).
+    respect_user_smoothing: bool,
     /// The `trak` table of the first font of a family slot at a weight, upright or italic.
     primary_traks: FxHashMap<(Family, u32, bool), Option<Rc<Trak>>>,
     /// The hidden-axis coordinates (`hidden_axes`) of the same first font.
@@ -432,6 +444,7 @@ impl TextSystem {
     /// Builds a [`TextSystem`] without updating the process-wide measurement state, for
     /// [`measure::with_text`]'s thread-local measurer.
     pub(crate) fn new_local(fonts: &[&'static [u8]], families: (&str, &str)) -> Self {
+        let _warm = crate::profile::TextStageScope::enter(crate::profile::TextStage::Warm);
         // Windows' own word dictionaries for the scripts that need one (loaded when first asked).
         #[cfg(all(target_os = "windows", not(feature = "segmenter-dictionaries")))]
         crate::segmenter::install();
@@ -540,6 +553,7 @@ impl TextSystem {
             traks: Traks::new(),
             smoothing: FontSmoothing::default(),
             requested: FontSmoothing::default(),
+            respect_user_smoothing: true,
             primary_traks: Default::default(),
             primary_axes: Default::default(),
             apple: Default::default(),
@@ -635,24 +649,18 @@ impl TextSystem {
     /// name, so a slot or `Family::Named` can be any font on the system.
     #[doc(hidden)]
     pub fn load_installed(&mut self, list: &str) {
-        load_installed(&mut self.font_cx.collection, &mut self.font_files, &mut self.installed, list);
+        self.load_installed_maybe_async(list, false);
     }
 
     /// Loads any installed system font families named by `list` (as configured by
     /// [`Self::set_emoji_family`]) that are not yet registered in this collection.
     pub(crate) fn load_installed_emoji(&mut self, list: &str) {
-        system_fonts::load_installed_emoji(
-            &mut self.font_cx.collection,
-            &mut self.font_files,
-            &mut self.installed,
-            list,
-        );
+        self.load_installed_maybe_async(list, true);
     }
 
     /// The installed `Family::SystemMono` families, loading them the first time.
     fn system_mono(&mut self) -> &[String] {
-        let (collection, loaded) = (&mut self.font_cx.collection, &mut self.font_files);
-        self.system_mono.get_or_insert_with(|| load_system_mono(collection, loaded))
+        self.load_system_mono_maybe_async()
     }
 
     /// The RGBA image of a colour glyph quad (`GlyphQuad::color`, nonzero).
@@ -735,9 +743,36 @@ impl TextSystem {
     pub fn set_font_smoothing(&mut self, mode: FontSmoothing) {
         self.requested = mode;
         self.smoothing = mode.drawn(self.lcd_ok());
-        self.apple.set_pipeline(self.smoothing.pipeline());
+        self.apple.set_pipeline(self.effective_pipeline(self.smoothing));
         self.atlas.lcd = self.smoothing.lcd();
         self.atlas.lcd_wanted = mode.lcd();
+    }
+
+    fn effective_pipeline(&self, mode: FontSmoothing) -> ApplePipeline {
+        if self.respect_user_smoothing { mode.pipeline() } else { mode.pipeline_with_user_smoothing(true) }
+    }
+
+    /// Controls whether [`FontSmoothing::On`] honours the host macOS `AppleFontSmoothing` user
+    /// setting (`true` by default, matching live AppKit/SwiftUI windows; `false` for
+    /// deterministic headless snapshots and explicit `--font-smoothing` overrides so `On`
+    /// always dilates regardless of the machine's `AppleFontSmoothing` preference). Re-applies
+    /// the active mode's pipeline immediately and returns whether it changed.
+    #[doc(hidden)]
+    pub fn set_respect_user_font_smoothing(&mut self, respect: bool) -> bool {
+        if self.respect_user_smoothing == respect {
+            return false;
+        }
+        self.respect_user_smoothing = respect;
+        let next = self.effective_pipeline(self.smoothing);
+        let changed = self.apple.pipeline() != next;
+        self.apple.set_pipeline(next);
+        changed
+    }
+
+    /// Whether [`FontSmoothing::On`] honours the host macOS `AppleFontSmoothing` preference.
+    #[doc(hidden)]
+    pub fn respect_user_font_smoothing(&self) -> bool {
+        self.respect_user_smoothing
     }
 
     /// Whether subpixel text draws here now: the renderer draws outlines and blends by channel,

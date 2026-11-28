@@ -12,6 +12,16 @@ impl RuntimeCore {
         self.wall_start.map_or(self.clock, |t| t.elapsed().as_secs_f64())
     }
 
+    /// Clock seconds of the live input event currently being dispatched (on macOS, the hardware
+    /// `NSEvent.timestamp()` mapped onto `wall_start` via `crate::input::time::current()`),
+    /// falling back to [`Self::now_clock`] when no native event timestamp or wall clock is active.
+    pub(crate) fn input_clock(&self) -> f64 {
+        if let (Some(start), Some(at)) = (self.wall_start, crate::input::time::current()) {
+            return at.saturating_duration_since(start).as_secs_f64();
+        }
+        self.now_clock()
+    }
+
     /// The window's size in its points and its scale. The view lays out in them over its zoom
     /// ([`Cx::zoom`]), at the scale times the zoom.
     pub fn set_viewport(&mut self, viewport: (f32, f32), scale: f32) {
@@ -64,14 +74,15 @@ impl RuntimeCore {
     }
 
     /// Queue a native focus transition. Repeated notifications do not repeat the callback.
-    /// Losing focus is also `keys_lost`.
-    pub(crate) fn window_focus(&mut self, app: &mut dyn AppDriver, focused: bool) {
+    /// Losing focus is also `keys_lost`. Returns whether the window's focus state changed.
+    pub(crate) fn window_focus(&mut self, app: &mut dyn AppDriver, focused: bool) -> bool {
         // Every focus gain, even one a hide without blur left unreported.
         if focused {
             self.kbd.keys_lost = false;
             self.kbd.focus_lost_sent = false;
         }
-        if self.host.window_focused != Some(focused) {
+        let changed = self.host.window_focused != Some(focused);
+        if changed {
             // Refocused, the pointer where it was hovers again; blurred, it waits for a move.
             if focused && self.host.window_focused == Some(false) {
                 self.pointer.hover_paused = false;
@@ -82,6 +93,10 @@ impl RuntimeCore {
                 && (self.focused_input().is_some_and(|i| i.selection_style.is_some())
                     || self.text_selection().is_some_and(|(_, r)| !r.is_empty()))
             {
+                self.commit.dirty = true;
+            }
+            // A focused field's caret goes while the window is inactive and comes back with it.
+            if self.focused_input().is_some() {
                 self.commit.dirty = true;
             }
             // Back to the front: a field's keyboard-entry ring stays off until the keys move focus.
@@ -98,6 +113,7 @@ impl RuntimeCore {
             // Deliver the cancelled Up before FocusLost can commit a view that removes its
             // grip (or the focus callback clears the app's drag state).
             if !focused {
+                self.dismiss_popup_menu_fallback(app);
                 self.cancel_pointer();
                 self.kbd.held = physical_dispatch::Activation::Up;
             }
@@ -120,6 +136,7 @@ impl RuntimeCore {
             self.edit.clear_input_click();
             self.wheel_lost();
         }
+        changed
     }
 
     /// The last focus change the window reported was a gain.

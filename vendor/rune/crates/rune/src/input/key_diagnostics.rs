@@ -239,11 +239,13 @@ mod tests {
                 has_virtual: false,
                 reusable: false,
                 has_path_bind: false,
+                has_pixels: false,
             });
             root.memo = Some(std::rc::Rc::new(crate::memo::Built {
                 id: 0,
                 reusable: false,
                 has_path_bind: false,
+                has_pixels: false,
                 region: false,
                 root: el(),
                 children,

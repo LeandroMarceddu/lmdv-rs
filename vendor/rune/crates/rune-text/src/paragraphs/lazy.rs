@@ -339,6 +339,7 @@ impl TextSystem {
                     lazy.style.size,
                     lazy.scale,
                     laid.max_width,
+                    lazy.wrap_anywhere,
                     laid.align,
                     f64::from(want_frac),
                 );
@@ -357,11 +358,7 @@ impl TextSystem {
             (width, full_width) = (width.max(p.widths[0]), full_width.max(p.widths[1]));
         }
         let left = paragraphs.iter().any(|p| !p.shaped);
-        let keyed = laid.keyed.as_ref().map(|k| Keyed {
-            content: k.content.clone(),
-            style_key: k.style_key,
-            start_flow: k.start_flow,
-        });
+        let keyed = laid.keyed.clone();
         let built = Rc::new(ParagraphLayout {
             paragraphs,
             width,

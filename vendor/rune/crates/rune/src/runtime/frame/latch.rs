@@ -43,9 +43,15 @@ impl RuntimeCore {
         // An update runs at `now_clock()` (`begin_update`); if a resting timer's frame is
         // still pending, cancel it so the upcoming frame polls at the newer clock instead of
         // running handlers at the earlier poll's clock.
+        if std::mem::take(&mut one.request_poll) {
+            one.wakes.push(std::time::Duration::ZERO);
+        }
         self.cancel_timer_frame();
         merge(&mut self.frame.pending, one);
         self.commit.dirty |= changed;
+        if changed && !self.live_visible() {
+            self.drop_images();
+        }
         (stale, minimize)
     }
 
@@ -92,8 +98,12 @@ impl RuntimeCore {
         if let Some(picked) = tx.field_menu_resolution.take() {
             self.latch_field_menu_resolution(app, picked, tx);
         }
+        if let Some(picked) = tx.popup_menu_resolution.take() {
+            self.latch_popup_menu_resolution(app, picked, tx);
+        }
         self.shell_request = self.shell_request.max(tx.shell.take());
         self.host.user_close_request |= std::mem::take(&mut tx.user_close_request);
+        self.host.urgent_frame |= std::mem::take(&mut tx.urgent_frame);
         if tx.minimize_order.take().is_some() {
             self.minimize_step(crate::window::MinimizeEvent::Asked);
         }
@@ -162,7 +172,7 @@ impl RuntimeCore {
             self.edit.clipboard_reads.push((self.edit.next_clipboard_read, read));
             self.edit.read_requests.push(self.edit.next_clipboard_read);
         }
-        self.host.popups.extend(tx.popups.drain(..).filter_map(|call| call.take()));
+        self.latch_popups(app, tx);
         for request in tx.file_dialogs.drain(..).filter_map(|call| call.take()) {
             self.request_file_dialog(request);
         }
@@ -196,6 +206,9 @@ impl RuntimeCore {
         }
         if let Some(backdrop) = tx.window_backdrop.take() {
             self.host.window_backdrop_request = Some(backdrop);
+        }
+        if let Some(anchor) = tx.resize_anchor.take() {
+            self.host.window_resize_anchor = Some(anchor);
         }
         if let Some(path) = tx.represented_file.take() {
             self.host.represented_file.set(crate::window::spec::normalize_represented_file(path));
@@ -235,6 +248,7 @@ impl RuntimeCore {
             focused: self.focused_key(),
             focused_path: self.kbd.focus.owned(),
             focused_link,
+            hover: self.hover_snapshot(),
             assistive: self.host.a11y.is_some() || cfg!(target_arch = "wasm32"),
             window_hidden: !self.live_visible(),
             ..Tx::default()

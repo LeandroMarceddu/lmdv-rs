@@ -172,8 +172,10 @@ fn push_into(dest: &mut Dest, step: FileStep) {
         dest.steps.pop();
     }
     match step {
-        FileStep::Enter(..) | FileStep::Move(_) => dest.over = true,
-        FileStep::Drop(..) | FileStep::Leave => dest.over = false,
+        FileStep::Enter(..) | FileStep::EnterWith { .. } | FileStep::Move(_) | FileStep::MoveWith { .. } => {
+            dest.over = true
+        }
+        FileStep::Drop(..) | FileStep::DropWith { .. } | FileStep::Leave => dest.over = false,
     }
     dest.steps.push(step);
 }

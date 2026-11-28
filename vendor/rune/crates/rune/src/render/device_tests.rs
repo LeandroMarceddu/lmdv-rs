@@ -22,6 +22,24 @@ fn fallback_instance_descriptor_allows_noncompliant_adapters() {
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
+fn required_device_limits_falls_back_to_downlevel_for_16k_uniform_buffer_adapters() {
+    let mut gles_like = wgpu::Limits::default();
+    gles_like.max_uniform_buffer_binding_size = 16_384;
+    let limits = Gpu::required_device_limits(&gles_like, 0);
+    assert_eq!(
+        limits.max_uniform_buffer_binding_size, 16_384,
+        "an adapter whose only shortfall is a 16 KiB UBO limit (Android GLES) must request downlevel limits",
+    );
+
+    let full = wgpu::Limits::default();
+    let desktop = Gpu::required_device_limits(&full, 128);
+    assert_eq!(desktop.max_uniform_buffer_binding_size, wgpu::Limits::default().max_uniform_buffer_binding_size);
+    assert_eq!(desktop.max_immediate_size, 128);
+    assert!(desktop.max_non_sampler_bindings <= 65_536);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
 #[ignore]
 fn dx12_presentation_system_env_child() {
     let expected = match crate::env::var("RUNE_TEST_EXPECT_SWAPCHAIN").as_deref() {
@@ -821,6 +839,52 @@ fn apply_gpu_memory_policy_chooses_before_invalidating_and_skips_when_unchanged(
     assert_eq!(*log.borrow(), ["choose Performance"]);
 }
 
+/// Matches an initial suballocation block size against wgpu-hal's
+/// `AllocationSizes::from_memory_hints` `(device_block, host_block)`.
+///
+/// D3D12 always places `STORAGE | COPY_DST` buffers in `D3D12_HEAP_TYPE_DEFAULT` (device blocks)
+/// and discrete Vulkan GPUs expose a non-host-visible `DEVICE_LOCAL` heap (device blocks). On
+/// CPU-only or unified-memory Vulkan adapters (such as Mesa llvmpipe), `DEVICE_LOCAL` memory
+/// types are also `HOST_VISIBLE`, so `gpu-allocator` allocates from the host block size (half
+/// the device block size, clamped to 4 MiB..=256 MiB).
+#[cfg(not(target_arch = "wasm32"))]
+fn expected_memory_block_matches(
+    backend: wgpu::Backend,
+    device_type: wgpu::DeviceType,
+    device_block: u64,
+    host_block: u64,
+    actual: u64,
+) -> bool {
+    actual == device_block
+        || (backend == wgpu::Backend::Vulkan && device_type != wgpu::DeviceType::DiscreteGpu && actual == host_block)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn expected_memory_block_matches_allows_host_block_only_on_non_discrete_vulkan() {
+    use wgpu::{Backend, DeviceType};
+    const MIB: u64 = 1024 * 1024;
+    for (backend, kind) in [
+        (Backend::Dx12, DeviceType::DiscreteGpu),
+        (Backend::Dx12, DeviceType::Cpu),
+        (Backend::Vulkan, DeviceType::DiscreteGpu),
+    ] {
+        assert!(expected_memory_block_matches(backend, kind, 8 * MIB, 4 * MIB, 8 * MIB));
+        assert!(!expected_memory_block_matches(backend, kind, 8 * MIB, 4 * MIB, 4 * MIB));
+        assert!(expected_memory_block_matches(backend, kind, 128 * MIB, 64 * MIB, 128 * MIB));
+        assert!(!expected_memory_block_matches(backend, kind, 128 * MIB, 64 * MIB, 64 * MIB));
+    }
+    for kind in [DeviceType::Cpu, DeviceType::IntegratedGpu] {
+        assert!(expected_memory_block_matches(Backend::Vulkan, kind, 8 * MIB, 4 * MIB, 4 * MIB));
+        assert!(expected_memory_block_matches(Backend::Vulkan, kind, 8 * MIB, 4 * MIB, 8 * MIB));
+        assert!(!expected_memory_block_matches(Backend::Vulkan, kind, 8 * MIB, 4 * MIB, 64 * MIB));
+        assert!(expected_memory_block_matches(Backend::Vulkan, kind, 128 * MIB, 64 * MIB, 64 * MIB));
+        assert!(!expected_memory_block_matches(Backend::Vulkan, kind, 128 * MIB, 64 * MIB, 4 * MIB));
+        assert!(expected_memory_block_matches(Backend::Vulkan, kind, 4 * MIB, 4 * MIB, 4 * MIB));
+        assert!(!expected_memory_block_matches(Backend::Vulkan, kind, 4 * MIB, 4 * MIB, 8 * MIB));
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 #[ignore]
@@ -829,20 +893,20 @@ fn gpu_memory_policy_child() {
     const MIB: u64 = 1024 * 1024;
 
     let mode = crate::env::var("RUNE_TEST_GPU_MEMORY_POLICY").expect("policy test mode");
-    let expected_block = match mode.as_str() {
-        "default" => 8 * MIB,
+    let (expected_device, expected_host) = match mode.as_str() {
+        "default" => (8 * MIB, 4 * MIB),
         "manual-setter" => {
             crate::set_gpu_memory_policy(GpuMemoryPolicy::Manual { block_size: (4 * MIB)..(8 * MIB) });
-            4 * MIB
+            (4 * MIB, 4 * MIB)
         }
         "manual-app" => {
             let _app = crate::App::new(crate::AppSpec::new("test", (40.0, 30.0), || (), |_, _| crate::el()))
                 .gpu_memory_policy(GpuMemoryPolicy::Manual { block_size: (4 * MIB)..(8 * MIB) });
-            4 * MIB
+            (4 * MIB, 4 * MIB)
         }
         "performance" => {
             crate::set_gpu_memory_policy(GpuMemoryPolicy::Performance);
-            128 * MIB
+            (128 * MIB, 64 * MIB)
         }
         "parked-invalidation" => {
             #[cfg(not(target_os = "macos"))]
@@ -870,14 +934,21 @@ fn gpu_memory_policy_child() {
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    let backend = gpu.adapter.get_info().backend;
-    if matches!(backend, wgpu::Backend::Dx12 | wgpu::Backend::Vulkan) {
+    let info = gpu.adapter.get_info();
+    if matches!(info.backend, wgpu::Backend::Dx12 | wgpu::Backend::Vulkan) {
         if let Some(report) = gpu.device.generate_allocator_report() {
             if let Some(max_block) = report.blocks.iter().map(|b| b.size).max() {
-                assert_eq!(
-                    max_block,
-                    expected_block,
-                    "mode={mode} backend={backend:?} expected max block size {expected_block}, got blocks: {:?}",
+                assert!(
+                    expected_memory_block_matches(
+                        info.backend,
+                        info.device_type,
+                        expected_device,
+                        expected_host,
+                        max_block
+                    ),
+                    "mode={mode} backend={:?} device_type={:?} expected max block size {expected_device} (or host {expected_host}), got blocks: {:?}",
+                    info.backend,
+                    info.device_type,
                     report.blocks.iter().map(|b| b.size).collect::<Vec<_>>(),
                 );
             }

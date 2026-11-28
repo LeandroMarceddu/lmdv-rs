@@ -1,5 +1,5 @@
 use super::super::*;
-use super::{Imported, Prepared, SurfaceRenderer, TimingPool};
+use super::{Prepared, SurfaceRenderer, TimingPool};
 use bytemuck::{Pod, Zeroable};
 use rune_core::Blend;
 use wgpu::util::DeviceExt;
@@ -54,33 +54,21 @@ impl SurfaceRenderer {
         if draws.iter().any(|d| d.surface.observed()) {
             self.queries = self.timing_pool.as_ref().and_then(TimingPool::take);
         }
-        self.cache.retain(|key, _| draws.iter().any(|d| d.surface.key() == *key));
+        self.importer.prepare_retain(draws);
         // Keep uniforms/bindings on unchanged frames. The source is latched here, after scene build.
         let mut count = 0;
         for d in draws {
             let Some((frame, mirrored)) = d.surface.latest_mirrored() else {
-                self.cache.remove(&d.surface.key());
+                self.importer.remove_for_draw(d.surface.key());
                 continue;
             };
             if d.rect[2] <= 0.0 || d.rect[3] <= 0.0 {
                 continue;
             }
             let key = d.surface.key();
-            let changed = self.cache.get(&key).is_none_or(|v| !Arc::ptr_eq(&v.frame, &frame));
-            if changed {
-                match self.import(device, queue, frame) {
-                    Ok(imported) => {
-                        self.cache.insert(key, Arc::new(imported));
-                        d.surface.0.lock().unwrap().error = None;
-                    }
-                    Err(e) => {
-                        d.surface.0.lock().unwrap().error = Some(e);
-                        self.cache.remove(&key);
-                        continue;
-                    }
-                }
-            }
-            let imported = self.cache[&key].clone();
+            let Ok(imported) = self.importer.import_for_draw(queue, &d.surface, frame) else {
+                continue;
+            };
             let f = &imported.frame;
             let upright = f.orient.upright(f.size);
             let image = super::super::place::image_rect(d.rect, upright, d.fit, d.surface.place());
@@ -131,16 +119,27 @@ impl SurfaceRenderer {
                     None => queue.write_buffer(&p.uniform, 0, bytemuck::bytes_of(&u)),
                 }
                 if !Arc::ptr_eq(&p.imported, &imported) && p.imported.textures != imported.textures {
-                    let old = std::mem::replace(
-                        &mut p.bind,
+                    let same_stream = p.imported.frame.size == imported.frame.size
+                        && p.imported.frame.format == imported.frame.format
+                        && std::mem::discriminant(&p.imported.frame.source)
+                            == std::mem::discriminant(&imported.frame.source);
+                    if !same_stream {
+                        p.binds.clear();
+                    }
+                    let next_bind = if same_stream && imported.reusable {
                         match p.binds.iter().position(|(t, _)| *t == imported.textures) {
                             Some(i) => p.binds.remove(i).1,
                             None => bind_group(device, &self.layout, &self.sampler, &p.uniform, &imported.textures),
-                        },
-                    );
-                    p.binds.push((p.imported.textures.clone(), old));
-                    if p.binds.len() > KEPT_BINDS {
-                        p.binds.remove(0);
+                        }
+                    } else {
+                        bind_group(device, &self.layout, &self.sampler, &p.uniform, &imported.textures)
+                    };
+                    let old = std::mem::replace(&mut p.bind, next_bind);
+                    if same_stream && p.imported.reusable {
+                        p.binds.push((p.imported.textures.clone(), old));
+                        if p.binds.len() > KEPT_BINDS {
+                            p.binds.remove(0);
+                        }
                     }
                 }
                 p.imported = imported;
@@ -176,71 +175,8 @@ impl SurfaceRenderer {
             count += 1;
         }
         self.draws.truncate(count);
-        #[cfg(target_os = "windows")]
-        if let Some(shared) = &mut self.shared {
-            shared.forget_gone();
-        }
-        #[cfg(target_os = "linux")]
-        if let Some(dmabuf) = &mut self.dmabuf {
-            dmabuf.forget_gone();
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(i) = &self.importer {
-            i.flush();
-        }
-    }
-
-    fn import(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: Arc<Frame>) -> Result<Imported, String> {
-        let textures = match &frame.source {
-            // Checks the size itself, so every failure reaches the producer.
-            #[cfg(target_os = "linux")]
-            Source::Dmabuf(d) => linux::import(&mut self.dmabuf, device, queue, d)?,
-            _ if frame.size.iter().any(|v| *v > device.limits().max_texture_dimension_2d) => {
-                return Err("video dimensions exceed this GPU device's texture limit".into());
-            }
-            Source::Bytes(b) => {
-                let a = upload(
-                    device,
-                    queue,
-                    b.width,
-                    b.height,
-                    if b.format == Format::Bgra {
-                        wgpu::TextureFormat::Bgra8Unorm
-                    } else {
-                        wgpu::TextureFormat::R8Unorm
-                    },
-                    &b.planes[0],
-                );
-                let b = if b.format == Format::Bgra {
-                    a.clone()
-                } else {
-                    upload(device, queue, b.width / 2, b.height / 2, wgpu::TextureFormat::Rg8Unorm, &b.planes[1])
-                };
-                [a, b]
-            }
-            #[cfg(target_os = "macos")]
-            Source::PixelBuffer(b) => {
-                if self.importer.is_none() {
-                    self.importer = Some(macos::Importer::new(device)?);
-                }
-                objc2::rc::autoreleasepool(|_| self.importer.as_ref().unwrap().import(b, frame.format, frame.size))?
-            }
-            #[cfg(target_os = "windows")]
-            Source::Shared(t) => {
-                if self.shared.is_none() {
-                    self.shared = Some(windows::Importer::new(device)?);
-                }
-                self.shared.as_mut().unwrap().import(queue, t)?
-            }
-            #[cfg(target_os = "windows")]
-            Source::Decoded(planes, value) => {
-                if self.shared.is_none() {
-                    self.shared = Some(windows::Importer::new(device)?);
-                }
-                self.shared.as_mut().unwrap().import_decoded(queue, planes, *value)?
-            }
-        };
-        Ok(Imported { frame, textures })
+        #[cfg(not(target_arch = "wasm32"))]
+        self.importer.finish_prepare(Some(&self.completion));
     }
 
     pub fn len(&self) -> usize {
@@ -251,7 +187,7 @@ impl SurfaceRenderer {
     }
     #[doc(hidden)]
     pub fn draws_nothing(&self) -> bool {
-        self.draws.is_empty()
+        self.draws.is_empty() && !self.importer.has_pending_submit()
     }
 
     /// Include this in the containing render pass for hardware GPU timing.
@@ -353,12 +289,14 @@ impl SurfaceRenderer {
     #[cfg(target_arch = "wasm32")]
     pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         assert!(self.draws.is_empty(), "native video surfaces are unsupported on web");
+        self.importer.advance_gen();
         queue.submit([encoder.finish()])
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn submit(&self, queue: &wgpu::Queue, encoder: wgpu::CommandEncoder) -> wgpu::SubmissionIndex {
         let submitted_at = rune_core::time::now();
+        let direct = self.importer.take_pending_submit();
         let frames: Vec<_> = self
             .draws
             .iter()
@@ -378,8 +316,17 @@ impl SurfaceRenderer {
             })
             .collect();
         if frames.is_empty() {
-            return queue.submit([encoder.finish()]);
+            return self.importer.submit_in_flight(queue, encoder, direct, Some(&self.completion));
         }
+        #[cfg(target_os = "windows")]
+        let direct_decoded: Vec<(Arc<windows::DecodedPlanes>, u64)> = direct
+            .iter()
+            .filter(|imp| !frames.iter().any(|(_, drawn, _)| Arc::ptr_eq(&drawn.frame, &imp.frame)))
+            .filter_map(|imp| match &imp.frame.source {
+                Source::Decoded(planes, value) => Some((planes.clone(), *value)),
+                _ => None,
+            })
+            .collect();
         // Notify before installing the GPU handler: completion may race queue.submit returning.
         for (surface, _, t) in &frames {
             surface.report(t.clone());
@@ -417,6 +364,7 @@ impl SurfaceRenderer {
                 // The renderer is gone (its device lost and replaced, or the app closing): nothing
                 // resolves the times.
                 if queue.strong_count() == 0 {
+                    drop(direct);
                     for (s, _, mut t) in frames {
                         t.completed_at = Some(completed_at);
                         s.report(t);
@@ -441,6 +389,7 @@ impl SurfaceRenderer {
                     }
                     // The sample pair must survive both GPU submissions and CPU mapping.
                     drop(queries);
+                    drop(direct);
                     for (s, _, mut t) in frames {
                         t.completed_at = Some(completed_at);
                         if let Some((a, b)) = times {
@@ -461,6 +410,7 @@ impl SurfaceRenderer {
             });
         } else {
             encoder.on_submitted_work_done(move || {
+                drop(direct);
                 for (s, _, mut t) in frames {
                     t.completed_at = Some(rune_core::time::now());
                     s.report(t);
@@ -469,6 +419,11 @@ impl SurfaceRenderer {
         }
         let index = queue.submit([encoder.finish()]);
         self.release_decoded(queue);
+        #[cfg(target_os = "windows")]
+        for (planes, value) in direct_decoded {
+            windows::release_decoded(queue, &planes, value);
+        }
+        self.importer.advance_gen();
         self.completion.wake();
         index
     }
@@ -485,35 +440,6 @@ impl SurfaceRenderer {
         #[cfg(not(target_os = "windows"))]
         let _ = queue;
     }
-}
-
-fn upload(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    width: u32,
-    height: u32,
-    format: wgpu::TextureFormat,
-    bytes: &[u8],
-) -> wgpu::Texture {
-    let mut desc = super::descriptor(width, height, format);
-    desc.usage |= wgpu::TextureUsages::COPY_DST;
-    let texture = device.create_texture(&desc);
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture: &texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d::ZERO,
-            aspect: wgpu::TextureAspect::All,
-        },
-        bytes,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(width * format.block_copy_size(None).unwrap()),
-            rows_per_image: None,
-        },
-        desc.size,
-    );
-    texture
 }
 
 fn bind_group(

@@ -36,6 +36,7 @@ pub(crate) mod press_point;
 pub(crate) use rune_text::segmenter;
 pub(crate) mod session_lock;
 pub(crate) mod taskbar;
+pub(crate) mod touch_input;
 mod window_options;
 
 pub(crate) use cloak::Cloak;
@@ -52,7 +53,7 @@ pub(crate) use frame::has_window_menu;
 pub(crate) use frame::request_inner_size;
 pub(crate) use frame::window_menu;
 pub(crate) use hide_now::hide_now;
-pub(crate) use placement::restore_frame;
+pub(crate) use placement::{apply_window_frame, restore_frame};
 pub(crate) use window_options::{
     apply_hwnd_styles, apply_window_styles, configure_window, set_exclude_from_capture, set_hwnd_exclude_from_capture,
 };
@@ -449,17 +450,19 @@ unsafe extern "system" fn subclass(
             input.clicks.borrow_mut().push_back((down, point));
         }
         WM_CAPTURECHANGED => input.captured.set(false),
-        WM_SETTINGCHANGE if dark_mode::should_refresh_color_policy(lparam) => {
-            dark_mode::refresh_color_policy();
-        }
         _ => {}
     }
+    let refresh_theme = message == WM_SETTINGCHANGE && dark_mode::should_refresh_color_policy(lparam);
     #[cfg(feature = "windows-system-material")]
     if matches!(message, WM_SETTINGCHANGE | WM_SYSCOLORCHANGE | WM_THEMECHANGED) {
         crate::system_material::windows::notify_wm_setting_change();
     }
     // SAFETY: forwards the unhandled message to the next procedure in this window's subclass chain.
-    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    if refresh_theme {
+        dark_mode::with_system_theme_query_and_flush(|| unsafe { DefSubclassProc(hwnd, message, wparam, lparam) })
+    } else {
+        unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+    }
 }
 
 /// Per-window input owner; the shared low-level hook observes but never consumes events.
@@ -533,6 +536,7 @@ impl OverlayWindow {
             }
             return Err(format!("SetWindowSubclass failed: {}", last_error()));
         }
+        touch_input::install_hwnd(hwnd);
         Ok(Self { input, observing: false, exclusion, watch: None, wake, keys: options.keys, layered_cpu })
     }
     pub fn capture_exclusion(&self) -> OverlaySupport {

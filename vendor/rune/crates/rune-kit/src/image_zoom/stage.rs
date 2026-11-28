@@ -232,7 +232,7 @@ impl StageZoom {
     }
 }
 
-type Lens<S> = fn(&mut S) -> &mut StageZoom;
+type Lens<S> = std::rc::Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut StageZoom>;
 
 trait StageBind {
     fn image(&self, e: El) -> El;
@@ -244,21 +244,21 @@ struct StageHandlers<S>(Lens<S>);
 
 impl<S: 'static> StageBind for StageHandlers<S> {
     fn image(&self, e: El) -> El {
-        let lens = self.0;
+        let lens = self.0.clone();
         e.on_drag(move |s: &mut S, d: &mut Drag, tx: &mut Tx| lens(s).drag(d, tx))
     }
 
     fn stage(&self, e: El) -> El {
-        let lens = self.0;
-        let mut e = e.on_wheel(move |s: &mut S, ev, tx| lens(s).wheel(ev, tx));
+        let (wheel_lens, magnify_lens) = (self.0.clone(), self.0.clone());
+        let mut e = e.on_wheel(move |s: &mut S, ev, tx| wheel_lens(s).wheel(ev, tx));
         if cfg!(target_os = "macos") {
-            e = e.on_magnify(move |s: &mut S, ev, tx| lens(s).magnify(ev, tx));
+            e = e.on_magnify(move |s: &mut S, ev, tx| magnify_lens(s).magnify(ev, tx));
         }
         e
     }
 
     fn action(&self, b: IconButton, f: fn(&mut StageZoom, &mut Tx)) -> IconButton {
-        let lens = self.0;
+        let lens = self.0.clone();
         b.on_press_tx(move |s: &mut S, tx: &mut Tx| f(lens(s), tx))
     }
 }
@@ -268,18 +268,12 @@ struct StageCore {
     image: El,
     grows: bool,
     icons: Option<[&'static Icon; 3]>,
-    labels: [String; 4],
+    labels: Option<[String; 4]>,
 }
 
 impl StageCore {
     fn new(natural: [f32; 2], image: El) -> StageCore {
-        StageCore {
-            natural,
-            image,
-            grows: false,
-            icons: None,
-            labels: ["Zoom in".into(), "Zoom out".into(), "Fit".into(), "Preview controls".into()],
-        }
+        StageCore { natural, image, grows: false, icons: None, labels: None }
     }
 
     fn build(self, zoom: &StageZoom, k: &Kit, size: [f32; 2], bind: &dyn StageBind) -> El {
@@ -303,7 +297,14 @@ impl StageCore {
 
     /// `PreviewControls`: zoom in, zoom out and fit, in a raised box at the bottom right.
     fn controls(&self, zoom: &StageZoom, k: &Kit, bind: &dyn StageBind) -> El {
-        let [zin, zout, fit, group] = self.labels.clone();
+        let [zin, zout, fit, group] = self.labels.clone().unwrap_or_else(|| {
+            [
+                rune::labels::label(rune::Label::ZoomIn),
+                rune::labels::label(rune::Label::ZoomOut),
+                "Fit".into(),
+                "Preview controls".into(),
+            ]
+        });
         let glyphs = self.icons.unwrap_or([k.glyph.dash; 3]);
         let divider = || el().size(0.5, 20.0).mx(4.0).fill(k.c.border_base).a11y_hidden();
         let button = |glyph: &'static Icon, label: String, disabled: bool, f: fn(&mut StageZoom, &mut Tx)| {
@@ -344,8 +345,12 @@ pub struct Stage<S> {
 }
 
 impl<S: 'static> Stage<S> {
-    pub fn new(lens: Lens<S>, natural: [f32; 2], image: El) -> Stage<S> {
-        Stage { core: StageCore::new(natural, image), handlers: StageHandlers(lens) }
+    pub fn new(
+        lens: impl for<'a> Fn(&'a mut S) -> &'a mut StageZoom + 'static,
+        natural: [f32; 2],
+        image: El,
+    ) -> Stage<S> {
+        Stage { core: StageCore::new(natural, image), handlers: StageHandlers(std::rc::Rc::new(lens)) }
     }
 
     /// An SVG fits by growing too.
@@ -368,7 +373,7 @@ impl<S: 'static> Stage<S> {
         fit: impl Into<String>,
         group: impl Into<String>,
     ) -> Self {
-        self.core.labels = [zoom_in.into(), zoom_out.into(), fit.into(), group.into()];
+        self.core.labels = Some([zoom_in.into(), zoom_out.into(), fit.into(), group.into()]);
         self
     }
 

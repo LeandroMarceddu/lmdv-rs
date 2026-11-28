@@ -4,9 +4,9 @@
 //! is a path and a `file:` URL names one; both load like `ImageCache::file`.
 #[cfg(any(test, target_arch = "wasm32"))]
 use super::MAX_SIDE;
-#[cfg(target_arch = "wasm32")]
-use super::header;
 use super::{Decoded, Image, ImageCache, ImageError, Input, icon_pixels, maybe_downsample_rgba, mip_chain};
+#[cfg(target_arch = "wasm32")]
+use super::{ImageLimits, header};
 #[cfg(any(feature = "svg", target_arch = "wasm32"))]
 use super::{mip_chain_with_intrinsic, svg_rgba_with_size};
 
@@ -185,11 +185,18 @@ pub(super) async fn fetch(url: &str) -> Result<Fetched, ImageError> {
 }
 
 /// Encoded image bytes decoded by the browser's own codecs, off the main thread, so a web build
-/// carries no JPEG decoder of its own. Declared dimensions are checked before `createImageBitmap`.
+/// carries no JPEG decoder of its own. Declared and returned dimensions are checked against
+/// `limits` before and after `createImageBitmap`.
 #[cfg(target_arch = "wasm32")]
-pub(super) async fn decode_in_browser(bytes: &[u8]) -> Result<Fetched, ImageError> {
-    header::check(bytes).map_err(|e| ImageError(format!("image: {e}")))?;
-    browser_reply("image", decode_image(bytes, "", MAX_SIDE)).await
+pub(super) async fn decode_in_browser_with_limits(bytes: &[u8], limits: ImageLimits) -> Result<Fetched, ImageError> {
+    header::check_with_limits(bytes, limits).map_err(|e| ImageError(format!("image: {e}")))?;
+    let fetched = browser_reply("image", decode_image(bytes, "", limits.max_side())).await?;
+    if let Fetched::Rgba(w, h, _) = &fetched
+        && !limits.fits(*w, *h, 4)
+    {
+        return Err(ImageError("image: exceeds pixel budget".into()));
+    }
+    Ok(fetched)
 }
 
 #[cfg(target_arch = "wasm32")]

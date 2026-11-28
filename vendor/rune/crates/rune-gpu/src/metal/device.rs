@@ -144,9 +144,16 @@ pub(crate) struct MetalDevice {
     limits: wgpu::Limits,
 }
 
-pub(super) fn new(device: Obj<dyn MTLDevice>, desc: &wgpu::DeviceDescriptor<'_>) -> (MetalDevice, MetalQueue) {
-    let queue = device.newCommandQueue().expect("a Metal command queue");
-    let event = device.newSharedEvent().expect("a Metal shared event");
+pub(super) fn new(
+    device: Obj<dyn MTLDevice>,
+    desc: &wgpu::DeviceDescriptor<'_>,
+) -> Result<(MetalDevice, MetalQueue), wgpu::RequestDeviceError> {
+    let queue = device.newCommandQueue().ok_or_else(|| {
+        wgpu::RequestDeviceError::from_message("Metal device could not create a command queue".into())
+    })?;
+    let event = device
+        .newSharedEvent()
+        .ok_or_else(|| wgpu::RequestDeviceError::from_message("Metal device does not support MTLSharedEvent".into()))?;
     #[cfg(debug_assertions)]
     {
         queue.setLabel(Some(&NSString::from_str("rune metal queue")));
@@ -171,7 +178,7 @@ pub(super) fn new(device: Obj<dyn MTLDevice>, desc: &wgpu::DeviceDescriptor<'_>)
     });
     let device =
         MetalDevice { shared: shared.clone(), features: desc.required_features, limits: desc.required_limits.clone() };
-    (device, MetalQueue(shared))
+    Ok((device, MetalQueue(shared)))
 }
 
 /// wgpu-hal's choice of MSL version for this macOS or iOS. Their numbers meet at 26; before, iOS
@@ -251,14 +258,22 @@ impl DeviceInterface for MetalDevice {
         DispatchPipelineCache::custom(Inert)
     }
     fn create_buffer(&self, desc: &wgpu::BufferDescriptor<'_>) -> DispatchBuffer {
-        DispatchBuffer::custom(MetalBuffer::new(&self.shared, desc.size, desc.label))
+        DispatchBuffer::custom(MetalBuffer::new(&self.shared, desc.size, desc.usage, desc.label))
     }
     fn create_texture(&self, desc: &wgpu::TextureDescriptor<'_>) -> DispatchTexture {
         let texture = MetalTexture::new(&self.shared, desc, Live::new(&self.shared.textures));
         let raw = texture.raw.clone();
         if raw.is_shared() {
             zero_shared_texture(&raw);
-        } else if !raw.is_lazy() {
+        } else if raw.is_lazy() {
+            // Single-aspect 2D Private RENDER_ATTACHMENT textures clear lazily via render passes.
+        } else if raw.format.is_combined_depth_stencil_format()
+            && desc.usage.contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        {
+            let subs = (0..raw.layers)
+                .flat_map(|layer| (0..raw.mips).map(move |mip| crate::lazy_init::Subresource { mip, layer }));
+            self.shared.clear_subresources(&raw, subs);
+        } else if raw.sample_count == 1 {
             let zeros = self.shared.zeros.get_or_init(|| Zeros::new(&self.shared));
             self.shared.upload(|blit| zero_texture(blit, zeros, &raw), [raw.clone() as _], None);
         }

@@ -52,7 +52,9 @@
 pub mod check;
 mod gate;
 
-pub use check::{Finding, Handover, RULES, Recording, Rule, Snap, Track, check, dump, rule, sheet, short};
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
+pub use check::sheet;
+pub use check::{Finding, Handover, RULES, Recording, Rule, Snap, Track, check, dump, rule, short};
 pub(crate) use gate::evidence;
 pub use gate::{Allow, AllowRow, Cell, Job, Report, allowed, gate, gate_rows, report, report_rows, run};
 

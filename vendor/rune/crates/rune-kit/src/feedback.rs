@@ -42,7 +42,11 @@ impl Spinner {
         // Desktop's dots do: each is an SVG on a composited layer, which the browser draws where
         // layout puts it without rounding to the device grid. Snapped, a 1.75 px dot on a
         // 2.625 px pitch (14 points at 1x) rounds to bars and gaps of 1 and 2 px.
-        let mut e = el().role("progressbar").label("Loading").size(self.size, self.size).pixel_snap(false);
+        let mut e = el()
+            .role("progressbar")
+            .label(rune::labels::label(rune::Label::Loading))
+            .size(self.size, self.size)
+            .pixel_snap(false);
         for (i, d) in radar::dots().iter().enumerate() {
             let side = d.size * u;
             let dot = el()
@@ -103,7 +107,7 @@ impl Loader {
     pub fn build(self, k: &Kit) -> El {
         let ink = self.color.unwrap_or(k.c.icon_muted);
         el().role("progressbar")
-            .label("Loading")
+            .label(rune::labels::label(rune::Label::Loading))
             .size(self.size, self.size)
             .child(icon(&RING, self.size).absolute(0.0, 0.0).color(ink).opacity(0.2))
             .child(icon(&ARC, self.size).absolute(0.0, 0.0).color(ink).looping(rune_motion::LoopSpec::rotation(0.9)))
@@ -165,15 +169,17 @@ impl Progress {
             root = root.child(header.a11y_hidden());
         }
         root = report(root, self.value);
-        let mut track = row()
-            .key("track")
-            .w_full()
-            .h(8.0)
-            .radius(999.0)
-            .fill(c.surface_base)
-            .border(1.0, c.border_weak)
-            .clip_soft(0.0);
-        let fill = el().key("fill").h_full().radius(999.0).fill(c.border_active);
+        let m = k.progress_metrics();
+        let (height, border_width, fill_radius) = (m.height, m.border_width, m.fill_radius);
+        let mut track = row().key("track").w_full().h(height).radius(999.0).fill(c.surface_base);
+        if border_width > 0.0 {
+            track = track.border(border_width, c.border_weak);
+        }
+        // Keep the rectangular clip when the fill is already a full pill so default bars emit
+        // identical paint instances; clip to the rounded capsule whenever a sharper fill could
+        // otherwise poke past the track's rounded ends.
+        track = if fill_radius < height * 0.5 { track.clip_rounded(999.0) } else { track.clip_soft(0.0) };
+        let fill = el().key("fill").h_full().radius(fill_radius).fill(c.border_active);
         track = track.child(match self.value {
             Some(v) => fill.w_frac(v.clamp(0.0, 1.0)),
             // A quarter-width segment crosses the whole track, then wraps from the left.

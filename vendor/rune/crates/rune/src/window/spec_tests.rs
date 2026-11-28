@@ -168,6 +168,8 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
     let window = WindowSpec::new("secondary", spec)
         .srgb_blend(false)
         .font_smoothing(crate::FontSmoothing::Off)
+        .wheel_glide(false)
+        .wheel_line(60.0)
         .max_native_materials(8)
         .fit_content_height()
         .float_on_open()
@@ -184,6 +186,7 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
         .on_rest(|_, _| false)
         .on_ime(|_, _, _| false)
         .on_field_menu(|_, _, _| {})
+        .on_popup_menu(|_, _, _| {})
         .on_close_request(|_, _| crate::CloseResponse::Close)
         .on_quit_request(|_, _| crate::QuitResponse::Quit)
         .on_close(|_, _| {})
@@ -198,11 +201,16 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
         .on_frame_encoded(|_| {})
         .on_frame_presented(|_| {})
         .on_frame_drawn(|_| {})
+        .on_frame_stage(|_| {})
+        .on_window_key(|_| {})
+        .on_window_focus(|_| {})
         .compositor(DummyCompositor)
         .dev_stats(stats)
         .map_app(|app| app.keep_running());
     assert!(!window.app.runtime.srgb_blend);
     assert_eq!(window.app.runtime.font_smoothing, crate::FontSmoothing::Off);
+    assert!(!window.app.runtime.wheel_glide);
+    assert_eq!(window.app.runtime.wheel_line, Some(60.0));
     assert_eq!(window.app.runtime.max_native_materials, 8);
     assert!(
         window.app.runtime.modifier_keys && window.app.runtime.media_keys && window.app.runtime.tab_visits_controls
@@ -212,6 +220,7 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
         window.app.runtime.on_visibility.is_some()
             && window.app.runtime.on_ime.is_some()
             && window.app.runtime.on_field_menu.is_some()
+            && window.app.runtime.on_popup_menu.is_some()
     );
     assert_eq!(window.app.runtime.dev_stats.map(|f| f()).as_deref(), Some("stats"));
     assert!(window.app.fit_content_height && window.app.float_on_open && window.app.open_inactive);
@@ -235,6 +244,11 @@ fn forwarded_window_spec_builders_and_map_app_configure_the_inner_app() {
         window.app.on_frame_encoded.is_some()
             && window.app.on_frame_presented.is_some()
             && window.app.on_frame_drawn.is_some()
+    );
+    assert!(
+        window.app.observability.on_frame_stage.is_some()
+            && window.app.observability.on_window_key.is_some()
+            && window.app.observability.on_window_focus.is_some()
     );
     assert!(window.app.compositor.is_some());
 
@@ -443,6 +457,31 @@ fn app_and_window_spec_ambient_fps_default_and_normalize() {
 }
 
 #[test]
+fn app_and_window_spec_unfocused_fps_default_and_normalize() {
+    use std::time::Duration;
+
+    let spec = || AppSpec::new("chat", (720.0, 540.0), || (), |_, _| crate::el());
+    assert_eq!(App::new(spec()).unfocused_period, None);
+    assert_eq!(WindowSpec::new("chat", spec()).app.unfocused_period, None);
+
+    let p30 = Duration::from_secs_f64(1.0 / 30.0);
+    let p15 = Duration::from_secs_f64(1.0 / 15.0);
+    let p1 = Duration::from_secs(1);
+
+    let app = App::new(spec()).unfocused_fps(30.0);
+    assert_eq!(app.unfocused_period, Some(p30));
+    assert_eq!(WindowSpec::from_app("chat", app).app.unfocused_period, Some(p30));
+
+    assert_eq!(WindowSpec::new("chat", spec()).unfocused_fps(15.0).app.unfocused_period, Some(p15));
+    assert_eq!(WindowSpec::new("chat", spec()).unfocused_fps(0.25).app.unfocused_period, Some(p1));
+
+    for raw in [0.0, -0.0, -30.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, f32::MAX] {
+        let cleared = WindowSpec::new("chat", spec()).unfocused_fps(30.0).unfocused_fps(raw);
+        assert_eq!(cleared.app.unfocused_period, None, "raw={raw:?} must clear unfocused_period");
+    }
+}
+
+#[test]
 fn reveal_focus_skips_activation_for_no_activate_windows() {
     use crate::window::host::lifecycle::reveal_focus;
     use crate::window::state::Reveal;
@@ -583,6 +622,27 @@ fn app_and_window_spec_cpu_first_default_auto_and_retain_builder_value() {
         position: None,
         physical_size: None,
     };
+}
+
+#[test]
+fn app_and_window_spec_keyboard_dispatch_default_batched_and_retain_per_window_value() {
+    let spec = || AppSpec::new("transport", (800.0, 520.0), || (), |_, _| crate::el());
+    assert_eq!(App::new(spec()).keyboard_dispatch, crate::KeyboardDispatch::Batched);
+    assert_eq!(WindowSpec::new("main", spec()).app.keyboard_dispatch, crate::KeyboardDispatch::Batched);
+
+    let app_imm = App::new(spec()).keyboard_dispatch(crate::KeyboardDispatch::Immediate);
+    assert_eq!(app_imm.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+    let from_app = WindowSpec::from_app("main", app_imm);
+    assert_eq!(from_app.app.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+
+    let win_a = WindowSpec::new("a", spec()).keyboard_dispatch(crate::KeyboardDispatch::Immediate);
+    let win_b = WindowSpec::new("b", spec()).keyboard_dispatch(crate::KeyboardDispatch::Batched);
+    assert_eq!(win_a.app.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+    assert_eq!(win_b.app.keyboard_dispatch, crate::KeyboardDispatch::Batched);
+    let kept = win_a.options(WindowOptions::default());
+    assert_eq!(kept.app.keyboard_dispatch, crate::KeyboardDispatch::Immediate);
+    let reset = kept.keyboard_dispatch(crate::KeyboardDispatch::Batched);
+    assert_eq!(reset.app.keyboard_dispatch, crate::KeyboardDispatch::Batched);
 }
 
 #[test]
@@ -785,4 +845,39 @@ fn app_and_window_spec_frame_latency_clamps_and_retains() {
     assert_eq!(via_spec.options(WindowOptions::default()).app.frame_latency, Some(1));
 
     assert_eq!(WindowSpec::new("panel", spec()).frame_latency(3).app.frame_latency, Some(2));
+}
+
+#[test]
+fn app_and_window_spec_wide_color_defaults_false_and_retains_opt_in() {
+    let spec = || AppSpec::new("picker", (480.0, 360.0), || (), |_, _| crate::el());
+    assert!(!App::new(spec()).wide_color);
+    assert!(App::new(spec()).wide_color(true).wide_color);
+    assert!(!App::new(spec()).wide_color(true).wide_color(false).wide_color);
+
+    let from_app = WindowSpec::from_app("picker", App::new(spec()).wide_color(true));
+    assert!(from_app.app.wide_color);
+
+    let via_spec = WindowSpec::new("picker", spec()).wide_color(true);
+    assert!(via_spec.app.wide_color);
+    assert!(via_spec.options(WindowOptions::default()).app.wide_color);
+    assert!(!WindowSpec::new("picker", spec()).wide_color(true).wide_color(false).app.wide_color);
+
+    let headless = Display { id: None, name: None, position: (0, 0), size: (1280, 800), scale: 2.0, primary: true };
+    assert!(!headless.wide_color(), "headless virtual display reports wide_color = false");
+}
+
+#[test]
+fn app_and_window_spec_resize_anchor_defaults_top_left_and_retains() {
+    use crate::ResizeAnchor;
+    let spec = || AppSpec::new("launcher", (600.0, 400.0), || (), |_, _| crate::el());
+    assert_eq!(App::new(spec()).resize_anchor, ResizeAnchor::TopLeft);
+    assert_eq!(App::new(spec()).resize_anchor(ResizeAnchor::Bottom).resize_anchor, ResizeAnchor::Bottom);
+
+    let from_app = WindowSpec::from_app("launcher", App::new(spec()).resize_anchor(ResizeAnchor::BottomRight));
+    assert_eq!(from_app.app.resize_anchor, ResizeAnchor::BottomRight);
+
+    let via_spec = WindowSpec::new("launcher", spec()).resize_anchor(ResizeAnchor::Bottom);
+    assert_eq!(via_spec.app.resize_anchor, ResizeAnchor::Bottom);
+    // Replacing WindowOptions keeps portable resize_anchor intact.
+    assert_eq!(via_spec.options(WindowOptions::default()).app.resize_anchor, ResizeAnchor::Bottom);
 }

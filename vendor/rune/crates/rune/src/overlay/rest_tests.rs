@@ -361,7 +361,7 @@ fn overlay_give_back_drops_freed_image_textures_at_rest_and_all_on_hide_then_wak
 
     // Frame 2: small removed, large stays. Shelf page 0 stays warm until rest.
     overlay.rt.state.show_small = false;
-    overlay.rt.invalidate();
+    overlay.rt.settle_all();
     overlay.rt.frame(0.0);
     let before_hide = render_read(&mut overlay);
     #[cfg(feature = "test-gpu-counters")]
@@ -378,8 +378,9 @@ fn overlay_give_back_drops_freed_image_textures_at_rest_and_all_on_hide_then_wak
     overlay.note_presented_with(t0, false);
     overlay.wake_due(t0 + REST_AFTER);
     assert_eq!(overlay.rest, Rest::Idle);
-    assert!(overlay.rt.images.pages[0].data.is_empty());
-    assert!(!overlay.rt.images.pages[1].data.is_empty());
+    assert!(!overlay.rt.images.pages[0].is_active());
+    assert!(overlay.rt.images.pages[1].is_active());
+    assert_eq!(overlay.rt.images.cpu_bytes(), 0);
     assert_eq!(overlay.core.renderer.as_ref().unwrap().image_texture_count(), 1, "visible page stays resident at rest");
     assert_eq!(overlay.core.renderer.as_ref().unwrap().image_texture_bytes(), page1_bytes);
     #[cfg(feature = "test-gpu-counters")]
@@ -391,9 +392,12 @@ fn overlay_give_back_drops_freed_image_textures_at_rest_and_all_on_hide_then_wak
         }
     }
 
-    // Hidden (GiveBackAll): every image GPU texture drops.
+    // Hidden (GiveBackAll): every image GPU texture, CPU atlas page and tree Pixels ref drops.
     overlay.hide();
     assert_eq!(overlay.rest, Rest::Rested);
+    assert!(overlay.rt.images.pages.is_empty(), "hide drops CPU image atlas pages");
+    assert_eq!(Arc::strong_count(&overlay.rt.state.large.source), 1, "hidden overlay tree no longer pins Pixels");
+    assert!(overlay.rt.stale(), "hide marks view dirty so wake rebuilds and re-uploads kept images");
     assert_eq!(overlay.core.renderer.as_ref().unwrap().image_texture_count(), 0, "hide drops all GPU image textures");
     assert_eq!(overlay.core.renderer.as_ref().unwrap().image_texture_bytes(), 0);
     #[cfg(feature = "test-gpu-counters")]
@@ -403,11 +407,106 @@ fn overlay_give_back_drops_freed_image_textures_at_rest_and_all_on_hide_then_wak
         assert_eq!(c.texture_memory.read(), base_mem, "hide reclaims all image HAL texture memory");
     }
 
-    // Wake: first drawn frame re-uploads and renders identically with no blank or stale frame.
+    // Wake: first drawn frame rebuilds (dirty from hide) and re-uploads identically with no blank or stale frame.
     overlay.presence = Presence::Shown { occluded: false };
+    overlay.rt.frame(0.0);
     let after_wake = render_read(&mut overlay);
     assert_eq!(after_wake, before_hide, "waking from hide draws the image identically on its first frame");
     assert!(overlay.core.renderer.as_ref().unwrap().has_images());
     #[cfg(feature = "test-gpu-counters")]
     assert_eq!(gpu.device.get_internal_counters().hal.textures.read(), base_textures + 1);
+}
+#[test]
+fn overlay_idle_rest_after_24_resizes_retires_metal_submissions_and_releases_spare_textures() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Some(gpu) = Gpu::test_headless() else { return };
+    let gpu = Arc::new(gpu);
+    fn resize_view(_: &(), _: &mut Cx<()>) -> El {
+        crate::col()
+            .w_full()
+            .h_full()
+            .fill(crate::Color::BLACK)
+            .child(
+                el().key("card")
+                    .w_full()
+                    .h(80.0)
+                    .radius(8.0)
+                    .opacity(0.95)
+                    .fill(crate::Color::WHITE.alpha(0.2))
+                    .child(crate::text("Resize")),
+            )
+            .child(
+                el().key("blur").size(96.0, 32.0).radius(8.0).backdrop_blur(8.0).fill(crate::Color::WHITE.alpha(0.12)),
+            )
+            .child(
+                el().key("cached")
+                    .w_full()
+                    .h(64.0)
+                    .cache()
+                    .fill(crate::Color::WHITE.alpha(0.15))
+                    .child(crate::text("Cached")),
+            )
+    }
+    let app = AppSpec::new("overlay-resize-rest", (440.0, 208.0), || (), resize_view);
+    let (mut overlay, _) = Overlay::new(
+        OverlaySpec::new("overlay-resize-rest", app.size, resize_view).options(Default::default()),
+        (),
+        &app,
+    );
+    overlay.presence = Presence::Shown { occluded: false };
+    overlay.core.gpu = Some(gpu.clone());
+    overlay.core.renderer = Some(Renderer::new(&gpu.device, OFFSCREEN_FORMAT));
+
+    let draw_at = |overlay: &mut Overlay<()>, w: u32, h: u32| {
+        overlay.rt.set_viewport((w as f32, h as f32), 1.0);
+        overlay.rt.frame(1.0 / 60.0);
+        let target = Offscreen::new(&gpu.device, w, h);
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        overlay.render_offscreen(&gpu, &mut enc, &target.view, OFFSCREEN_FORMAT, (w, h), 1.0 / 60.0);
+        overlay.core.renderer.as_mut().unwrap().submit(&gpu.queue, enc);
+    };
+
+    // Warm baseline at (440, 208), settled and retired.
+    draw_at(&mut overlay, 440, 208);
+    gpu.device.poll(wgpu::PollType::wait_indefinitely()).expect("baseline poll");
+    #[cfg(all(target_os = "macos", feature = "test-gpu-counters"))]
+    let base_textures = gpu.device.get_internal_counters().hal.textures.read();
+
+    // 24 rapid resizes without intermediate polls, ending back at (440, 208).
+    for i in 1..=23u32 {
+        let w = 320 + (i * 37) % 360;
+        let h = 180 + (i * 29) % 240;
+        draw_at(&mut overlay, w, h);
+    }
+    draw_at(&mut overlay, 440, 208);
+
+    let retired = Arc::new(AtomicBool::new(false));
+    let done = retired.clone();
+    gpu.queue.on_submitted_work_done(move || done.store(true, Ordering::Release));
+    // Give the GPU plenty of time to finish the tiny offscreen pass without polling.
+    std::thread::sleep(Duration::from_millis(80));
+
+    let t0 = crate::time::now();
+    overlay.dirty = false;
+    overlay.idle = true;
+    overlay.note_presented_with(t0, false);
+    overlay.wake_due(t0 + REST_AFTER);
+    assert_eq!(overlay.rest, Rest::Idle);
+    assert_eq!(overlay.core.renderer.as_ref().unwrap().spare_layers(), 0, "rest trims all spare layer targets");
+    #[cfg(target_os = "macos")]
+    assert!(retired.load(Ordering::Acquire), "macOS idle rest must poll and retire completed Metal command buffers");
+    #[cfg(all(target_os = "macos", feature = "test-gpu-counters"))]
+    assert_eq!(
+        gpu.device.get_internal_counters().hal.textures.read(),
+        base_textures,
+        "24 resizes followed by idle rest must leave no extra live HAL textures",
+    );
+}
+#[test]
+fn should_poll_on_idle_rest_polls_on_macos_and_only_for_oversized_uploads_elsewhere() {
+    use crate::window::rest::should_poll_on_idle_rest;
+    assert!(should_poll_on_idle_rest(true, false));
+    assert!(should_poll_on_idle_rest(true, true));
+    assert!(!should_poll_on_idle_rest(false, false));
+    assert!(should_poll_on_idle_rest(false, true));
 }

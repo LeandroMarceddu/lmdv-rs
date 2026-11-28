@@ -7,11 +7,14 @@ use rune_motion::{Anim, Spring};
 use crate::el::*;
 
 mod elements;
+mod hover;
 mod keys;
 mod pick;
 mod press;
 mod rects;
 mod scroll;
+
+pub(crate) use hover::{HoverSnapshot, innermost_key as innermost_hover_key};
 
 #[cfg(test)]
 mod tests;
@@ -38,6 +41,8 @@ pub struct Tx {
     pub(crate) focused_path: Option<String>,
     /// Focused inline link id (when focus sits on a [`Link`](crate::Link)), for [`Tx::focus_within`].
     pub(crate) focused_link: Option<String>,
+    /// Hovered element(s) and link snapshot, for [`Tx::hovered`] and [`Tx::is_hovered`].
+    pub(crate) hover: Option<Rc<HoverSnapshot>>,
     /// What this change does with motion ([`Tx::instant`], [`Tx::animated`], [`Tx::settle`]).
     pub(crate) commit: Commit,
     /// The motion this change's layout moves on ([`Tx::motion`], [`Tx::motion_curve`]).
@@ -84,6 +89,11 @@ pub struct Tx {
     /// Elements to hold where they show across this commit (`Tx::keep_on_screen`).
     pub(crate) keep_on_screen: Vec<String>,
     pub(crate) wakes: Vec<std::time::Duration>,
+    /// `Tx::request_poll`: asks for another `poll` round in this frame (or a wake on the next
+    /// turn when called outside a frame, such as from `AppHandle::update`).
+    pub(crate) request_poll: bool,
+    /// `Tx::request_urgent_frame`: arms one-shot urgent frame admission on macOS.
+    pub(crate) urgent_frame: bool,
     pub(crate) shell: Option<Shell>,
     /// User-initiated close request (macOS unhandled ⌘W / Window › Close, assistive activation of
     /// the custom caption close button): routes through `App::on_close_request` instead of
@@ -100,9 +110,20 @@ pub struct Tx {
     pub(crate) drop_point: Option<PointerEvent>,
     /// `Tx::drag_paths`.
     pub(crate) drag_paths: Option<Rc<[std::path::PathBuf]>>,
+    /// `Tx::drag_mods`.
+    pub(crate) drag_mods: crate::Mods,
+    /// `Tx::drag_operations`.
+    pub(crate) drag_operations: crate::DragOperations,
+    /// `Tx::drop_operation`.
+    pub(crate) drop_operation: Option<crate::DragOperation>,
+    /// `Tx::set_drop_operation`: `Some(op)` overrides the hovered target's drop operation.
+    pub(crate) drop_op_set: Option<Option<crate::DragOperation>>,
+    /// `Tx::set_drop_description`: `Some(desc)` overrides the hovered target's drop description.
+    pub(crate) drop_desc_set: Option<Option<crate::el::DropDescription>>,
     pub(crate) title: Option<String>,
     pub(crate) color_scheme: Option<crate::ColorScheme>,
     pub(crate) window_backdrop: Option<crate::WindowBackdrop>,
+    pub(crate) resize_anchor: Option<crate::ResizeAnchor>,
     /// `Tx::set_represented_file`: `Some(Some(path))` sets, `Some(None)` clears.
     pub(crate) represented_file: Option<Option<std::path::PathBuf>>,
     /// `Tx::set_document_edited`.
@@ -122,6 +143,11 @@ pub struct Tx {
     /// A handler in this transaction opened a new fallback field menu (`App::on_field_menu`),
     /// superseding any earlier action's stale `field_menu_resolution` in the same frame.
     pub(crate) field_menu_opened: bool,
+    /// `Tx::resolve_popup_menu`: `Some(Some(id))` picks an item, `Some(None)` dismisses.
+    pub(crate) popup_menu_resolution: Option<Option<String>>,
+    /// A handler in this transaction opened a new fallback popup menu (`App::on_popup_menu`),
+    /// superseding any earlier action's stale `popup_menu_resolution` in the same frame.
+    pub(crate) popup_menu_opened: bool,
     pub(crate) file_dialogs: Vec<crate::file_dialog::Call>,
     pub(crate) window_frame: Option<crate::window::frame::FrameRequest>,
     /// The mouse button driving this press or drag (`Tx::button`).
@@ -433,6 +459,7 @@ impl Tx {
             || !self.haptics.is_empty()
             || self.select.is_some()
             || self.field_menu_resolution.is_some()
+            || self.popup_menu_resolution.is_some()
     }
 
     /// An app marker on the next frame, e.g. `tx.trace_event(format_args!("lab:{step:?}"))`.
@@ -468,6 +495,51 @@ impl Tx {
         #[cfg(feature = "frame-profile")]
         crate::frame::live_log::waker(std::panic::Location::caller(), duration);
         self.wakes.push(duration);
+    }
+
+    /// Ask for `poll` to run again for work queued in state.
+    ///
+    /// Called during a frame (from a handler—including a [`Tx::live_only`] handler—or from
+    /// `poll`), this runs one more round of that same frame's `poll` loop before the view
+    /// commits (bounded by `MAX_POLL_ROUNDS` = 4). Called outside a frame (such as from
+    /// [`AppHandle::update`](crate::AppHandle::update)), this schedules a poll on the next turn.
+    /// Ordinary non-`live_only` handlers already trigger a same-frame follow-up `poll`
+    /// automatically and do not need to call this.
+    ///
+    /// ```no_run
+    /// use rune::{El, Tx, el};
+    ///
+    /// struct State { dirty_query: bool }
+    ///
+    /// fn row() -> El {
+    ///     el().on_hover_change(|s: &mut State, inside, tx: &mut Tx| {
+    ///         tx.live_only();
+    ///         if inside {
+    ///             s.dirty_query = true;
+    ///             tx.request_poll();
+    ///         }
+    ///     })
+    /// }
+    /// ```
+    #[cfg_attr(feature = "frame-profile", track_caller)]
+    pub fn request_poll(&mut self) {
+        #[cfg(feature = "frame-profile")]
+        crate::frame::live_log::waker(std::panic::Location::caller(), std::time::Duration::ZERO);
+        self.request_poll = true;
+    }
+
+    /// Arms one-shot urgent frame admission on macOS so the next drawn frame may bypass
+    /// display-link `Wait` once by advancing its target to now.
+    ///
+    /// Use this from [`AppHandle::update_if`](crate::AppHandle::update_if),
+    /// [`OverlayHandle::update_if`](crate::OverlayHandle::update_if), or a handler when
+    /// authoritative state changed and waiting another display interval adds visible latency.
+    /// Duplicate requests before that frame claims pacing coalesce into one admission; normal
+    /// display-link pacing resumes immediately after (even if drawable acquisition or
+    /// presentation fails), and calls during a frame already being built are consumed by that
+    /// frame. No-op for pacing off macOS.
+    pub fn request_urgent_frame(&mut self) {
+        self.urgent_frame = true;
     }
 
     /// The window's logical clock in seconds as this handler or poll runs: the `clock` `poll`
@@ -715,8 +787,28 @@ impl Tx {
         Ok(())
     }
 
+    /// Sets which edge or corner of this window stays fixed when Rune resizes it
+    /// ([`App::fit_content_height`](crate::App::fit_content_height),
+    /// [`Self::resize_window`], [`Self::resize_window_instant`],
+    /// [`WindowHandle::resize`](crate::WindowHandle::resize)). Retained across native window
+    /// recreation; last call in a turn wins. Applies before any resize queued in the same turn.
+    ///
+    /// ```no_run
+    /// use rune::{El, ResizeAnchor, el};
+    ///
+    /// let button: El = el().on_press_tx(|_: &mut (), tx| {
+    ///     tx.set_resize_anchor(ResizeAnchor::Bottom);
+    /// });
+    /// let _ = button;
+    /// ```
+    pub fn set_resize_anchor(&mut self, anchor: crate::ResizeAnchor) {
+        self.resize_anchor = Some(anchor);
+    }
+
     /// Resize this window's content to `size` points, as an onboarding window changes height
-    /// per step. The top edge stays put and the window stays on its screen. The frame moves
+    /// per step. The edge selected by [`App::resize_anchor`](crate::App::resize_anchor)
+    /// (default [`ResizeAnchor::TopLeft`](crate::ResizeAnchor::TopLeft)) stays put and the
+    /// window stays on its screen. The frame moves
     /// on this change's spring (`Tx::motion`, else `tok::motion::DEFAULT`), so content laid
     /// out against the window's edges follows it frame by frame; `Tx::instant` or reduced
     /// motion jumps. On macOS it animates; Windows and Linux resize at once, and Wayland
@@ -1028,9 +1120,11 @@ impl Tx {
     /// commit. Debug builds look for that: a live-only event a quarter second or more after
     /// the last commit still re-runs the view, and if the elements, layout, text or colours
     /// it builds differ from what's on screen, Rune prints the handler that said `live_only`.
-    /// This is a heuristic, not a state-mutation check: a view that reads a clock or other
-    /// external state can also differ. Use [`Runtime::check_live_only`](crate::Runtime::check_live_only)
-    /// to turn it off for such a view. It does no checking in release builds.
+    /// This self-check increments [`FrameStats::commits`](crate::runtime::FrameStats::commits) in debug
+    /// builds (release builds never check), so a test counting commits should turn it off with
+    /// [`Runtime::check_live_only`](crate::Runtime::check_live_only)`(false)`. It is a heuristic,
+    /// not a state-mutation check: a view that reads a clock or other external state can also
+    /// differ.
     pub fn live_only(&mut self) {
         self.live_only = true;
     }

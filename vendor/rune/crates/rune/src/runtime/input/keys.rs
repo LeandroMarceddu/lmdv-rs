@@ -138,12 +138,20 @@ impl RuntimeCore {
                     }
                     let layout = self.focused_layout();
                     if self.with_focused(app, |e| e.key_in_read_only(ev, layout.as_ref().map(TextLayout::view)), one) {
+                        #[cfg(any(target_os = "linux", test))]
+                        if ev.edit_command() == Some('a') {
+                            self.primary_selection_changed();
+                        }
                         return true;
                     }
                 }
             } else {
                 let layout = self.focused_layout();
                 if self.with_focused(app, |e| e.key_in(ev, layout.as_ref().map(TextLayout::view)), one) {
+                    #[cfg(any(target_os = "linux", test))]
+                    if ev.edit_command() == Some('a') {
+                        self.primary_selection_changed();
+                    }
                     return true;
                 }
             }
@@ -168,6 +176,9 @@ impl RuntimeCore {
         // Selected text takes the Cmd+A and Cmd+C nothing else took, as AppKit's responder chain
         // gives a key equivalent to the menu bar before the text view: an app's shortcut wins.
         if !repeat && self.selection_key(app, ev, one) {
+            return true;
+        }
+        if self.selection_extend_key(app, ev, one) {
             return true;
         }
         if !repeat && self.context_menu_key(app, ev, one) {
@@ -510,10 +521,10 @@ impl RuntimeCore {
             }
         }
         let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(app.states()).text.clone()));
-        let before_sel = selection_change.as_ref().map(|_| {
+        let before_sel = {
             let e = access(app.states());
             (e.anchor, e.focus)
-        });
+        };
         let mut out = f(app.states(), &access, tx);
         // Submit and Escape's blur act once per press; held keys still type, move and delete.
         if tx.key_repeat {
@@ -529,13 +540,17 @@ impl RuntimeCore {
             change(app.states(), tx);
             access(app.states()).mark_edited();
         }
-        if let Some(selection_change) = selection_change {
-            let after_sel = {
-                let e = access(app.states());
-                (e.anchor, e.focus)
-            };
-            if before_sel != Some(after_sel) {
+        let after_sel = {
+            let e = access(app.states());
+            (e.anchor, e.focus)
+        };
+        if before_sel != after_sel {
+            if let Some(selection_change) = selection_change {
                 selection_change(app.states(), tx);
+            }
+            #[cfg(any(target_os = "linux", test))]
+            if !secure && after_sel.0 != after_sel.1 {
+                self.primary_selection_changed();
             }
         }
         if let Some(c) = out.copy {
@@ -699,10 +714,12 @@ impl RuntimeCore {
         self.dismiss_help();
         // A key ends a middle-click autoscroll, and does nothing else.
         if self.pointer.autoscroll_key() {
+            self.kbd.note_key_consumed(true);
             return;
         }
         // Escape cancels a held drag first, or releases an active pointer lock, and goes no further.
         if ev.key == crate::Key::Escape && (self.cancel_drag() || self.release_pointer_lock()) {
+            self.kbd.note_key_consumed(true);
             return;
         }
         self.frame.queue.push(Action::Key { ev, repeat: false, stage });
@@ -726,8 +743,15 @@ impl RuntimeCore {
     /// method is told to drop its own copy (`ime_reset`), so it doesn't come back in the next
     /// field.
     pub fn finish_composition(&mut self) {
-        self.frame.queue.push(Action::FinishIme);
+        self.frame.queue.push(Action::FinishIme { reset_ime: true });
         self.edit.ime_reset = true;
+    }
+
+    /// Commits any open composition at the input method's own request (for example Android's
+    /// `InputConnection.finishComposingText`) without requesting a platform IME restart.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn finish_composition_from_ime(&mut self) {
+        self.frame.queue.push(Action::FinishIme { reset_ime: false });
     }
 
     pub fn paste(&mut self, text: String) {
@@ -808,9 +832,58 @@ impl RuntimeCore {
         self.focused_input().is_some_and(|i| i.edit.is_secure())
     }
 
+    /// Editing metadata of the currently focused editable text field (plain or secure), for
+    /// mobile hosts that configure a soft keyboard (`InputMode`, `single_line`, `secure`).
+    /// Returns `None` when no editable field is focused, or when the focused field is read-only,
+    /// disabled, authored-hidden, or exiting.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn focused_editable_input(&self) -> Option<(crate::InputMode, bool, bool)> {
+        let input = self.focused_input()?;
+        if input.access.is_none() || self.focused_input_read_only() || self.focused_input_disabled() {
+            return None;
+        }
+        if let Some(i) = self.focused_index()
+            && !self.can_focus(i)
+        {
+            return None;
+        }
+        Some((input.input_mode, input.single_line, input.edit.is_secure()))
+    }
+
+    /// Routes committed soft-keyboard text into the focused secure field as `Key::Text`,
+    /// keeping `TextEdit::ime` closed to composition on passwords (matching `web_secure`).
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn commit_secure_text(&mut self, text: String) -> bool {
+        if text.is_empty()
+            || !self.has_secure_focus()
+            || self.focused_input_read_only()
+            || self.focused_input_disabled()
+        {
+            return false;
+        }
+        self.key(crate::KeyEvent { key: crate::Key::Text(text), mods: crate::Mods::default() });
+        true
+    }
+
+    /// Returns and clears whether a finger tap focused or re-tapped an editable text field since
+    /// the last check, so mobile hosts can re-show a soft keyboard hidden by Back while the field
+    /// kept focus.
+    #[inline]
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn take_field_tap(&mut self) -> bool {
+        std::mem::take(&mut self.edit.field_tap)
+    }
+
     #[inline]
     pub fn has_focus(&self) -> bool {
         self.kbd.has_focus()
+    }
+
+    /// Returns and clears whether the most recently dispatched key press was consumed by Rune.
+    #[inline]
+    #[cfg_attr(not(any(target_arch = "wasm32", target_os = "android", test)), allow(dead_code))]
+    pub(crate) fn take_key_consumed(&mut self) -> bool {
+        self.kbd.take_key_consumed()
     }
 }
 

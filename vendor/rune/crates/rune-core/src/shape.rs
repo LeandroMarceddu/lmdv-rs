@@ -63,6 +63,7 @@ pub enum Op {
     Fill { points: Vec<[f32; 2]>, color: Color },
     FillCompound { contours: Vec<Vec<[f32; 2]>>, rule: FillRule, color: Color },
     FillArea { area: Area, color: Color },
+    Rect { rect: [f32; 4], radii: [f32; 4], color: Color },
 }
 
 /// A list of strokes and fills, painted in order over the element's fill and under its text.
@@ -124,6 +125,30 @@ impl Shape {
         let points = points.into();
         if points.len() >= 3 {
             self.ops.push(Op::Fill { points, color });
+        }
+        self
+    }
+
+    /// Fills the axis-aligned rectangle `[x, y, width, height]` (in the shape's points) as a
+    /// single box primitive with no triangulation. When painted at rest and unscaled with pixel
+    /// snapping enabled, all four edges snap to device pixels in window space the same way a box
+    /// element's fill does, so thin bars and gaps match box fills pixel-for-pixel at any origin
+    /// and scale.
+    pub fn rect(self, rect: [f32; 4], color: Color) -> Shape {
+        self.rounded_rect_corners(rect, [0.0; 4], color)
+    }
+
+    /// Like [`Self::rect`], with a uniform corner radius `radius` in points.
+    pub fn rounded_rect(self, rect: [f32; 4], radius: f32, color: Color) -> Shape {
+        self.rounded_rect_corners(rect, [radius; 4], color)
+    }
+
+    /// Like [`Self::rect`], with per-corner radii `[top_left, top_right, bottom_right, bottom_left]`
+    /// in points.
+    pub fn rounded_rect_corners(mut self, rect: [f32; 4], radii: [f32; 4], color: Color) -> Shape {
+        if rect.iter().all(|v| v.is_finite()) && rect[2] > 0.0 && rect[3] > 0.0 {
+            let radii = radii.map(|r| if r.is_finite() { r.max(0.0) } else { 0.0 });
+            self.ops.push(Op::Rect { rect, radii, color });
         }
         self
     }
@@ -259,7 +284,7 @@ impl Shape {
                     points.len() - 1
                 }
             }
-            Op::Fill { .. } | Op::FillCompound { .. } | Op::FillArea { .. } => 1,
+            Op::Fill { .. } | Op::FillCompound { .. } | Op::FillArea { .. } | Op::Rect { .. } => 1,
         };
         self.ops.iter().map(pieces).sum::<usize>() > 1
     }
@@ -341,6 +366,12 @@ impl Shape {
                     let a = fill_fade(total, done, at, t);
                     if a > 0.0 {
                         ops.push(Op::FillArea { area: area.clone(), color: Color { a: color.a * a, ..*color } });
+                    }
+                }
+                Op::Rect { rect, radii, color } => {
+                    let a = fill_fade(total, done, at, t);
+                    if a > 0.0 {
+                        ops.push(Op::Rect { rect: *rect, radii: *radii, color: Color { a: color.a * a, ..*color } });
                     }
                 }
             }

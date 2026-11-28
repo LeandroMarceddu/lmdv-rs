@@ -1,6 +1,8 @@
 # Run a Rune app in the browser
 
-Rune's experimental web target renders one canvas through WebGPU. It uses the same Rust
+Rune's experimental web target renders the app through WebGPU (or WebGL2) on one canvas,
+marked `data-rune-canvas`; a full-window page shows a CPU canvas first (see
+[Two canvases while starting](#two-canvases-while-starting)). It uses the same Rust
 views, layout, glyph atlas and shaders as native. GPU initialization is asynchronous; the
 runtime stays on the browser's main thread and requests frames only while work is pending.
 
@@ -120,11 +122,11 @@ App::new(spec).canvas_id("chart").fit_content_height().try_run()?;
 App::new(spec).canvas_id("route-canvas").full_viewport().try_run()?;
 ```
 
-Inline, the canvas is as wide as its parent and as tall as `AppSpec::size` (or its content with
-`fit_content_height`, when vertical wheel and touch pans scroll the page); safe-area insets
-are zero and the title doesn't touch `document.title`. With `full_viewport` the canvas is fixed to
-the visual viewport like Rune's own, so an ancestor with a `transform` or `filter` would
-become its containing block; mount it outside one.
+Inline, the canvas is as wide as its parent and as tall as `AppSpec::size` unless CSS sets its
+height (or as tall as its content with `fit_content_height`, when vertical wheel and touch pans
+scroll the page); safe-area insets are zero and the title doesn't touch `document.title`. With
+`full_viewport` the canvas is fixed to the visual viewport like Rune's own, so an ancestor with a
+`transform` or `filter` would become its containing block; mount it outside one.
 
 `AppHandle::quit` unmounts the app when its route goes away: the loop stops, the GPU device is
 destroyed, Rune's listeners come off the page, and the body style and title it changed go back.
@@ -135,6 +137,34 @@ quitting mounts once that one has gone, so a route can swap apps in the same tic
 ```rust,ignore
 let handle = app.handle();           // keep it with the route
 App::new(spec).canvas_id("route-canvas").full_viewport().try_run()?; // after handle.quit()
+```
+
+## Two canvases while starting
+
+While a full-window page is on the CPU renderer it holds two `<canvas>` elements: the app's,
+marked `data-rune-canvas`, which takes input and stays see-through until the GPU draws, and a 2D
+canvas inserted just before it, marked `data-rune-cpu` and `aria-hidden="true"`, which shows
+the CPU frames and takes no input. The CPU canvas is removed once the GPU's frames are on
+screen. It stays for the life of the page with `CpuFirst::Only`, or when WebGPU and WebGL2
+both fail to start. Under `CpuFirst::Auto`, software/fallback WebGPU and WebGL2 adapters (such as SwiftShader or
+`llvmpipe`) are rejected so the page stays on the faster CPU canvas. Under `GpuLossPolicy::Recover`,
+WebGPU device loss triggers bounded re-acquisition (3 losses per 5-minute window): full-window
+`CpuFirst` pages draw on the CPU canvas while recovering and hand back over when restored, while
+`CpuFirst::Off`, `App::web_document`, and inline `App::canvas_id` pages pause in place until
+restored or exhausted. When a page permanently falls back off the GPU or exhausts recovery (initial
+async failure, shader rejection, hand-over timeout, or exhausted device-loss recovery), Rune calls
+`App::on_gpu_fallback` and dispatches a bubbling `runegpufallback` `CustomEvent`
+(`detail: { stage, reason }`) on `canvas[data-rune-canvas]`.
+`CpuFirst::Off`, `GpuLossPolicy::Terminal` (which never falls back to the CPU),
+`App::web_document` and inline `App::canvas_id` pages start without one.
+Both attributes are a stable hook: select the app's canvas with `canvas[data-rune-canvas]`
+(or `canvas:not([data-rune-cpu])`), which matches exactly one element at every stage of start-up.
+A canvas passed in with `App::canvas_id` gets `data-rune-canvas` while the app runs and loses it
+after `AppHandle::quit`.
+
+```js
+const canvas = page.locator('canvas[data-rune-canvas]'); // not `canvas`: strict mode sees two
+await canvas.click();
 ```
 
 ## A whole web page
@@ -217,8 +247,19 @@ rasterizes SVGs directly at that size. Images over 8192 pixels a side are refuse
 pixels are read, and a failed request or a cross-origin image without CORS headers resolves to
 `Image::error`.
 
+For cross-origin raster URLs served without `Access-Control-Allow-Origin`, use opt-in
+`El::web_image(url)` or `El::web_image_fit(url, fit)`. On web, Rune synchronizes visible
+`web_image` elements per frame to a display-only `<img>` layer (`[data-rune-web-images]`,
+`pointer-events: none`, no `crossOrigin` attribute) clipped to enclosing scroll viewports and
+rounded clips without reading pixels or bypassing browser CORS rules. The element's own `fill`
+and `border` remain on the canvas behind and around it; because the DOM layer sits above the
+canvas, canvas-drawn overlays, popovers and shaders cannot composite over it (keep
+`ImageCache::url` + `El::pixels` for same-origin or CORS-enabled images that need full GPU
+layering).
+
 System `Cursor` variants map to their CSS `cursor` keywords (including `ew-resize`,
-`ns-resize`, `nwse-resize`, and `nesw-resize`). `Cursor::Image` sets the canvas's CSS
+`ns-resize`, `nwse-resize`, `nesw-resize`, `n-resize`, `e-resize`, `s-resize`,
+`w-resize`, `alias`, and `copy`). `Cursor::Image` sets the canvas's CSS
 `cursor` to the PNG at 2x (`image-set(url(blob:…) 2x)`), so the browser decodes it and draws
 it at its size in points on any display.
 
@@ -396,7 +437,7 @@ extra windows, native menus, drag-out, native audio/video, built-in HTTP client 
 [HTTP requests (fetch)](#http-requests-fetch)) or hot patching.
 Native configuration types remain source-compatible, but their desktop host paths are not
 used on wasm. Unsupported window requests warn in the console; Show/Open are ignored.
-Full-window apps start on the CPU 2D canvas and hand over to WebGPU/WebGL2 by default (`CpuFirst::Auto`); `App::cpu_first(CpuFirst::Only)` keeps a full-window page on the CPU canvas without requesting WebGPU or WebGL2, `App::cpu_first(CpuFirst::Off)` starts directly on the GPU, and `globalThis.RUNE_CPU_FIRST` (`"0"`/`"off"`, `"only"`, `"auto"`) overrides `App::cpu_first` without a rebuild (`App::web_document` and inline `App::canvas_id` pages always start on the GPU).
+Full-window apps start on the CPU 2D canvas and hand over to WebGPU/WebGL2 by default (`CpuFirst::Auto`); `App::cpu_first(CpuFirst::Only)` keeps a full-window page on the CPU canvas without requesting WebGPU or WebGL2, `App::cpu_first(CpuFirst::Off)` starts directly on the GPU, and `globalThis.RUNE_CPU_FIRST` (`"0"`/`"off"`, `"only"`, `"auto"`) overrides `App::cpu_first` without a rebuild (`App::web_document` and inline `App::canvas_id` pages always start on the GPU; see [Two canvases while starting](#two-canvases-while-starting) for the page's DOM meanwhile).
 The document title follows `AppSpec::title`, hidden tabs report `is_visible() == false`,
 and `App::on_frame_drawn` runs on the browser's main thread after each drawn CPU or GPU frame
 (never on unchanged or skipped frames), matching desktop windows.
@@ -407,6 +448,8 @@ The functional proof uses headless Chromium and Playwright:
 node scripts/web-smoke.mjs target/web target/web-proof
 ```
 
+Tests of your own should locate the app with `canvas[data-rune-canvas]` (see
+[Two canvases while starting](#two-canvases-while-starting)).
 Install Playwright with its Chromium browser first. `PLAYWRIGHT_MODULE` and `CHROMIUM_PATH`
 can select an existing installation. `WEB_ENGINE=webkit` tries an installed Playwright WebKit
 and reports whether it has a WebGPU adapter. The proof checks GPU errors, idle rAF requests

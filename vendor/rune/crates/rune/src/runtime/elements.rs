@@ -39,12 +39,21 @@ pub struct ElementInfo {
     pub text: Option<String>,
     pub rect: [f32; 4],
     pub target: [f32; 4],
+    /// Effective opacity from [`El::opacity`], [`El::live_opacity`], [`El::group_opacity`],
+    /// presence transitions and fade loops, ancestors included. Does not include
+    /// [`El::layer_opacity`] (see [`Self::layer_opacity`]).
     pub opacity: f32,
+    /// Effective static layer opacity ([`El::layer_opacity`]), this element's value multiplied
+    /// by its ancestors'. Static paint-only fade; `1.0` when unfaded.
+    pub layer_opacity: f32,
     /// Effective uniform scale, including ancestors and the presence transition.
     pub scale: f32,
     /// Additive blur culling margin in logical points, including scaled ancestor sigmas.
     /// Three times this value bounds filter support; it is not the equivalent Gaussian sigma.
     pub blur: f32,
+    /// Presented backdrop blur standard deviation in logical points ([`El::backdrop_blur`]);
+    /// `0.0` when unset or disabled by [`Cx::system_reduced_transparency`](crate::Cx::system_reduced_transparency).
+    pub backdrop_blur: f32,
     pub radius: f32,
     pub fill: Color,
     /// Presented border colour, when this element has a non-zero border width.
@@ -158,7 +167,8 @@ impl Pose {
     pub fn scale(&self) -> f32 {
         self.scale
     }
-    /// The element's shadows (`El::box_shadow`) at their current sprung geometry and colour.
+    /// The element's presented shadows: `El::box_shadow` at their current sprung geometry and
+    /// colour, followed by any active [`El::stuck_shadow`]s scaled by their current sticky fade.
     pub fn shadows(&self) -> &[crate::el::Shadow] {
         &self.shadows
     }
@@ -211,9 +221,10 @@ impl types::TreeState {
                     && v.gradient.is_none()
                     && v.radial.is_none()
                     && v.outline.is_none()
-                    && v.shape.is_none()
+                    && !v.has_shape()
                     && v.grid.is_none()
                     && v.pixels.is_none()
+                    && v.web_image.is_none()
                     && v.effect.is_none()
                     && v.hover().a == 0.0
                     && v.press().a == 0.0
@@ -235,6 +246,15 @@ impl types::TreeState {
     /// Unknown paths (including synthetic flight/link paths) return false.
     pub(crate) fn element_is_secure(&self, path: &str) -> bool {
         self.nodes.iter().find(|n| n.path == path).is_some_and(Node::is_secure)
+    }
+
+    /// Effective static layer opacity ([`El::layer_opacity`]) for node `i`: its own value
+    /// multiplied by every ancestor's, clamped to `0.0..=1.0`.
+    pub(crate) fn effective_layer_opacity(&self, i: usize) -> f32 {
+        std::iter::successors(Some(i), |&j| self.nodes[j].parent)
+            .map(|j| self.nodes[j].vis.layer_opacity)
+            .product::<f32>()
+            .clamp(0.0, 1.0)
     }
 }
 
@@ -404,14 +424,17 @@ impl RuntimeCore {
                     let parent = self.tree.nodes[j].parent;
                     let fix = self.motion.launches().carried(&self.scene, id);
                     if fix != [0.0; 2] {
-                        let k = parent.and_then(|p| self.paint.inh_scratch.get(p)).map_or(1.0, |h| h.still.0);
+                        let k = parent
+                            .and_then(|p| self.paint.inh_scratch.get(p))
+                            .map_or(1.0, |h| self.paint.inh_cold_of(h).still.0);
                         scrolled = [scrolled[0] - fix[0] * k, scrolled[1] - fix[1] * k];
                     }
                     if lifted.is_none() && self.motion.flying.iter().any(|f| f.0 == id) {
                         let is_launch = self.motion.launches().launched(id);
                         let in_place = self.tree.nodes[j].vis.flight_in_place && !is_launch;
                         lifted = Some(parent.and_then(|p| self.paint.inh_scratch.get(p)).map_or((1.0, 0), |h| {
-                            (if is_launch { h.still.0 } else { h.held.0 }, if in_place { h.turn } else { 0 })
+                            let c = self.paint.inh_cold_of(h);
+                            (if is_launch { c.still.0 } else { c.held.0 }, if in_place { h.turn } else { 0 })
                         }));
                     }
                     steps += 1;
@@ -477,12 +500,22 @@ impl RuntimeCore {
                         || self.paint.inh_scratch.get(i).map_or(p.opacity, |h| h.opacity),
                         |f| f.target_alpha,
                     ),
+                    layer_opacity: if flight.is_some() { 1.0 } else { self.tree.effective_layer_opacity(i) },
                     scale: if flight.is_some() {
                         1.0
                     } else {
                         self.paint.inh_scratch.get(i).map_or(p.transform.scale.x, |h| h.scale)
                     },
-                    blur: if flight.is_some() { 0.0 } else { self.paint.inh_scratch.get(i).map_or(p.blur, |h| h.blur) },
+                    blur: if flight.is_some() {
+                        0.0
+                    } else {
+                        self.paint.inh_scratch.get(i).map_or(p.blur, |h| self.paint.inh_cold_of(h).blur)
+                    },
+                    backdrop_blur: if flight.is_some() || self.host.system_reduced_transparency {
+                        0.0
+                    } else {
+                        n.vis.backdrop_blur
+                    },
                     radius: p.radius.0[0],
                     fill: self.color(n.id, P_FILL, n.vis.fill),
                     border_color: (n.vis.border_width() > 0.0).then(|| self.color(n.id, P_BORDER, n.vis.border())),
@@ -597,8 +630,10 @@ impl RuntimeCore {
                 rect: [r.x, r.y, r.w, r.h],
                 target: [t.x, t.y, t.w, t.h],
                 opacity: f.source_alpha,
+                layer_opacity: 1.0,
                 scale: 1.0,
                 blur: 0.0,
+                backdrop_blur: 0.0,
                 radius: 0.0,
                 fill: Color::TRANSPARENT,
                 border_color: None,
@@ -856,11 +891,21 @@ impl RuntimeCore {
     /// of the last frame, and whether any spring still moves them. It reads the springs on
     /// demand: nothing runs per frame for it. This is a driver/headless read: running view
     /// functions and handlers do not hold a `Runtime`.
-    pub fn presented_pose(&self, key: &str) -> Option<Pose> {
-        let i = self.presented_index(key)?;
+    /// Fade factor in `0.0..=1.0` for node `i`'s [`El::stuck_shadow`]s (`0.0` when not stuck,
+    /// ramping linearly over [`sticky::SHADOW_RAMP`] points of sticky shift).
+    pub(in crate::runtime) fn stuck_shadow_alpha(&self, i: usize) -> f32 {
+        if !self.tree.has_sticky {
+            return 0.0;
+        }
+        let stuck = self.scroll.stuck.get(i).copied().unwrap_or(0.0);
+        (stuck.abs() / sticky::SHADOW_RAMP).min(1.0)
+    }
+
+    /// Presented shadows for node `i`: sprung `El::box_shadow`s followed by active
+    /// `El::stuck_shadow`s scaled by their current sticky fade, matching paint order.
+    pub(crate) fn presented_shadows_at(&self, i: usize) -> Vec<crate::el::Shadow> {
         let n = &self.tree.nodes[i];
-        let store = self.scene.store();
-        let shadows = n
+        let mut shadows: Vec<_> = n
             .vis
             .shadows
             .iter()
@@ -873,6 +918,40 @@ impl RuntimeCore {
                 }
             })
             .collect();
+        let stuck_k = self.stuck_shadow_alpha(i);
+        if stuck_k > 0.0
+            && let Some(sticky) = &n.sticky
+        {
+            shadows.extend(
+                sticky
+                    .shadows
+                    .iter()
+                    .map(|&sh| crate::el::Shadow { color: sh.color.alpha(sh.color.a * stuck_k), ..sh }),
+            );
+        }
+        shadows
+    }
+
+    /// Presented shadows for every presented node that has at least one, keyed by element path,
+    /// for `--tree` JSON.
+    pub(crate) fn presented_shadows_by_path(&self) -> HashMap<String, Vec<crate::el::Shadow>> {
+        self.tree
+            .nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| {
+                self.scene.presented(n.id)?;
+                let shadows = self.presented_shadows_at(i);
+                (!shadows.is_empty()).then(|| (n.path.clone(), shadows))
+            })
+            .collect()
+    }
+
+    pub fn presented_pose(&self, key: &str) -> Option<Pose> {
+        let i = self.presented_index(key)?;
+        let n = &self.tree.nodes[i];
+        let store = self.scene.store();
+        let shadows = self.presented_shadows_at(i);
         let moving = self.rect_springing(i)
             || anchor_ancestors(&self.tree.nodes, i).any(|p| {
                 let id = self.tree.nodes[p].id;

@@ -11,7 +11,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug)]
 enum Step {
-    Down { clicks: u8, shift: bool, check_pill: bool },
+    Down { clicks: u8, shift: bool, check_pill: bool, touch: bool },
     Drag,
     Cancelled,
 }
@@ -20,7 +20,7 @@ enum Step {
 pub(in crate::runtime) struct Hit {
     pub(in crate::runtime) caret: usize,
     /// The side of `caret` the press was on, where two runs of different direction meet.
-    side: parley::Affinity,
+    pub(in crate::runtime) side: parley::Affinity,
     cluster: usize,
 }
 
@@ -111,7 +111,7 @@ pub(in crate::runtime) fn hit(e: &crate::edit::TextEdit, l: TextFlow<'_>, x: f32
     Hit { caret, side: at.side, cluster }
 }
 
-fn unit_at(e: &crate::edit::TextEdit, h: Hit, unit: Unit) -> (usize, usize) {
+pub(in crate::runtime) fn unit_at(e: &crate::edit::TextEdit, h: Hit, unit: Unit) -> (usize, usize) {
     if unit == Unit::Char {
         let to = e
             .pills()
@@ -201,9 +201,9 @@ impl RuntimeCore {
             && self.input_pill_at(i, x, y).is_some()
     }
 
-    /// A press at (x, y) on text field `ji`, down at `down_at`; `second` when it's the second
-    /// of a double press; `link` when the press landed on a link in `ji`'s own text; `direct`
-    /// when the press landed directly on `ji` rather than an outer `role="textbox"` wrapper.
+    /// A mouse press at (x, y) on text field `ji`, down at `down_at`; `second` when it's the
+    /// second of a double press; `link` when the press landed on a link in `ji`'s own text;
+    /// `direct` when the press landed directly on `ji` rather than an outer `role="textbox"` wrapper.
     pub(in crate::runtime) fn input_down(
         &mut self,
         ji: usize,
@@ -213,24 +213,67 @@ impl RuntimeCore {
         link: Option<usize>,
         direct: bool,
     ) {
+        let shift = self.kbd.held_mods.shift;
+        let clicks = self.queue_input_focus_step(ji, (x, y), direct, false);
+        let link = link.filter(|_| !shift && clicks == 1);
+        self.hold_input_press(ji, (x, y), down_at, second, link, u32::from(clicks), false);
+    }
+
+    /// Touch down on text field `ji`: holds the press for active feedback and link tracking
+    /// without moving focus, caret or selection until the finger lifts as a tap.
+    pub(in crate::runtime) fn input_touch_down(
+        &mut self,
+        ji: usize,
+        (x, y): (f32, f32),
+        down_at: f64,
+        second: bool,
+        link: Option<usize>,
+    ) {
+        self.hold_input_press(ji, (x, y), down_at, second, link, 1, true);
+    }
+
+    /// Touch tap-up on text field `ji`: focuses it and places its caret or word/line selection.
+    pub(in crate::runtime) fn input_tap_up(&mut self, ji: usize, (x, y): (f32, f32), direct: bool) {
+        self.edit.bump_touch_selection_rev();
+        let shift = self.kbd.held_mods.shift;
+        let clicks = self.queue_input_focus_step(ji, (x, y), direct, true);
+        if shift || clicks > 1 {
+            self.pointer.clear_press_link();
+        }
+    }
+
+    fn queue_input_focus_step(&mut self, ji: usize, (x, y): (f32, f32), direct: bool, touch: bool) -> u8 {
         let now = self.now_clock();
         let shift = self.kbd.held_mods.shift;
-        // Its text drew scaled or rotated with its box: map the press back to the rest layout.
-        let [lx, ly] = self.to_local(ji, x, y);
-        let jn = &self.tree.nodes[ji];
-        let path = jn.path.clone();
-        let r = jn.target;
+        let path = self.tree.nodes[ji].path.clone();
         let clicks = if shift {
             self.edit.input_click.presses.clear();
             1
         } else {
             self.edit.input_click.presses.press(&path, now, (x, y), self.double_click_interval).min(3) as u8
         };
-        let link = link.filter(|_| !shift && clicks == 1);
         let check_pill = direct && !shift;
         self.edit.input_click.capture = Capture::Held { dragging: Some(path.clone()) };
-        self.edit.input_click.steps.push_back((path.clone(), Step::Down { clicks, shift, check_pill }));
-        self.frame.queue.push(Action::Focus(path.clone(), x, y));
+        self.edit.input_click.steps.push_back((path.clone(), Step::Down { clicks, shift, check_pill, touch }));
+        self.frame.queue.push(Action::Focus(path, x, y));
+        clicks
+    }
+
+    fn hold_input_press(
+        &mut self,
+        ji: usize,
+        (x, y): (f32, f32),
+        down_at: f64,
+        second: bool,
+        link: Option<usize>,
+        clicks: u32,
+        touch: bool,
+    ) {
+        // Its text drew scaled or rotated with its box: map the press back to the rest layout.
+        let [lx, ly] = self.to_local(ji, x, y);
+        let jn = &self.tree.nodes[ji];
+        let path = jn.path.clone();
+        let r = jn.target;
         let d = Drag {
             phase: Phase::Down,
             x: lx,
@@ -242,16 +285,17 @@ impl RuntimeCore {
             dx: 0.0,
             dy: 0.0,
             data: 0.0,
-            clicks: u32::from(clicks),
+            clicks,
             cancelled: false,
             rtl: jn.flow == crate::el::Flow::Rtl,
             window: [x, y],
             screen: self.screen_at(x, y),
             edge: None,
         };
-        self.pointer.hold_press(
-            capture::Held::new(path, d, crate::PointerButton::Primary, (x, y), down_at, second, None).on_link(link),
-        );
+        let mut held =
+            capture::Held::new(path, d, crate::PointerButton::Primary, (x, y), down_at, second, None).on_link(link);
+        held.touch = touch;
+        self.pointer.hold_press(held);
     }
 
     /// Focuses text field `ji` with its caret at (x, y), as a single click does, but holds no
@@ -263,7 +307,7 @@ impl RuntimeCore {
         self.edit
             .input_click
             .steps
-            .push_back((path.clone(), Step::Down { clicks: 1, shift: false, check_pill: false }));
+            .push_back((path.clone(), Step::Down { clicks: 1, shift: false, check_pill: false, touch: false }));
         self.frame.queue.push(Action::Focus(path, x, y));
     }
 
@@ -300,7 +344,7 @@ impl RuntimeCore {
         let step = if self.edit.input_click.steps.front().is_some_and(|(p, _)| *p == path) {
             self.edit.input_click.steps.pop_front().unwrap().1
         } else {
-            Step::Down { clicks: 1, shift: false, check_pill: false }
+            Step::Down { clicks: 1, shift: false, check_pill: false, touch: false }
         };
         if matches!(step, Step::Cancelled) {
             return false;
@@ -346,8 +390,14 @@ impl RuntimeCore {
         let point = self.input_text_point(i, x, y);
         let s = self.env.scale;
         match step {
-            Step::Down { clicks, shift, .. } => {
+            Step::Down { clicks, shift, touch, .. } => {
                 self.set_focus(app, Some(path), false);
+                if touch
+                    && !self.is_node_read_only(i)
+                    && self.tree.nodes[i].input.as_deref().is_some_and(|inp| inp.input_mode != crate::InputMode::None)
+                {
+                    self.edit.field_tap = true;
+                }
                 // A press mid-composition writes it into the text first, as a browser's field
                 // does, then puts the caret where it landed: the layout it hits already shows
                 // the composition in place.

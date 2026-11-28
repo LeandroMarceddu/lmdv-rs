@@ -355,7 +355,10 @@ impl Walk {
         let dev = &self.dev;
         match (&self.rt.edit.selectable.phase, &dev.path) {
             (Phase::Empty, None) if !dev.dragging && self.rt.edit.selectable.mounted_between.is_empty() => {}
-            (phase @ (Phase::Placed(sel) | Phase::Dragging { selection: sel, .. }), Some(path)) => {
+            (
+                phase @ (Phase::Placed(sel) | Phase::Keyboard(sel) | Phase::Dragging { selection: sel, .. }),
+                Some(path),
+            ) => {
                 let unit = match phase {
                     Phase::Dragging { unit, .. } => Some(match unit {
                         Unit::Char => U::Char,
@@ -400,6 +403,8 @@ impl Walk {
                 let phase = match phase {
                     Phase::Empty => "empty",
                     Phase::Placed(_) => "placed",
+                    Phase::Keyboard(_) => "keyboard",
+                    Phase::Armed { .. } => "armed",
                     Phase::Dragging { .. } => "dragging",
                 };
                 return Err(format!("after {letter:?}: {phase}, dev path {:?} dragging {}", dev.path, dev.dragging));

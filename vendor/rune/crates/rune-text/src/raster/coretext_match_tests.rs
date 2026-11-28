@@ -136,3 +136,103 @@ fn off_draws_coverage_as_is_on_apple_platforms() {
         assert_eq!(text.coverage_exponent([0.9, 0.9, 0.9, 1.0]), 1.0, "a window on this Mac draws Off as is");
     }
 }
+
+#[test]
+fn pipeline_with_user_smoothing_controls_on_without_changing_other_modes() {
+    assert_eq!(FontSmoothing::On.pipeline_with_user_smoothing(true), ApplePipeline::SMOOTHED);
+    assert_eq!(FontSmoothing::On.pipeline_with_user_smoothing(false), ApplePipeline::UNSMOOTHED);
+    assert_eq!(FontSmoothing::Off.pipeline_with_user_smoothing(true), ApplePipeline::UNSMOOTHED);
+    assert_eq!(FontSmoothing::Off.pipeline_with_user_smoothing(false), ApplePipeline::UNSMOOTHED);
+    assert_eq!(FontSmoothing::Windfoil.pipeline_with_user_smoothing(true), ApplePipeline::SMOOTHED);
+    assert_eq!(FontSmoothing::Windfoil.pipeline_with_user_smoothing(false), ApplePipeline::SMOOTHED);
+}
+
+#[test]
+fn ignoring_user_font_smoothing_keeps_on_smoothed_and_off_unsmoothed() {
+    let mut text = TextSystem::default();
+    assert!(text.respect_user_font_smoothing());
+    text.set_font_smoothing(FontSmoothing::On);
+    // Simulate a host whose AppleFontSmoothing = 0 downgraded On's pipeline to UNSMOOTHED.
+    text.set_apple_pipeline(ApplePipeline::UNSMOOTHED);
+    assert!(text.set_respect_user_font_smoothing(false), "disabling user preference restores SMOOTHED immediately");
+    assert!(!text.respect_user_font_smoothing());
+    assert_eq!(text.apple_pipeline(), ApplePipeline::SMOOTHED);
+    assert!(!text.set_respect_user_font_smoothing(false), "setting the same flag is a no-op");
+
+    text.set_font_smoothing(FontSmoothing::Off);
+    assert_eq!(text.apple_pipeline(), ApplePipeline::UNSMOOTHED);
+    text.set_font_smoothing(FontSmoothing::On);
+    assert_eq!(text.apple_pipeline(), ApplePipeline::SMOOTHED);
+}
+
+#[test]
+fn linux_grayscale_and_outline_modes_take_linux_gamma_while_windows_and_apple_keep_theirs() {
+    let black = [0.0, 0.0, 0.0, 1.0];
+    let mid_grey = [92.0 / 255.0, 92.0 / 255.0, 92.0 / 255.0, 1.0];
+    let white = [1.0, 1.0, 1.0, 1.0];
+    let transparent = [1.0, 1.0, 1.0, 0.0];
+    let chromium_outline = [
+        FontSmoothing::WindfoilChromium,
+        FontSmoothing::Slug,
+        FontSmoothing::HintedGpu,
+        FontSmoothing::Hinted,
+        FontSmoothing::WindfoilRgb,
+    ];
+
+    // Linux (neither apple nor windows): Off and every Chromium-weight outline mode take LINUX_GAMMA.
+    for mode in
+        [FontSmoothing::Off, FontSmoothing::DirectWrite, FontSmoothing::ClearType].into_iter().chain(chromium_outline)
+    {
+        assert!((coverage_exponent(mode, black, false, false) - LINUX_GAMMA[0]).abs() < 1e-6, "Linux black {mode:?}");
+        assert!((coverage_exponent(mode, white, false, false) - LINUX_GAMMA[1]).abs() < 1e-6, "Linux white {mode:?}");
+        assert_eq!(
+            coverage_exponent(mode, mid_grey, false, false),
+            coverage_exponent(FontSmoothing::Off, mid_grey, false, false),
+            "Linux mid-grey {mode:?} matches Off",
+        );
+        assert_eq!(coverage_exponent(mode, transparent, false, false), 1.0, "transparent {mode:?}");
+    }
+
+    // Windows keeps WINDOWS_GAMMA + windows_correction for Off and outline modes; DirectWrite/ClearType carry their own.
+    for mode in [FontSmoothing::Off].into_iter().chain(chromium_outline) {
+        assert!(
+            (coverage_exponent(mode, black, false, true) - WINDOWS_GAMMA[0]).abs() < 1e-6,
+            "Windows black {mode:?}"
+        );
+        assert!(
+            (coverage_exponent(mode, white, false, true) - WINDOWS_GAMMA[1]).abs() < 1e-6,
+            "Windows white {mode:?}"
+        );
+        let mid = coverage_exponent(mode, mid_grey, false, true);
+        let linear = WINDOWS_GAMMA[0] + (WINDOWS_GAMMA[1] - WINDOWS_GAMMA[0]) * (92.0 / 255.0);
+        assert!(mid > linear + 0.1, "Windows mid-grey keeps windows_correction for {mode:?}: {mid} vs {linear}");
+    }
+    for mode in [FontSmoothing::DirectWrite, FontSmoothing::ClearType] {
+        assert_eq!(coverage_exponent(mode, white, false, true), 1.0, "Windows {mode:?} carries its own gamma");
+    }
+
+    // Apple keeps 1.0 for non-Chromium modes and WINDOWS_GAMMA (without windows_correction) for Chromium-weight outline modes.
+    for mode in [
+        FontSmoothing::On,
+        FontSmoothing::Off,
+        FontSmoothing::DirectWrite,
+        FontSmoothing::ClearType,
+        FontSmoothing::Windfoil,
+    ] {
+        assert_eq!(coverage_exponent(mode, white, true, false), 1.0, "Apple {mode:?}");
+    }
+    for mode in chromium_outline {
+        assert!((coverage_exponent(mode, black, true, false) - WINDOWS_GAMMA[0]).abs() < 1e-6, "Apple black {mode:?}");
+        assert!((coverage_exponent(mode, white, true, false) - WINDOWS_GAMMA[1]).abs() < 1e-6, "Apple white {mode:?}");
+        let mid = coverage_exponent(mode, mid_grey, true, false);
+        let linear = WINDOWS_GAMMA[0] + (WINDOWS_GAMMA[1] - WINDOWS_GAMMA[0]) * (92.0 / 255.0);
+        assert!((mid - linear).abs() < 1e-6, "Apple mid-grey has no windows_correction for {mode:?}");
+    }
+
+    // On and Windfoil stay 1.0 on every platform.
+    for (apple, windows) in [(false, false), (false, true), (true, false)] {
+        for mode in [FontSmoothing::On, FontSmoothing::Windfoil] {
+            assert_eq!(coverage_exponent(mode, white, apple, windows), 1.0, "{mode:?} ({apple}, {windows})");
+        }
+    }
+}

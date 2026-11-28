@@ -300,6 +300,8 @@ impl NodePrint {
                                 p.fg,
                                 p.ring.map(|(c, w)| (c, w.to_bits())),
                                 p.radius.map(f32::to_bits),
+                                p.pad_x.map(f32::to_bits),
+                                p.margin_x.map(f32::to_bits),
                             )
                                 .hash(h);
                             p.bare

@@ -68,7 +68,9 @@ fn assert_same_state<S: 'static>(memo_rt: &Runtime<S>, fresh_rt: &Runtime<S>, st
                 a.target,
                 a.visible,
                 a.opacity.to_bits(),
+                a.layer_opacity.to_bits(),
                 a.scale.to_bits(),
+                a.backdrop_blur.to_bits(),
                 a.hover.to_bits(),
                 a.press.to_bits(),
                 a.moving
@@ -78,7 +80,9 @@ fn assert_same_state<S: 'static>(memo_rt: &Runtime<S>, fresh_rt: &Runtime<S>, st
                 b.target,
                 b.visible,
                 b.opacity.to_bits(),
+                b.layer_opacity.to_bits(),
                 b.scale.to_bits(),
+                b.backdrop_blur.to_bits(),
                 b.hover.to_bits(),
                 b.press.to_bits(),
                 b.moving
@@ -386,6 +390,7 @@ fn hover_press_focus_selection_env_blend_and_hot_clear_match_fresh_build() {
         rt.set_system_scroller_overlay(false);
     });
     step_both(&mut rt_m, &mut rt_f, 1.0 / 60.0, "reduced-motion", |rt| rt.set_system_reduced_motion(true));
+    step_both(&mut rt_m, &mut rt_f, 1.0 / 60.0, "reduced-transparency", |rt| rt.set_system_reduced_transparency(true));
 
     let before_hot = rt_m.commit.memo_builds();
     rt_m.commit.clear_memo();

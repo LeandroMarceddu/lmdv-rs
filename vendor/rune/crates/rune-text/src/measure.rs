@@ -1,5 +1,6 @@
-//! Measuring text from a view, for views that place things themselves (table columns, diagram
-//! nodes). While a window's view runs, its measures use the window's own text system (`lend`).
+//! Measuring text from a view or setup callback, for code that places things itself (table
+//! columns, diagram nodes). While a window's or overlay's `setup` or view runs, its measures use
+//! the window's own text system (`lend`).
 //! Elsewhere each thread keeps one of its own, resolved in order: an active [`with_families`] or
 //! [`with_fonts`] guard on this thread, else the fonts and families this thread's own most recent
 //! [`TextSystem`] was given, else the process-wide ones from the latest unguarded [`TextSystem`]
@@ -74,15 +75,28 @@ thread_local! {
     static OVERRIDE: RefCell<Option<Fonts>> = const { RefCell::new(None) };
     /// The fonts and families this thread's own [`TextSystem`]s were built or updated with.
     static THREAD_FONTS: RefCell<Option<Fonts>> = const { RefCell::new(None) };
-    /// The text system of the window whose view is running on this thread (`lend`), if any.
+    /// The text system of the window or overlay whose setup or view is running on this thread (`lend`), if any.
     static LENT: RefCell<Option<TextSystem>> = const { RefCell::new(None) };
 }
 
-/// Runs `f` (a window's view) with [`measure`] and the rest using `text`, the window's own text
-/// system, rather than this thread's copy. The copy loads every font and fallback again (a title
-/// with one Arabic or emoji character costs 6-30 ms its first time), and its shapes aren't the ones
-/// the window lays out. Moves `text` into thread-local storage for the duration of `f` and restores
-/// it on return or unwind.
+/// Trims this thread's fallback measurement `TextSystem` (when one was created) at rest.
+pub(crate) fn rest() {
+    MEASURER
+        .try_with(|cell| {
+            if let Ok(mut slot) = cell.try_borrow_mut()
+                && let Some(m) = slot.as_mut()
+            {
+                m.text.rest();
+            }
+        })
+        .ok();
+}
+
+/// Runs `f` (a window's or overlay's `setup` or view) with [`measure`] and the rest using
+/// `text`, the runtime's own text system, rather than this thread's copy. The copy loads every
+/// font and fallback again (a title with one Arabic or emoji character costs 6-30 ms its first
+/// time), and its shapes aren't the ones the window lays out. Moves `text` into thread-local
+/// storage for the duration of `f` and restores it on return or unwind.
 #[doc(hidden)]
 pub fn lend<R>(text: &mut TextSystem, f: impl FnOnce() -> R) -> R {
     struct Restore<'a> {
@@ -277,7 +291,7 @@ pub struct FamiliesGuard {
 impl Drop for FamiliesGuard {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        OVERRIDE.with_borrow_mut(|o| *o = previous);
+        let _ = OVERRIDE.try_with(|o| *o.borrow_mut() = previous);
     }
 }
 
@@ -339,7 +353,7 @@ pub struct FontsGuard {
 impl Drop for FontsGuard {
     fn drop(&mut self) {
         let previous = self.previous.take();
-        OVERRIDE.with_borrow_mut(|o| *o = previous);
+        let _ = OVERRIDE.try_with(|o| *o.borrow_mut() = previous);
     }
 }
 
@@ -480,11 +494,7 @@ pub fn measure_inline_with(
 /// unrounded, as a browser's automatic table layout reads a cell: its widest unbreakable run,
 /// and its width on one line, neither counting the spaces that end a line.
 pub fn content_widths(text: &str, spans: &[Span], style: TextStyle) -> (f32, f32) {
-    with_text(|t| {
-        let min = t.layout_rich_with(text, spans, style, 1.0, Some(0.0), RichLayoutOptions::default()).width();
-        let max = t.layout_rich_with(text, spans, style, 1.0, None, RichLayoutOptions::default()).width();
-        (min, max)
-    })
+    with_text(|t| t.content_widths(text, spans, style))
 }
 
 /// The advance in points of `text` set on one line in `style`, unrounded: how much wider a row
@@ -576,6 +586,49 @@ mod tests {
         let mut bold = Span::new(0, 5);
         bold.weight = Some(700.0);
         assert!(measure("Hello world", &[bold], style, None).0 > w);
+    }
+
+    #[test]
+    fn content_widths_matches_cached_layouts_and_caches_nothing() {
+        let style = TextStyle::new(14.0, 400.0);
+        let mut mono = Span::new(0, 10);
+        mono.mono = true;
+        let mut bold = Span::new(11, 16);
+        bold.weight = Some(700.0);
+        let cases: &[(&str, &[Span])] = &[
+            ("", &[]),
+            ("Key", &[]),
+            ("Verified invariant for row 42 in section 7", &[]),
+            ("key_12_3   Title with spaces", &[mono, bold]),
+            ("unbreakable_super_long_identifier_token", &[]),
+            ("a\tb\tc", &[]),
+        ];
+
+        let mut text = TextSystem::default();
+        let mut ref_text = TextSystem::default();
+        for &(s, spans) in cases {
+            let shaped0 = text.shaped;
+            let got = lend(&mut text, || content_widths(s, spans, style));
+            let want_min =
+                ref_text.layout_rich_with(s, spans, style, 1.0, Some(0.0), RichLayoutOptions::default()).width();
+            let want_max = ref_text.layout_rich_with(s, spans, style, 1.0, None, RichLayoutOptions::default()).width();
+            assert_eq!(
+                got.0.to_bits(),
+                want_min.to_bits(),
+                "min-content width mismatch for {s:?}: {got:?} vs ({want_min}, {want_max})"
+            );
+            assert_eq!(
+                got.1.to_bits(),
+                want_max.to_bits(),
+                "max-content width mismatch for {s:?}: {got:?} vs ({want_min}, {want_max})"
+            );
+            assert_eq!(
+                text.cached_layout_count(),
+                0,
+                "content_widths must not insert into TextSystem::layouts for {s:?}"
+            );
+            assert_eq!(text.shaped - shaped0, 1, "content_widths must shape once for {s:?}");
+        }
     }
 
     #[test]
@@ -980,5 +1033,29 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    #[test]
+    fn dropping_override_guards_at_thread_exit_after_override_destroyed_does_not_abort() {
+        thread_local! {
+            static HELD_FAMILIES: RefCell<Option<FamiliesGuard>> = const { RefCell::new(None) };
+            static HELD_FONTS: RefCell<Option<FontsGuard>> = const { RefCell::new(None) };
+        }
+
+        std::thread::spawn(|| {
+            HELD_FAMILIES.with(|slot| assert!(slot.borrow().is_none()));
+            let guard = with_families("Inter", "ui-monospace");
+            HELD_FAMILIES.with(|slot| *slot.borrow_mut() = Some(guard));
+        })
+        .join()
+        .expect("thread with TLS FamiliesGuard exited cleanly");
+
+        std::thread::spawn(|| {
+            HELD_FONTS.with(|slot| assert!(slot.borrow().is_none()));
+            let guard = with_fonts(&[], ("Inter", "ui-monospace"));
+            HELD_FONTS.with(|slot| *slot.borrow_mut() = Some(guard));
+        })
+        .join()
+        .expect("thread with TLS FontsGuard exited cleanly");
     }
 }

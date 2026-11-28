@@ -409,6 +409,7 @@ fn display_link_state_machine_and_present_reports_settle_cleanly_at_rest() {
 fn metal_log_separates_trace_callbacks_and_shadow_watches_and_bounds_buffer() {
     use crate::frame::present_time::{Source, metal};
 
+    let _marks = crate::marks::test_scope();
     let log = Arc::new(metal::Log::new(true, true));
     let mut out_cb = Vec::new();
     let mut out_trace = Vec::new();
@@ -521,4 +522,30 @@ fn metal_layer_hook_attaches_to_offscreen_metal_surface_and_tracks_acquired_draw
         "dropping LayerHook must restore the original CAMetalLayer class"
     );
     drop(surface);
+}
+
+#[test]
+fn presented_delivery_records_first_on_display_launch_mark_with_real_timestamp() {
+    let _marks = crate::marks::test_scope();
+    let source = Arc::new(FakeSource::default());
+    let mut reports = FramePresentReports::new(Some(Box::new(|_| {})), Some("main"));
+    reports.set_source(source.clone());
+
+    let landed_at = crate::time::now() - Duration::from_millis(17);
+    // Skipped drawable (None) must not stamp frame.first.on_display; the first landed one stamps it.
+    source.complete(1, None);
+    reports.push_and_drain(1, 1);
+    let find_mark =
+        || crate::marks::marks().into_iter().find(|(name, _)| *name == "frame.first.on_display").map(|(_, at)| at);
+    assert_eq!(find_mark(), None, "skipped drawable must not record frame.first.on_display");
+
+    source.complete(2, Some(landed_at));
+    reports.push_and_drain(2, 2);
+    // A subsequent landed drawable must not overwrite the first on-display timestamp.
+    source.complete(3, Some(landed_at + Duration::from_millis(16)));
+    reports.push_and_drain(3, 3);
+
+    let mark = find_mark();
+    assert_eq!(mark, Some(landed_at), "frame.first.on_display must record the first landed timestamp");
+    assert!(mark.unwrap() <= crate::time::now(), "frame.first.on_display timestamp must not be in the future");
 }

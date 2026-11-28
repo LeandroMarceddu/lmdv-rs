@@ -339,6 +339,10 @@ impl Bound {
             linear.start(clock, now);
         }
     }
+    /// Current resting scalar value for a non-tween `f32` binding, without advancing `seen`.
+    pub fn peek_f32(&self) -> Option<f32> {
+        self.source.linear.is_none().then(|| f32::decode(self.source.value.load(Ordering::Acquire)))
+    }
     pub fn read(&mut self, clock: &Arc<()>, now: f64) -> (Option<LatchOp>, bool) {
         let mut seq = self.source.seq.load(Ordering::Acquire);
         let mut bits = self.source.value.load(Ordering::Acquire);

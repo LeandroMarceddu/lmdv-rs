@@ -201,31 +201,63 @@ impl Renderer {
         staging.write_texture_rows(texture, y0, &data[(y0 * row) as usize..(y1 * row) as usize]);
     }
 
-    /// Uploads changed rows of the runtime's image atlas (`El::pixels`), creating its texture on
-    /// first use.
+    /// Uploads changed rectangles of the runtime's image atlas (`El::pixels`), creating its
+    /// texture on first use, then releases any retained CPU `ImagePage::data` shadow buffers so
+    /// steady GPU frames hold zero full-page CPU copies. Note: `ImageCache` decodes on CPU only;
+    /// `upload_images`, `FillPass`, and `build_surfaces` run strictly inside frame preparation,
+    /// which is unreachable once `GpuLossPolicy::Terminal` latches.
     pub fn upload_images(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, images: &mut ImageAtlas) {
+        self.upload_images_inner(device, queue, images, false);
+    }
+
+    /// Like [`Self::upload_images`], but keeps CPU `ImagePage::data` buffers while a CPU painter
+    /// still shares the atlas (e.g. during Windows CPU-to-GPU handover before commit).
+    #[cfg(target_os = "windows")]
+    pub(crate) fn upload_images_retaining_cpu(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        images: &mut ImageAtlas,
+    ) {
+        self.upload_images_inner(device, queue, images, true);
+    }
+
+    fn upload_images_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        images: &mut ImageAtlas,
+        retain_cpu: bool,
+    ) {
         if images.pages.is_empty() && self.images.is_empty() {
+            if !retain_cpu {
+                images.release_cpu_pages();
+            }
             return self.refresh_layer_bindings(device);
         }
         let staging = self.uploads.staging(device, queue);
         if staging.lost() != self.uploads.lost.1 {
             self.uploads.lost.1 = staging.lost();
-            for page in &mut images.pages {
-                page.dirty = Some((0, page.height));
-            }
+            images.invalidate();
         }
         let mut changed = self.images.len() != images.pages.len();
         self.images.resize_with(images.pages.len(), || None);
-        for (index, page) in images.pages.iter_mut().enumerate() {
+        for index in 0..images.pages.len() {
+            let (active, width, height) = {
+                let page = &images.pages[index];
+                (page.is_active(), page.width, page.height)
+            };
             // A page past the device's largest texture (placed before this renderer said its limit)
             // draws nothing rather than failing validation.
-            if page.data.is_empty() || page.width.max(page.height) > self.max_texture_dim {
+            if !active || width.max(height) > self.max_texture_dim {
                 changed |= self.images[index].is_some();
                 self.images[index] = None;
+                images.clear_page_uploads(index);
                 continue;
             }
-            if self.images[index].as_ref().is_none_or(|(t, _)| t.width() != page.width || t.height() != page.height) {
-                let texture = Self::image_texture(device, page.width, page.height);
+            let recreated = self.images[index].as_ref().is_none_or(|(t, _)| t.width() != width || t.height() != height);
+            if recreated {
+                let texture = Self::image_texture(device, width, height);
                 let bind = Self::bind_group(
                     device,
                     &self.bind_layout,
@@ -237,10 +269,14 @@ impl Renderer {
                 );
                 self.images[index] = Some((texture, bind));
                 changed = true;
-                page.dirty = Some((0, page.height));
             }
-            let Some(rows) = page.dirty.take() else { continue };
-            Self::write_rows(&staging, &self.images[index].as_ref().unwrap().0, &page.data, rows);
+            let texture = &self.images[index].as_ref().unwrap().0;
+            images.drain_page_uploads(index, recreated, |x, y, w, h, bytes| {
+                staging.write_texture_rect(texture, x, y, w, h, bytes);
+            });
+        }
+        if !retain_cpu {
+            images.release_cpu_pages();
         }
         if changed {
             self.images_changed();
@@ -278,7 +314,7 @@ impl Renderer {
             self.images.truncate(images.pages.len());
         }
         for (slot, page) in self.images.iter_mut().zip(&images.pages) {
-            if (page.data.is_empty()
+            if (!page.is_active()
                 || slot.as_ref().is_some_and(|(t, _)| t.width() != page.width || t.height() != page.height))
                 && slot.take().is_some()
             {
@@ -401,6 +437,18 @@ impl Renderer {
             self.uploads.lost.0 = staging.lost();
             self.resend_uploads(atlas);
         }
+        let atlas_work = crate::frame::stage::active()
+            && (atlas.dirty.is_some()
+                || atlas.pages.iter().any(|p| p.dirty.is_some())
+                || atlas.has_pending_fills()
+                || atlas.page_rows(0) > self.atlas.height()
+                || self.atlas_pages.len() != atlas.pages.len()
+                || atlas.outlines.has_records());
+        let mut glyph_atlas_stage = if atlas_work {
+            crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::GlyphAtlas)
+        } else {
+            crate::frame::stage::StageGuard::default()
+        };
         // The Windfoil shader, built the first time text draws from outlines (render/variant.rs),
         // fills atlas pages on the GPU, so the pages are made again as ones it can draw into.
         if atlas.outlines.has_records() && self.select(device, variant::Event::OutlinesWanted) {
@@ -459,6 +507,7 @@ impl Renderer {
         }
         self.upload_outlines(device, &staging, atlas);
         self.fill_atlas(device, queue, &staging, atlas);
+        glyph_atlas_stage.end();
         if self.instances.ensure(device, instances.len()) {
             self.uploads.forget_instances();
         }
@@ -500,10 +549,7 @@ impl Renderer {
         }
         let has_layers = self.uploads.has_layers;
         // A loop-only frame that draws no layer leaves them as the last frame drew them.
-        #[cfg(any(target_os = "windows", target_arch = "wasm32"))]
         let layers_kept = self.uploads.patched && self.cycle_leaves_layers();
-        #[cfg(not(any(target_os = "windows", target_arch = "wasm32")))]
-        let layers_kept = false;
         if !layers_kept {
             self.prepare_layers(device, queue, if has_layers { instances } else { &[] }, viewport);
         }
@@ -511,12 +557,15 @@ impl Renderer {
         self.backdrop_used =
             self.effects.iter().any(|(_, i)| i.params[0] != 0.0 || i.kind() == Some(Kind::BackdropBlur));
         if self.backdrop_used {
-            self.ensure_backdrop(device, self.format, viewport);
+            // Every pooled copy holds the same part of the window, so a backdrop reads the same
+            // texels whichever format its pass draws in.
+            let (origin, size) = self.backdrop_frame(viewport);
+            self.ensure_backdrop(device, self.format, origin, size);
             for index in 0..self.extra.len() {
-                self.ensure_backdrop(device, self.extra[index].0, viewport);
+                self.ensure_backdrop(device, self.extra[index].0, origin, size);
             }
             if self.layers.targets.iter().any(Option::is_some) {
-                self.ensure_backdrop(device, layers::FORMAT, viewport);
+                self.ensure_backdrop(device, layers::FORMAT, origin, size);
             }
         }
         self.prepare_backdrop_blur(device, queue, viewport);
@@ -593,6 +642,9 @@ impl Renderer {
         if (!draws.is_empty() || built.is_some()) && self.surfaces.is_none() {
             let mut surfaces =
                 built.unwrap_or_else(|| crate::native_surface::SurfaceRenderer::new(device, self.format));
+            if let Some(importer) = self.surface_importer.take() {
+                surfaces.adopt_importer(importer);
+            }
             surfaces.set_srgb_blend(self.srgb_blend);
             surfaces.set_staging(self.uploads.staging(device, queue));
             for (format, _) in &self.extra {
@@ -606,9 +658,36 @@ impl Renderer {
                 s.add_plus_lighter(device, layers::FORMAT);
             }
             s.prepare(device, queue, draws, viewport);
+        } else if let Some(importer) = &mut self.surface_importer {
+            importer.prune_stale();
         }
         if self.layer_stats().targets > 0 {
             self.position_layer_surfaces(queue);
+        }
+    }
+
+    /// Imports `surface`'s current frame onto `device` as `wgpu::Texture` plane(s), reusing this
+    /// renderer's per-device importer and texture cache across frames (and sharing it with
+    /// `El::native_surface` draws when present).
+    ///
+    /// Returns `Ok(None)` when `surface` holds no frame, `Ok(Some(_))` with the imported plane
+    /// texture(s) and colour/orientation metadata, or `Err` if importing failed (also stored on
+    /// [`NativeSurface::last_error`](crate::NativeSurface::last_error)).
+    ///
+    /// Samples the surface's already-pushed frame mailbox; it does not drive a
+    /// [`Player`](crate::Player)-backed surface unless that surface is also drawn in the view tree.
+    pub fn surface_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: &crate::NativeSurface,
+    ) -> Result<Option<crate::native_surface::ImportedSurface>, String> {
+        if let Some(s) = &mut self.surfaces {
+            s.surface_texture(queue, surface)
+        } else {
+            self.surface_importer
+                .get_or_insert_with(|| crate::native_surface::SurfaceImporter::new(device))
+                .import(queue, surface)
         }
     }
 

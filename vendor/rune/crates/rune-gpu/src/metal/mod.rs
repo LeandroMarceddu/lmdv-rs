@@ -22,12 +22,13 @@
 //! Rune's layer tweaks (materials, present timing, transactions, occlusion) reach this backend's
 //! CAMetalLayer through `gpu::with_layer`. Video planes from CoreVideo wrap as textures
 //! (`texture_from_raw`) whose owner the bind groups and command buffers using them keep.
-//! Compute passes, timestamps at pass boundaries (`TIMESTAMP_QUERY`), and immediates
-//! (`IMMEDIATES`, set as inline vertex and fragment bytes, up to Metal's 4 KB) are as wgpu-hal's.
-//! New textures read as zero, as wgpu promises. A pipeline without a layout derives one from
-//! its shaders, as wgpu-core does (`derive`). Other queries, render bundles, indirect commands,
-//! depth and multisampling are not implemented: they panic naming the way back to wgpu
-//! (`unsupported!`).
+//! Compute passes (including indirect dispatches), timestamps at pass boundaries
+//! (`TIMESTAMP_QUERY`), and immediates (`IMMEDIATES`, set as inline vertex and fragment bytes,
+//! up to Metal's 4 KB) are as wgpu-hal's. New textures read as zero, as wgpu promises. A
+//! pipeline without a layout derives one from its shaders, as wgpu-core does (`derive`).
+//! Depth/stencil attachments and multisampled color and depth passes with resolve targets are
+//! supported. Other queries, render bundles, and indirect draws are not implemented: they
+//! panic naming the way back to wgpu (`unsupported!`).
 
 #[doc(hidden)]
 pub mod bench;
@@ -35,6 +36,8 @@ mod builtin;
 mod compute;
 #[cfg(test)]
 mod compute_tests;
+#[cfg(test)]
+mod depth_msaa_tests;
 mod derive;
 #[cfg(test)]
 mod derive_tests;
@@ -140,10 +143,18 @@ pub fn builtin_misses() -> usize {
 
 /// The wgpu features this backend can offer: a compositor that wants others draws with wgpu
 /// unless the app or `RUNE_GPU_BACKEND` asked for this backend (`backend::wgpu_for`).
-pub(crate) const FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY.union(wgpu::Features::IMMEDIATES);
+pub(crate) const FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
+    .union(wgpu::Features::IMMEDIATES)
+    .union(wgpu::Features::DEPTH32FLOAT_STENCIL8)
+    .union(wgpu::Features::DEPTH_CLIP_CONTROL);
 
 /// The most immediate data a pipeline takes: what `setVertexBytes` and `setFragmentBytes` copy.
 const MAX_IMMEDIATE_SIZE: u32 = 4096;
+
+/// Whether `instance` is this backend's.
+pub fn owns_instance(instance: &wgpu::Instance) -> bool {
+    instance.as_custom::<MetalInstance>().is_some()
+}
 
 /// Whether `adapter` is this backend's.
 pub(crate) fn owns_adapter(adapter: &wgpu::Adapter) -> bool {
@@ -159,6 +170,7 @@ pub fn enabled() -> bool {
 pub fn instance() -> wgpu::Instance {
     rune_staging::set_direct(write_in_place);
     rune_staging::set_direct_texture(write_texture_in_place);
+    rune_staging::set_direct_texture_rect(write_texture_rect_in_place);
     wgpu::Instance::from_custom(MetalInstance)
 }
 
@@ -182,6 +194,18 @@ fn write_texture_in_place(texture: &wgpu::Texture, y: u32, rows: &[u8]) -> bool 
         return false;
     }
     encode::replace_texture_rows(&tex.raw, y, rows);
+    true
+}
+
+/// Staging's in-place texture rectangle writer: an idle Apple Silicon shared texture takes an
+/// arbitrary sub-rectangle via `replaceRegion`, falling back to staged blits while in flight.
+fn write_texture_rect_in_place(texture: &wgpu::Texture, x: u32, y: u32, width: u32, height: u32, data: &[u8]) -> bool {
+    let Some(tex) = texture.as_custom::<resource::MetalTexture>() else { return false };
+    let Some(shared) = &tex.shared else { return false };
+    if !tex.raw.is_idle(shared) {
+        return false;
+    }
+    encode::replace_texture_rect(&tex.raw, x, y, width, height, data);
     true
 }
 
@@ -228,7 +252,16 @@ impl InstanceInterface for MetalInstance {
         Ok(unsafe { surface::create(target) })
     }
     fn request_adapter(&self, options: &wgpu::RequestAdapterOptions<'_, '_>) -> Pin<Box<dyn RequestAdapterFuture>> {
-        let device = preferred(devices(), options.power_preference).expect("Rune's Metal backend needs a Metal device");
+        let Some(device) = preferred(devices(), options.power_preference) else {
+            return Box::pin(ready(Err(wgpu::RequestAdapterError::NotFound {
+                active_backends: wgpu::Backends::METAL,
+                requested_backends: wgpu::Backends::METAL,
+                supported_backends: wgpu::Backends::METAL,
+                no_fallback_backends: wgpu::Backends::empty(),
+                no_adapter_backends: wgpu::Backends::METAL,
+                incompatible_surface_backends: wgpu::Backends::empty(),
+            })));
+        };
         Box::pin(ready(Ok(DispatchAdapter::custom(MetalAdapter { device }))))
     }
     fn poll_all_devices(&self, _: bool) -> bool {
@@ -284,8 +317,10 @@ fn limits() -> wgpu::Limits {
 
 impl AdapterInterface for MetalAdapter {
     fn request_device(&self, desc: &wgpu::DeviceDescriptor<'_>) -> Pin<Box<dyn RequestDeviceFuture>> {
-        let (device, queue) = device::new(self.device.clone(), desc);
-        Box::pin(ready(Ok((DispatchDevice::custom(device), DispatchQueue::custom(queue)))))
+        Box::pin(ready(
+            device::new(self.device.clone(), desc)
+                .map(|(device, queue)| (DispatchDevice::custom(device), DispatchQueue::custom(queue))),
+        ))
     }
     fn is_surface_supported(&self, _: &DispatchSurface) -> bool {
         true
@@ -305,7 +340,18 @@ impl AdapterInterface for MetalAdapter {
     fn get_texture_format_features(&self, format: wgpu::TextureFormat) -> wgpu::TextureFormatFeatures {
         use wgpu::TextureFormatFeatureFlags as F;
         let float = format.sample_type(None, None).is_some_and(|t| matches!(t, wgpu::TextureSampleType::Float { .. }));
-        let flags = if float { F::FILTERABLE | F::BLENDABLE } else { F::empty() };
+        let mut flags = if float { F::FILTERABLE | F::BLENDABLE | F::MULTISAMPLE_RESOLVE } else { F::empty() };
+        if !format.is_compressed() {
+            if self.device.supportsTextureSampleCount(2) {
+                flags |= F::MULTISAMPLE_X2;
+            }
+            if self.device.supportsTextureSampleCount(4) {
+                flags |= F::MULTISAMPLE_X4;
+            }
+            if self.device.supportsTextureSampleCount(8) {
+                flags |= F::MULTISAMPLE_X8;
+            }
+        }
         wgpu::TextureFormatFeatures { allowed_usages: wgpu::TextureUsages::all(), flags }
     }
     fn get_presentation_timestamp(&self) -> wgpu::PresentationTimestamp {

@@ -77,24 +77,42 @@ fn crop_handles(t: &tok::Theme) -> El {
             .absolute(x, y)
     };
     let (w, h) = (260.0, 170.0);
-    el().w_full().grow(1.0).center().radius(radius::LG).fill(Color::WHITE).border(1.0, t.card_border).child(
-        el().size(w + 14.0, h + 14.0)
-            .child(
-                el().size(w, h)
-                    .border(1.0, INK)
-                    .absolute(7.0, 7.0)
-                    .center()
-                    .child(text("Hover corners and edges").font(type_::BODY).color(t.text_secondary)),
-            )
-            .child(dot("crop-nw", 0.0, 0.0, Cursor::ResizeNwse))
-            .child(dot("crop-n", w * 0.5, 0.0, Cursor::ResizeNs))
-            .child(dot("crop-ne", w, 0.0, Cursor::ResizeNesw))
-            .child(dot("crop-e", w, h * 0.5, Cursor::ResizeEw))
-            .child(dot("crop-se", w, h, Cursor::ResizeNwse))
-            .child(dot("crop-s", w * 0.5, h, Cursor::ResizeNs))
-            .child(dot("crop-sw", 0.0, h, Cursor::ResizeNesw))
-            .child(dot("crop-w", 0.0, h * 0.5, Cursor::ResizeEw)),
-    )
+    let limits = row()
+        .gap(space::S2)
+        .items_center()
+        .child(handle_chip("handle-n", "N", Cursor::ResizeN, t))
+        .child(handle_chip("handle-e", "E", Cursor::ResizeE, t))
+        .child(handle_chip("handle-s", "S", Cursor::ResizeS, t))
+        .child(handle_chip("handle-w", "W", Cursor::ResizeW, t))
+        .child(handle_chip("handle-alias", "Alias", Cursor::Alias, t))
+        .child(handle_chip("handle-copy", "Copy", Cursor::Copy, t));
+    col()
+        .w_full()
+        .grow(1.0)
+        .center()
+        .gap(space::S3)
+        .radius(radius::LG)
+        .fill(Color::WHITE)
+        .border(1.0, t.card_border)
+        .child(
+            el().size(w + 14.0, h + 14.0)
+                .child(
+                    el().size(w, h)
+                        .border(1.0, INK)
+                        .absolute(7.0, 7.0)
+                        .center()
+                        .child(text("Hover corners and edges").font(type_::BODY).color(t.text_secondary)),
+                )
+                .child(dot("crop-nw", 0.0, 0.0, Cursor::ResizeNwse))
+                .child(dot("crop-n", w * 0.5, 0.0, Cursor::ResizeNs))
+                .child(dot("crop-ne", w, 0.0, Cursor::ResizeNesw))
+                .child(dot("crop-e", w, h * 0.5, Cursor::ResizeEw))
+                .child(dot("crop-se", w, h, Cursor::ResizeNwse))
+                .child(dot("crop-s", w * 0.5, h, Cursor::ResizeNs))
+                .child(dot("crop-sw", 0.0, h, Cursor::ResizeNesw))
+                .child(dot("crop-w", 0.0, h * 0.5, Cursor::ResizeEw)),
+        )
+        .child(limits)
 }
 
 fn context_menu(at: PointerPress, t: &tok::Theme) -> El {
@@ -365,6 +383,12 @@ mod tests {
             ("crop-w", Cursor::ResizeEw),
             ("crop-n", Cursor::ResizeNs),
             ("crop-s", Cursor::ResizeNs),
+            ("handle-n", Cursor::ResizeN),
+            ("handle-e", Cursor::ResizeE),
+            ("handle-s", Cursor::ResizeS),
+            ("handle-w", Cursor::ResizeW),
+            ("handle-alias", Cursor::Alias),
+            ("handle-copy", Cursor::Copy),
         ] {
             let (x, y) = rt.find(key).unwrap();
             rt.pointer_move(x, y);

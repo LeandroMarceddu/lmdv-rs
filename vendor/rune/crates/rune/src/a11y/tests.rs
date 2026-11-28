@@ -1308,6 +1308,27 @@ fn a11y_show_context_menu_on_link_lays_out_only_that_link() {
     assert_eq!(queries, 0, "out-of-range link should query 0 spans");
 }
 
+#[test]
+fn settings_notification_updates_reduced_transparency_and_queues_rebuild() {
+    let mut rt = Runtime::new(
+        false,
+        |_: &bool, cx| text(cx.system_reduced_transparency().to_string()),
+        (200.0, 80.0),
+        Env::default(),
+    );
+    rt.frame(0.0);
+    assert!(!rt.system_reduced_transparency());
+    let mut link = super::AccessibilityLink::new();
+    let _on = crate::platform::preferences::test_overrides::set_reduced_transparency(true);
+    link.shared.push(|i| i.settings = true);
+    assert!(link.receive_core(rt.core_mut(), "Test"), "changed reduced transparency must queue rebuild");
+    assert!(rt.system_reduced_transparency());
+    rt.frame(0.0);
+    // Repeated settings notification with unchanged preference does not queue another rebuild.
+    link.shared.push(|i| i.settings = true);
+    assert!(!link.receive_core(rt.core_mut(), "Test"), "unchanged preference must not queue rebuild");
+}
+
 /// A 2 by 2 image: what it draws does not matter, only the room it takes.
 fn picture() -> Pixels {
     let pixels = Pixels::new();

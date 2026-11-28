@@ -65,6 +65,7 @@ mod tests;
 pub(crate) use built::Built;
 #[cfg(test)]
 pub(crate) use built::Shared;
+pub(crate) use built::el_has_pixels;
 pub(crate) use built::has_focused_input;
 pub(crate) use reads::Reads;
 pub(crate) use reads::Replayed;
@@ -128,6 +129,52 @@ impl MemoCache {
         self.entries.clear();
         self.flattened.clear();
         self.present_len = 0;
+    }
+
+    pub(crate) fn has_pixels(&self) -> bool {
+        self.entries.values().any(|e| e.built.has_pixels)
+    }
+
+    pub(crate) fn rest(&mut self) {
+        fn shrink_vec<T>(v: &mut Vec<T>, floor: usize) {
+            let cap = (v.len().saturating_mul(2)).max(floor);
+            if v.capacity() > cap {
+                v.shrink_to(cap);
+            }
+        }
+        fn shrink_map<K: Eq + std::hash::Hash, V, S: std::hash::BuildHasher>(
+            m: &mut std::collections::HashMap<K, V, S>,
+            floor: usize,
+        ) {
+            let cap = (m.len().saturating_mul(2)).max(floor);
+            if m.capacity() > cap {
+                m.shrink_to(cap);
+            }
+        }
+        shrink_map(&mut self.entries, 64);
+        shrink_map(&mut self.flattened, 64);
+        self.pending_scratch.clear();
+        self.reused_scratch.clear();
+        self.skip_scratch.clear();
+        self.split_scratch.clear();
+        self.taken_paths_scratch.clear();
+        self.path_scratch.clear();
+        self.id_scratch.clear();
+        self.pure_counts.clear();
+        self.nested_scratch.clear();
+        shrink_vec(&mut self.pending_scratch, 32);
+        shrink_vec(&mut self.reused_scratch, 32);
+        shrink_vec(&mut self.skip_scratch, 32);
+        shrink_vec(&mut self.split_scratch, 64);
+        shrink_vec(&mut self.taken_paths_scratch, 32);
+        if self.path_scratch.capacity() > 256 {
+            self.path_scratch.shrink_to(256);
+        }
+        if self.id_scratch.capacity() > 256 {
+            self.id_scratch.shrink_to(256);
+        }
+        shrink_map(&mut self.pure_counts, 32);
+        shrink_vec(&mut self.nested_scratch, 32);
     }
 
     /// No memos, counting passes on from this cache's, for a build that must start from scratch.
@@ -222,6 +269,7 @@ pub(crate) fn enter(
     env: crate::Env,
     accent: crate::SystemAccent,
     reduced_motion: bool,
+    reduced_transparency: bool,
     languages_gen: u64,
     srgb_blend: bool,
     chrome: [u32; 5],
@@ -241,6 +289,7 @@ pub(crate) fn enter(
         env.system_dark,
         scale.to_bits(),
         reduced_motion,
+        reduced_transparency,
         languages_gen,
         accent,
         crate::platform::scroll_bars::scoped(),
@@ -302,6 +351,7 @@ pub(crate) fn enter_partial(
     env: crate::Env,
     accent: crate::SystemAccent,
     reduced_motion: bool,
+    reduced_transparency: bool,
     languages_gen: u64,
     srgb_blend: bool,
     chrome: [u32; 5],
@@ -321,7 +371,7 @@ pub(crate) fn enter_partial(
         keep_nested_rows(&mut cache, &mut nested, next);
     }
     cache.nested_scratch = nested;
-    enter(cache, env, accent, reduced_motion, languages_gen, srgb_blend, chrome, caret, layout)
+    enter(cache, env, accent, reduced_motion, reduced_transparency, languages_gen, srgb_blend, chrome, caret, layout)
 }
 
 /// Ends the view build [`enter`] began; dropped without [`Guard::finish`] (a panicking view),

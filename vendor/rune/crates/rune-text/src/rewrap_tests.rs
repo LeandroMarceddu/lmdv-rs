@@ -85,6 +85,8 @@ fn cases() -> Vec<Case> {
                 fg: None,
                 ring: None,
                 radius: None,
+                pad_x: None,
+                margin_x: None,
                 bare: None,
             }
         })

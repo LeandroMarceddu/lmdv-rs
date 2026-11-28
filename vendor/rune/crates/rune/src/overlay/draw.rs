@@ -3,8 +3,8 @@
 
 use super::*;
 use crate::frame::host_step::{
-    self, Acquire, FrameHost, Gate, PostStepCheck, ReacquireReason, RenderPrep, StepInfo, draw_ui,
-    prepare_gpu_resources,
+    self, Acquire, FrameHost, Gate, PostStepCheck, ReacquireReason, RenderPrep, StepInfo, create_frame_encoder,
+    draw_ui, prepare_gpu_resources,
 };
 
 struct PreparedOverlayFrame {
@@ -52,6 +52,10 @@ impl OverlayFrame<'_> {
         );
         #[cfg(target_os = "windows")]
         live.slot.reconfigured(ok);
+        #[cfg(target_os = "macos")]
+        if ok {
+            let _ = live.hidden_drawable.step(crate::window::HiddenDrawableEvent::Configured);
+        }
         ok
     }
 }
@@ -61,13 +65,24 @@ impl FrameHost for OverlayFrame<'_> {
     type Prepared = PreparedOverlayFrame;
 
     fn gate(&mut self) -> Gate {
+        if self.core.poll_terminal_gpu_loss(self.app) {
+            return Gate::Skip;
+        }
         let timer = !self.core.quiet.step(frame::QuietEvent::FrameStarts).is_empty();
+        self.core.poll_pending_layer(self.app);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         if let Some(Live { backing: Backing::Layer(layer), .. }) = self.core.surface.live_mut() {
             let changes = layer.dispatch();
-            if changes.closed {
-                let reason = layer.close_reason().map(str::to_owned);
-                self.core.layer_closed(self.app, reason.as_deref());
+            if let Some(kind) = changes.closed {
+                match kind {
+                    crate::platform::layer_shell_machine::readiness::CloseKind::Closed => {
+                        let reason = layer.close_reason().map(str::to_owned);
+                        self.core.layer_closed(self.app, reason.as_deref());
+                    }
+                    crate::platform::layer_shell_machine::readiness::CloseKind::OutputGone => {
+                        self.core.layer_output_gone(self.app);
+                    }
+                }
                 return Gate::Skip;
             }
             for input in changes.input {
@@ -183,9 +198,19 @@ impl FrameHost for OverlayFrame<'_> {
         {
             self.presume = !self.prewarm && self.core.prime.presumes();
         }
+        let urgent = self.app.rt_mut().take_urgent_frame();
         let (Some(live), Some(renderer)) = (self.core.surface.live_mut(), self.core.renderer.as_ref()) else {
             return Gate::Skip;
         };
+        #[cfg(target_os = "macos")]
+        if urgent
+            && !self.prewarm
+            && let Some(pacing) = live.pacing.as_mut()
+        {
+            pacing.admit_once();
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = urgent;
         // Only a timer woke the resting overlay: build the frame first, and take neither a
         // drawable nor a display tick when it draws what's on screen. The link, stopped, would
         // draw it at once anyway (`defers_start`).
@@ -238,9 +263,13 @@ impl FrameHost for OverlayFrame<'_> {
     fn step_quiet(&mut self) -> StepInfo {
         let now = crate::time::now();
         self.now = Some(now);
-        #[cfg(any(target_os = "macos", all(target_os = "windows", feature = "windows-system-material")))]
+        #[cfg(target_os = "macos")]
         if let Some(live) = self.core.surface.live() {
             self.app.rt_mut().paint.set_native_materials(live.materials.native());
+        }
+        #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+        if let Some(live) = self.core.surface.live() {
+            self.app.rt_mut().paint.set_windows_acrylic_materials(live.materials.native());
         }
         let (animating, dt) = self.app.clock_advance(&mut self.core.clock, now, false);
         StepInfo { runtime_animating: animating, animating, dt, update_ms: 0.0, presents_at: None }
@@ -290,6 +319,11 @@ impl FrameHost for OverlayFrame<'_> {
     }
 
     fn acquire(&mut self) -> Acquire<wgpu::SurfaceTexture> {
+        if self.core.poll_terminal_gpu_loss(self.app) {
+            return Acquire::Missed(crate::window::Missed::Unconfigured);
+        }
+        #[cfg(target_os = "macos")]
+        self.core.restore_hidden_drawable();
         let (Some(live), Some(gpu)) = (self.core.surface.live(), self.core.gpu.as_ref()) else {
             return Acquire::Missed(crate::window::Missed::Unconfigured);
         };
@@ -305,7 +339,10 @@ impl FrameHost for OverlayFrame<'_> {
             &mut self.core.meter,
             !self.read_occlusion,
         ) {
-            Ok(frame) => Acquire::Ready(frame),
+            Ok(frame) => {
+                self.core.note_frame_texture_acquired();
+                Acquire::Ready(frame)
+            }
             Err(missed) => Acquire::Missed(missed),
         }
     }
@@ -317,15 +354,20 @@ impl FrameHost for OverlayFrame<'_> {
         let frame_time = now;
         #[cfg(target_os = "macos")]
         let frame_time = self.target.unwrap_or(now);
-        #[cfg(any(target_os = "macos", all(target_os = "windows", feature = "windows-system-material")))]
+        #[cfg(target_os = "macos")]
         if let Some(live) = self.core.surface.live() {
             self.app.rt_mut().paint.set_native_materials(live.materials.native());
+        }
+        #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+        if let Some(live) = self.core.surface.live() {
+            self.app.rt_mut().paint.set_windows_acrylic_materials(live.materials.native());
         }
         let (animating, dt) = if !self.prewarm && frame::rests(self.app, self.core.runtime_idle, self.core.dirty) {
             frame::rest(self.app, &mut self.core.clock, frame_time)
         } else {
             step(self.app, &mut self.core.clock, frame_time, self.prewarm)
         };
+        let _ = self.app.rt_mut().take_urgent_frame();
         #[cfg(target_os = "macos")]
         let presents_at = self.target;
         #[cfg(not(target_os = "macos"))]
@@ -334,6 +376,9 @@ impl FrameHost for OverlayFrame<'_> {
     }
 
     fn post_step_check(&mut self, _info: &mut StepInfo) -> PostStepCheck {
+        if self.core.poll_terminal_gpu_loss(self.app) {
+            return PostStepCheck::Keep;
+        }
         if !self.content_resized
             && let Some(next) = self.core.take_live_fit_resize(self.app.rt_mut())
         {
@@ -365,7 +410,7 @@ impl FrameHost for OverlayFrame<'_> {
             self.materials_checked = true;
             let device_type = self.core.gpu.as_ref().map(|gpu| gpu.adapter.get_info().device_type);
             let window_backdrop = self.app.rt().window_backdrop();
-            let found = !self.app.rt().paint.materials().is_empty();
+            let found = !self.app.rt().paint.windows_material_draws().is_empty();
             let high_contrast = self.app.rt().system_contrast().is_some();
             if let Some(live) = self.core.surface.live_mut()
                 && (found || live.materials.native())
@@ -398,15 +443,28 @@ impl FrameHost for OverlayFrame<'_> {
     }
 
     fn prepare_reacquire(&mut self, reason: ReacquireReason, info: &mut StepInfo) -> bool {
+        if self.core.poll_terminal_gpu_loss(self.app) {
+            return false;
+        }
         match reason {
             #[cfg(any(test, target_os = "macos", all(target_os = "windows", feature = "windows-system-material")))]
             ReacquireReason::NativeMaterials => {
                 // Rebuild with the updated native-materials state into a replacement drawable.
-                #[cfg(any(target_os = "macos", all(target_os = "windows", feature = "windows-system-material")))]
-                let native = self.core.surface.live().is_some_and(|l| l.materials.native());
-                #[cfg(not(any(target_os = "macos", all(target_os = "windows", feature = "windows-system-material"))))]
-                let native = true;
-                self.app.rt_mut().paint.set_native_materials(native);
+                #[cfg(target_os = "macos")]
+                {
+                    let native = self.core.surface.live().is_some_and(|l| l.materials.native());
+                    self.app.rt_mut().paint.set_native_materials(native);
+                }
+                #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
+                {
+                    let native = self.core.surface.live().is_some_and(|l| l.materials.native());
+                    self.app.rt_mut().paint.set_windows_acrylic_materials(native);
+                }
+                #[cfg(not(any(
+                    target_os = "macos",
+                    all(target_os = "windows", feature = "windows-system-material")
+                )))]
+                self.app.rt_mut().paint.set_native_materials(true);
                 let more = self.app.frame(0.0);
                 info.runtime_animating |= more;
                 info.animating |= more;
@@ -414,7 +472,15 @@ impl FrameHost for OverlayFrame<'_> {
             }
             ReacquireReason::Reblend => {
                 let _ = info;
-                self.reblend_surface()
+                let ok = self.reblend_surface();
+                if !ok && self.core.is_terminal_gpu_policy() {
+                    self.core.latch_terminal_loss_latch(
+                        self.app,
+                        crate::render::loss_latch::GpuFailureKind::SurfaceFailed,
+                        "its GPU surface refused blend reconfiguration",
+                    );
+                }
+                ok
             }
             ReacquireReason::ContentResize => {
                 let _ = info;
@@ -423,6 +489,10 @@ impl FrameHost for OverlayFrame<'_> {
                     .is_none_or(|next| self.core.apply_content_resize_gpu(self.app, self.event_loop, next))
             }
         }
+    }
+
+    fn on_drawable_dropped(&mut self) {
+        self.core.note_frame_texture_released(self.app);
     }
 
     fn on_missed(&mut self, missed: crate::window::Missed, stepped: bool) {
@@ -462,7 +532,7 @@ impl FrameHost for OverlayFrame<'_> {
         });
         let size = (live.config.width, live.config.height);
         prepare_gpu_resources(renderer, gpu, self.app.rt_mut(), size, true);
-        let encoder = gpu.device.create_command_encoder(&Default::default());
+        let encoder = create_frame_encoder(gpu);
         RenderPrep::Ready(PreparedOverlayFrame { frame: drawable, view, encoder, target_format, size })
     }
 
@@ -492,27 +562,84 @@ impl FrameHost for OverlayFrame<'_> {
         if let Some(alpha) = &live.alpha {
             alpha.draw(&mut prepared.encoder, &prepared.view);
         }
+        if self.core.poll_device_for_terminal_loss(self.app) {
+            return false;
+        }
         comp_animating
     }
 
     fn submit_and_present(&mut self, prepared: PreparedOverlayFrame, _info: &StepInfo) -> Instant {
+        let PreparedOverlayFrame { frame, view, encoder, .. } = prepared;
+        if self.core.poll_device_for_terminal_loss(self.app) || self.core.gpu.as_ref().is_none_or(|gpu| gpu.is_lost()) {
+            drop((encoder, view, frame));
+            self.core.note_frame_texture_released(self.app);
+            return crate::time::now();
+        }
+        let terminal = self.core.is_terminal_gpu_policy();
+        drop(view);
+        // Submit synchronously first so any submit-time device loss is detected BEFORE
+        // `pre_present_notify()`, `layer.request_frame()`, or `queue.present()`, and so `frame`
+        // is dropped strictly before any surface teardown.
+        let submitted_on_worker = {
+            let (Some(live), Some(renderer), Some(gpu)) =
+                (self.core.surface.live_mut(), self.core.renderer.as_mut(), self.core.gpu.as_ref())
+            else {
+                drop((encoder, frame));
+                self.core.note_frame_texture_released(self.app);
+                return crate::time::now();
+            };
+            frame::try_submit_on_macos_worker(
+                live,
+                renderer,
+                gpu,
+                self.app.rt(),
+                encoder,
+                frame,
+                self.prewarm,
+                terminal,
+                &mut self.core.on_materials,
+            )
+        };
+        let (encoder, frame) = match submitted_on_worker {
+            Ok(()) => {
+                self.core.note_frame_texture_released(self.app);
+                frame::record_presented(self.prewarm);
+                crate::render::gpu_events::presented();
+                return crate::time::now();
+            }
+            Err(back) => back,
+        };
+        {
+            let (Some(renderer), Some(gpu)) = (self.core.renderer.as_mut(), self.core.gpu.as_ref()) else {
+                drop((encoder, frame));
+                self.core.note_frame_texture_released(self.app);
+                return crate::time::now();
+            };
+            renderer.submit(&gpu.queue, encoder);
+        }
+        let terminal_lost = self.core.poll_device_for_terminal_loss(self.app);
+        let gpu_lost = self.core.gpu.as_ref().is_none_or(|gpu| gpu.is_lost());
+        if !crate::render::loss_latch::should_present_after_submit(gpu_lost, terminal_lost) {
+            drop(frame);
+            self.core.note_frame_texture_released(self.app);
+            return crate::time::now();
+        }
         let (Some(live), Some(renderer), Some(gpu)) =
             (self.core.surface.live_mut(), self.core.renderer.as_mut(), self.core.gpu.as_ref())
         else {
+            drop(frame);
+            self.core.note_frame_texture_released(self.app);
             return crate::time::now();
         };
-        let materials_ok = frame::submit_and_present(
+        let materials_ok = frame::present_submitted(
             live,
-            renderer,
             gpu,
             self.app.rt(),
             self.core.window_backdrop,
-            prepared.encoder,
-            prepared.frame,
+            frame,
             self.prewarm,
             &mut self.core.on_materials,
         );
-        // The next frame waits for the room this one took (`slot`).
         #[cfg(target_os = "windows")]
         live.slot.presented();
         frame::record_presented(self.prewarm);
@@ -520,9 +647,14 @@ impl FrameHost for OverlayFrame<'_> {
         if !self.prewarm && !gpu.is_lost() {
             renderer.warm_effects(&gpu.device);
         }
+        // `frame` was consumed by `queue.present`: release texture tracking before post-present poll.
+        self.core.note_frame_texture_released(self.app);
+        if terminal {
+            let _ = self.core.poll_device_for_terminal_loss(self.app);
+        }
         #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
         if !materials_ok {
-            self.app.rt_mut().paint.set_native_materials(false);
+            self.app.rt_mut().paint.set_windows_acrylic_materials(false);
             self.core.dirty = true;
         }
         #[cfg(not(all(target_os = "windows", feature = "windows-system-material")))]
@@ -535,6 +667,10 @@ impl FrameHost for OverlayFrame<'_> {
     }
 
     fn settle(&mut self, submitted: Instant, info: &StepInfo) {
+        if self.core.poll_terminal_gpu_loss(self.app) {
+            self.more = false;
+            return;
+        }
         // If the device was lost during a layer surface's own present, Mesa never committed the
         // buffer or the `wl_surface.frame` callback we just requested, so take the surface down
         // instead of waiting on a callback that will never arrive.
@@ -636,18 +772,28 @@ impl OverlayCore {
     /// A layer or XWayland surface kept while hidden (prewarmed, not shown yet) still drains its
     /// connection so nothing queues for the first show.
     fn drain_hidden(&mut self, app: &mut dyn OverlayApp) {
+        self.poll_pending_layer(app);
         #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
         {
             let closed = match self.surface.live_mut().map(|l| &mut l.backing) {
-                Some(Backing::Layer(layer)) => layer.drain().then(|| layer.close_reason().map(str::to_owned)),
+                Some(Backing::Layer(layer)) => {
+                    layer.drain().map(|kind| (kind, layer.close_reason().map(str::to_owned)))
+                }
                 Some(Backing::Xwayland(surface)) => {
                     surface.drain();
                     None
                 }
                 _ => None,
             };
-            if let Some(reason) = closed {
-                self.layer_closed(app, reason.as_deref());
+            if let Some((kind, reason)) = closed {
+                match kind {
+                    crate::platform::layer_shell_machine::readiness::CloseKind::Closed => {
+                        self.layer_closed(app, reason.as_deref());
+                    }
+                    crate::platform::layer_shell_machine::readiness::CloseKind::OutputGone => {
+                        self.layer_output_gone(app);
+                    }
+                }
             }
         }
         crate::haptics::flush_live(app.rt_mut(), false);
@@ -711,28 +857,46 @@ impl OverlayCore {
                     return;
                 }
                 app.rt_mut().key(key);
+                self.dirty = true;
+                self.dispatch_immediate_keyboard(app);
+                return;
             }
             Input::KeyRepeat(key) => {
                 if matches!(key.key, crate::Key::Media(_)) && !app.rt().media_keys() {
                     return;
                 }
                 app.rt_mut().repeat_key(key);
+                self.dirty = true;
+                self.dispatch_immediate_keyboard(app);
+                return;
             }
             Input::KeyUp(key) => {
-                self.dirty |= app.key_up(key);
+                if app.key_up(key) {
+                    self.dirty = true;
+                    self.dispatch_immediate_keyboard(app);
+                }
                 return;
             }
             Input::Physical(event, fallback) => {
                 let keep = matches!(event, crate::PhysicalInput::Key { pressed: true, .. }) || app.rt().wants_key_up();
                 let media_keys = app.rt().media_keys();
-                self.dirty |= app.physical_with_fallback(
+                if app.physical_with_fallback(
                     event,
                     fallback.filter(|ev| keep && (media_keys || !matches!(ev.key, crate::Key::Media(_)))),
-                );
+                ) {
+                    self.dirty = true;
+                    self.dispatch_immediate_keyboard(app);
+                }
                 return;
             }
             Input::Ime(ime) if self.options.keys.takes_keys() => {
+                let is_commit = matches!(ime, crate::Ime::Commit(_));
                 deliver_layer_ime(app.rt_mut(), &mut self.ime, ime);
+                self.dirty = true;
+                if is_commit {
+                    self.dispatch_immediate_keyboard(app);
+                }
+                return;
             }
             Input::Ime(_) => return,
         }
@@ -752,7 +916,7 @@ impl OverlayCore {
 
     /// Syncs OS IME allowance and cursor area for overlays that accept on-demand keyboard focus.
     /// Returns true when the sync queued an immediate IME state event for the runtime.
-    fn sync_ime(&mut self, app: &mut dyn OverlayApp) -> bool {
+    pub(super) fn sync_ime(&mut self, app: &mut dyn OverlayApp) -> bool {
         if !self.options.keys.takes_keys() {
             return false;
         }
@@ -928,6 +1092,9 @@ impl OverlayCore {
 
     /// Warm glyphs/pipelines and, on macOS, the retained alpha-zero host's actual surface.
     pub(super) fn warm(&mut self, app: &mut dyn OverlayApp) {
+        if self.poll_terminal_gpu_loss(app) {
+            return;
+        }
         app.frame(0.0);
         app.rt_mut().settle_all();
         app.frame(0.0);
@@ -936,6 +1103,9 @@ impl OverlayCore {
     }
 
     pub(super) fn warm_frame(&mut self, app: &mut dyn OverlayApp) {
+        if self.poll_terminal_gpu_loss(app) {
+            return;
+        }
         self.publish_regions(app.rt());
         #[cfg(target_os = "macos")]
         if let Some(panel) = &self.panel {
@@ -945,6 +1115,7 @@ impl OverlayCore {
             if let Some(gpu) = &self.gpu {
                 rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).ok();
             }
+            let _ = self.poll_terminal_gpu_loss(app);
             return;
         }
         let Some(live) = self.surface.live() else { return };
@@ -952,35 +1123,49 @@ impl OverlayCore {
     }
 
     pub(super) fn warm_offscreen(&mut self, app: &mut dyn OverlayApp, size: (u32, u32)) {
-        let (Some(renderer), Some(gpu)) = (&mut self.renderer, &self.gpu) else { return };
-        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("overlay prewarm"),
-            size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: renderer.format(),
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-        let view = target.create_view(&Default::default());
-        let mut enc = gpu.device.create_command_encoder(&Default::default());
-        render_frame(
-            app,
-            OverlayRenderArgs {
-                device: &gpu.device,
-                queue: &gpu.queue,
-                encoder: &mut enc,
-                target: &view,
+        if self.poll_device_for_terminal_loss(app) {
+            return;
+        }
+        let (enc, _target) = {
+            let (Some(renderer), Some(gpu)) = (&mut self.renderer, &self.gpu) else { return };
+            let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("overlay prewarm"),
+                size: wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
                 format: renderer.format(),
-                size,
-                dt: 0.0,
-                update_ms: 0.0,
-                ui: renderer,
-            },
-        );
-        renderer.submit(&gpu.queue, enc);
-        rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).ok();
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&Default::default());
+            let mut enc = gpu.device.create_command_encoder(&Default::default());
+            render_frame(
+                app,
+                OverlayRenderArgs {
+                    device: &gpu.device,
+                    queue: &gpu.queue,
+                    encoder: &mut enc,
+                    target: &view,
+                    format: renderer.format(),
+                    size,
+                    dt: 0.0,
+                    update_ms: 0.0,
+                    ui: renderer,
+                },
+            );
+            (enc, target)
+        };
+        // Pre-submit poll so a validation/destroy error inside `render_compositor` aborts before
+        // `renderer.submit`, then post-submit wait + poll catches async submission failure.
+        if self.poll_device_for_terminal_loss(app) {
+            return;
+        }
+        if let (Some(renderer), Some(gpu)) = (&mut self.renderer, &self.gpu) {
+            renderer.submit(&gpu.queue, enc);
+            rune_gpu::health::poll(&gpu.device, wgpu::PollType::wait_indefinitely()).ok();
+        }
+        let _ = self.poll_terminal_gpu_loss(app);
     }
 }
 

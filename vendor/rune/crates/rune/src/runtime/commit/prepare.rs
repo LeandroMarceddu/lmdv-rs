@@ -55,6 +55,7 @@ impl<S: 'static> Runtime<S> {
 
 impl RuntimeCore {
     pub(super) fn prepare_text_with(&mut self, app: &dyn ViewDriver, size: (f32, f32)) -> usize {
+        let _warm = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::TextWarm);
         let before = self.text.layout_keys();
         let (mut nodes, mut spare_nodes, mut layout) = (Vec::new(), Vec::new(), LayoutEngine::new());
         let (mut node_index, mut path_ids, mut memo) =
@@ -75,6 +76,7 @@ impl RuntimeCore {
             titlebar_inset: self.host.titlebar_inset / self.host.zoom.k,
             chrome: self.host.titlebar.insets.zoomed(self.host.zoom.k),
             safe_area: self.safe_area(),
+            keyboard_inset: self.keyboard_inset(),
             maximized: self.host.maximized,
             full_screen: self.host.full_screen,
             window_backdrop: self.host.window_backdrop,
@@ -84,6 +86,8 @@ impl RuntimeCore {
             system_accent: self.host.system_accent,
             system_contrast: self.host.system_contrast,
             system_increased_contrast: self.host.system_increased_contrast,
+            system_text_scale: self.host.system_text_scale,
+            system_reduced_transparency: self.host.system_reduced_transparency,
             system_scroll_bars: self.host.scroll_bars.state,
             system_languages: self.host.system_languages.clone(),
             languages_gen: self.host.languages_gen,
@@ -96,6 +100,8 @@ impl RuntimeCore {
             caret_read: false,
             wm_state: self.host.wm_state,
             wm_state_read: false,
+            primary_pointer: self.host.primary_pointer,
+            primary_pointer_read: false,
             // The rects the window last laid out, as its next frame reads them, so a view that
             // measures against them (a header fitting its title) measures here too.
             layout_seen: self.commit.layout_seen.rects.clone(),

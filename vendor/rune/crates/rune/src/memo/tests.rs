@@ -77,6 +77,7 @@ fn a_view_panicking_inside_a_memo_leaves_no_scope_for_the_next_build() {
             Env::new(true, 1.0),
             crate::SystemAccent::DEFAULT,
             false,
+            false,
             0,
             true,
             [0; 5],

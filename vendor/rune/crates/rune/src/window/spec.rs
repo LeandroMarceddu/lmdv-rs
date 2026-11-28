@@ -107,6 +107,74 @@ impl From<ResizeEdge> for winit::window::ResizeDirection {
     }
 }
 
+/// Which edge or corner of a window stays fixed when Rune resizes it
+/// ([`App::fit_content_height`](crate::App::fit_content_height),
+/// [`Tx::resize_window`](crate::Tx::resize_window),
+/// [`Tx::resize_window_instant`](crate::Tx::resize_window_instant),
+/// [`WindowHandle::resize`](crate::WindowHandle::resize),
+/// [`WindowHandle::resize_instant`](crate::WindowHandle::resize_instant)).
+///
+/// Defaults to [`ResizeAnchor::TopLeft`], keeping the top-left corner fixed as the window grows
+/// rightward and downward. Use [`ResizeAnchor::Bottom`] (or [`ResizeAnchor::BottomLeft`] /
+/// [`ResizeAnchor::BottomRight`]) for a bottom-anchored panel whose height grows upward.
+///
+/// Honoured on macOS (including spring-animated resizes), Windows (in one atomic `SetWindowPos`),
+/// X11, and headless virtual desktops. Ignored on Wayland (where compositors own window positions)
+/// and web.
+///
+/// ```no_run
+/// use rune::{AppSpec, ResizeAnchor, WindowSpec, el};
+///
+/// let spec = WindowSpec::new("launcher", AppSpec::new("Launcher", (600.0, 400.0), || (), |_, _| el()))
+///     .fit_content_height()
+///     .resize_anchor(ResizeAnchor::Bottom);
+/// let _ = spec;
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ResizeAnchor {
+    /// Keep the top and left edges fixed (default).
+    #[default]
+    TopLeft,
+    /// Keep the top edge fixed and preserve the horizontal centre when width changes.
+    Top,
+    /// Keep the top and right edges fixed.
+    TopRight,
+    /// Keep the left edge fixed and preserve the vertical centre when height changes.
+    Left,
+    /// Keep the centre fixed, growing and shrinking symmetrically.
+    Center,
+    /// Keep the right edge fixed and preserve the vertical centre when height changes.
+    Right,
+    /// Keep the bottom and left edges fixed.
+    BottomLeft,
+    /// Keep the bottom edge fixed and preserve the horizontal centre when width changes.
+    Bottom,
+    /// Keep the bottom and right edges fixed.
+    BottomRight,
+}
+
+impl ResizeAnchor {
+    /// Whether the right edge stays pinned when width changes.
+    pub(crate) const fn pins_right(self) -> bool {
+        matches!(self, Self::TopRight | Self::Right | Self::BottomRight)
+    }
+
+    /// Whether the horizontal centre stays pinned when width changes.
+    pub(crate) const fn centers_x(self) -> bool {
+        matches!(self, Self::Top | Self::Center | Self::Bottom)
+    }
+
+    /// Whether the bottom edge stays pinned when height changes.
+    pub(crate) const fn pins_bottom(self) -> bool {
+        matches!(self, Self::BottomLeft | Self::Bottom | Self::BottomRight)
+    }
+
+    /// Whether the vertical centre stays pinned when height changes.
+    pub(crate) const fn centers_y(self) -> bool {
+        matches!(self, Self::Left | Self::Center | Self::Right)
+    }
+}
+
 /// Process-level settings applied once, before constructing the native event loop.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RunOptions {
@@ -167,6 +235,18 @@ impl Display {
         }
         (self.position, self.size)
     }
+
+    /// Whether this display can represent wide-gamut colours (Display P3).
+    ///
+    /// On macOS, queries `NSScreen.canRepresentDisplayGamut(.p3)` for this display; returns
+    /// `false` on other platforms, off the main thread, or for headless virtual displays.
+    pub fn wide_color(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        if let Some(crate::NativeDisplayId::MacOS(id)) = self.native_id() {
+            return crate::platform::macos::display_wide_color(id);
+        }
+        false
+    }
 }
 
 pub(crate) fn native_bounds_for(
@@ -198,7 +278,10 @@ pub struct WindowOptions {
     pub click_through: bool,
     pub always_on_top: bool,
     pub visible: bool,
-    /// Physical desktop coordinates, not points. Use a display's position unchanged.
+    /// Physical desktop coordinates, not points. Use a display's position unchanged. On macOS,
+    /// resolved against connected displays' backing scales; for unambiguous mixed-scale placement
+    /// when physical display rects overlap, prefer [`App::logical_position`](crate::App::logical_position)
+    /// or [`App::window_placement`](crate::App::window_placement).
     pub position: Option<(i32, i32)>,
     /// Physical content size; overrides AppSpec's logical size when set.
     pub physical_size: Option<(u32, u32)>,
@@ -856,6 +939,10 @@ impl<S: 'static> WindowSpec<S> {
         srgb_blend(enabled: bool);
         /// This window's font smoothing (`App::font_smoothing`).
         font_smoothing(mode: crate::FontSmoothing);
+        /// Whether whole mouse-wheel notches glide rather than jump (`App::wheel_glide`).
+        wheel_glide(on: bool);
+        /// Window points scrolled per mouse-wheel line/notch (`App::wheel_line`).
+        wheel_line(points: f32);
         /// Maximum number of native `El::system_material` views this window may host at once
         /// (default [`crate::MAX_NATIVE_MATERIALS`], clamped to 64), like
         /// [`App::max_native_materials`].
@@ -874,6 +961,17 @@ impl<S: 'static> WindowSpec<S> {
         reveal_fps(fps: f32);
         /// Size this window's height to its content, like `App::fit_content_height`.
         fit_content_height();
+        /// Which edge or corner stays fixed when Rune resizes this window, like [`App::resize_anchor`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, ResizeAnchor, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("launcher", AppSpec::new("Launcher", (600.0, 400.0), || (), |_, _| el()))
+        ///     .fit_content_height()
+        ///     .resize_anchor(ResizeAnchor::Bottom);
+        /// let _ = spec;
+        /// ```
+        resize_anchor(anchor: crate::ResizeAnchor);
         /// Ask a tiling window manager to float this window when it opens, like `App::float_on_open`.
         float_on_open();
         /// Open this window without taking focus from the window that has it, such as a window a
@@ -955,6 +1053,17 @@ impl<S: 'static> WindowSpec<S> {
         tab_visits_controls(on: bool);
         /// Release this window's GPU device and renderer when it closes, like `App::release_gpu_when_closed`.
         release_gpu_when_closed();
+        /// Sets how this window responds to GPU device loss or uncaptured errors, like
+        /// [`App::gpu_loss_policy`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, GpuLossPolicy, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("main", AppSpec::new("Main", (800.0, 600.0), || (), |_, _| el()))
+        ///     .gpu_loss_policy(GpuLossPolicy::Terminal);
+        /// let _ = spec;
+        /// ```
+        gpu_loss_policy(policy: crate::GpuLossPolicy);
         /// Configure CPU-first startup and handover for this window, like [`App::cpu_first`].
         ///
         /// ```no_run
@@ -965,6 +1074,17 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         cpu_first(mode: crate::CpuFirst);
+        /// Configure native keyboard dispatch timing for this window, like
+        /// [`App::keyboard_dispatch`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, KeyboardDispatch, WindowSpec, el};
+        ///
+        /// let spec = WindowSpec::new("transport", AppSpec::new("Transport", (800.0, 520.0), || (), |_, _| el()))
+        ///     .keyboard_dispatch(KeyboardDispatch::Immediate);
+        /// let _ = spec;
+        /// ```
+        keyboard_dispatch(mode: crate::KeyboardDispatch);
         /// Configure the Windows drag-only synchronized resize path for this window, like
         /// [`App::resize_sync`].
         ///
@@ -996,6 +1116,16 @@ impl<S: 'static> WindowSpec<S> {
         on_ime(f: fn(&mut S, &crate::Ime, &mut crate::Tx) -> bool);
         /// Fallback handler for text-field menus when native pop-ups are unavailable, like `App::on_field_menu`.
         on_field_menu(f: fn(&mut S, crate::FieldMenuRequest, &mut crate::Tx));
+        /// Fallback handler for pop-up and context menus when native pop-ups are unavailable
+        /// (such as Linux), like [`App::on_popup_menu`].
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, PopupMenuRequest, Tx, WindowSpec, el};
+        ///
+        /// let _spec = WindowSpec::new("main", AppSpec::new("Main", (480.0, 320.0), || (), |_, _| el()))
+        ///     .on_popup_menu(|_: &mut (), _req: PopupMenuRequest, _tx: &mut Tx| {});
+        /// ```
+        on_popup_menu(f: fn(&mut S, crate::PopupMenuRequest, &mut crate::Tx));
         /// Intercepts a native close request before hiding or closing this window, like
         /// [`App::on_close_request`].
         ///
@@ -1059,6 +1189,8 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         on_display_close(f: impl FnOnce() + 'static);
+        /// Runs on the UI thread when connected displays change, like [`App::on_displays`].
+        on_displays(f: impl FnMut(&crate::DisplayEvent, &[crate::Display]) + 'static);
         /// Reports each of this window's frames, like `App::on_frame_encoded`. A spec made with
         /// `WindowSpec::from_app` keeps its app's hook unless this replaces it; windows `App::window`
         /// adds have their own.
@@ -1079,6 +1211,13 @@ impl<S: 'static> WindowSpec<S> {
         on_frame_presented(f: impl FnMut(&crate::FramePresented) + 'static);
         /// Runs on the UI thread after each drawn frame of this window with its runtime, like `App::on_frame_drawn`.
         on_frame_drawn(f: impl FnMut(&crate::Runtime<S>) + 'static);
+        /// Reports each CPU wall-time frame, runtime, glyph/atlas, and text stage boundary for
+        /// this window, like [`App::on_frame_stage`].
+        on_frame_stage(f: impl FnMut(&crate::FrameStageEvent) + 'static);
+        /// Reports native key receipt on this window before routing, like [`App::on_window_key`].
+        on_window_key(f: impl FnMut(&crate::WindowKeyEvent) + 'static);
+        /// Reports native focus changes on this window, like [`App::on_window_focus`].
+        on_window_focus(f: impl FnMut(&crate::WindowFocusEvent) + 'static);
         /// Cap frame pacing (Hz) for motion no recent user input is steering in this window
         /// (`0.0`, default = uncapped display rate), like [`App::ambient_fps`].
         ///
@@ -1096,6 +1235,24 @@ impl<S: 'static> WindowSpec<S> {
         /// let _ = spec;
         /// ```
         ambient_fps(fps: f32);
+        /// Cap frame pacing (Hz) for unsteered motion while this window is visible but unfocused
+        /// (`0.0`, default = no extra unfocused cap), like [`App::unfocused_fps`].
+        ///
+        /// Keeps streaming transcripts live on a secondary display without pausing them; live
+        /// input over the unfocused window still lifts the cap immediately. Enforced on macOS
+        /// `DisplayLink` windows today.
+        ///
+        /// ```no_run
+        /// use rune::{AppSpec, WindowSpec, text};
+        ///
+        /// let _spec = WindowSpec::new(
+        ///     "chat",
+        ///     AppSpec::new("Chat", (720.0, 540.0), String::new, |s, _| text(s.as_str()).wrap()),
+        /// )
+        /// .ambient_fps(60.0)
+        /// .unfocused_fps(30.0);
+        /// ```
+        unfocused_fps(fps: f32);
         /// Cap the swap chain's frame latency on macOS (`1` = 2 drawables, `2` = 3 drawables;
         /// clamped to `1..=2`, default `2`), like [`App::frame_latency`]. Ignored on Windows,
         /// Linux, and the web.
@@ -1114,6 +1271,9 @@ impl<S: 'static> WindowSpec<S> {
         /// .frame_latency(1);
         /// ```
         frame_latency(frames: u32);
+        /// Opt into wide-color extended-range linear sRGB output on macOS (`Rgba16Float` with
+        /// `kCGColorSpaceExtendedLinearSRGB`), like [`App::wide_color`]. Off by default.
+        wide_color(enabled: bool);
         /// Keep this window's layout reads across launches, like `App::layout_seed`.
         layout_seed(seed: Option<crate::LayoutSeed>, keep: impl FnMut(crate::LayoutSeed) + 'static);
         /// Draw every frame of this window through `compositor`, like `App::compositor`.
@@ -1130,6 +1290,7 @@ impl<S: 'static> WindowSpec<S> {
     }
     pub fn options(mut self, options: WindowOptions) -> Self {
         self.options = options;
+        self.app.placement.override_from_options(&self.options);
         self.app.macos_window = MacWindowOptions::default();
         self.app.windows_window = WindowsWindowOptions::default();
         self
@@ -1137,6 +1298,7 @@ impl<S: 'static> WindowSpec<S> {
     pub fn configured_options(mut self, options: ConfiguredWindowOptions) -> Self {
         let ConfiguredWindowOptions { options, native, windows } = options;
         self.options = options;
+        self.app.placement.override_from_options(&self.options);
         self.app.macos_window = native;
         self.app.windows_window = windows;
         self
@@ -1172,6 +1334,8 @@ pub fn open_window<S: 'static>(spec: WindowSpec<S>) -> crate::WindowHandle {
     if !crate::is_headless() {
         let opened = AnyWindowSpec(Box::new(Erased { spec, handle: Some(handle.clone()), secondary: false }));
         OPENED.with(|o| o.borrow_mut().push(opened));
+        #[cfg(target_os = "android")]
+        crate::platform::android::notify_opened();
     }
     handle
 }
@@ -1290,6 +1454,11 @@ impl AnyWindowSpec {
     ) -> Option<Box<dyn crate::window::AnyHost>> {
         self.0.start(inherited, cx)
     }
+
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn into_android_page(self) -> crate::platform::android::stack::PageEntry {
+        self.0.into_android_page()
+    }
 }
 
 impl<S: 'static> From<WindowSpec<S>> for AnyWindowSpec {
@@ -1315,11 +1484,15 @@ trait ErasedWindow {
         inherited: crate::tooling::Args,
         cx: crate::window::Start<'_>,
     ) -> Option<Box<dyn crate::window::AnyHost>>;
+    #[cfg(any(target_os = "android", test))]
+    fn into_android_page(self: Box<Self>) -> crate::platform::android::stack::PageEntry;
 }
 
 struct Erased<S: 'static> {
     spec: WindowSpec<S>,
+    #[cfg_attr(all(target_arch = "wasm32", not(any(feature = "tooling", debug_assertions))), allow(dead_code))]
     handle: Option<crate::WindowHandle>,
+    #[cfg_attr(all(target_arch = "wasm32", not(any(feature = "tooling", debug_assertions))), allow(dead_code))]
     secondary: bool,
 }
 
@@ -1366,6 +1539,11 @@ impl<S: 'static> ErasedWindow for Erased<S> {
     ) -> Option<Box<dyn crate::window::AnyHost>> {
         let inherited = secondary_args(self.secondary, &self.spec.key, inherited);
         crate::window::start(self.spec, self.handle, !self.secondary, inherited, cx)
+    }
+    #[cfg(any(target_os = "android", test))]
+    fn into_android_page(self: Box<Self>) -> crate::platform::android::stack::PageEntry {
+        let Erased { spec, handle, secondary } = *self;
+        crate::platform::android::stack::PageEntry::from_spec(spec, handle, secondary)
     }
 }
 

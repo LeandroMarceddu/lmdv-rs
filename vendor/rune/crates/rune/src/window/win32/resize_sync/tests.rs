@@ -15,7 +15,7 @@ use crate::machine::{Attempt, Effects, Seq};
 use crate::render::{Gpu, Renderer};
 use crate::window::host::app::TypedWindowApp;
 use crate::window::state::Rest;
-use crate::window::win32::damage::Damage;
+use crate::window::surface::damage::Damage;
 use crate::{AppSpec, Color, Env, FrameOutcome, Runtime, col, el, text};
 
 fn eligible() -> Eligibility {
@@ -320,6 +320,7 @@ impl DragSeam for FakeSeam {
         target: &SharedDragTarget,
         copy_size: (u32, u32),
         ready_value: u64,
+        _wait_for_present: bool,
     ) -> Result<u64, String> {
         self.swap_chain_live = true;
         let (pixels, release_value) = drag.readback_via_d3d11(target, copy_size, ready_value)?;
@@ -462,7 +463,7 @@ fn render_into_ring_slot(
     target.transition_for_d3d11(&mut encoder);
     renderer.submit(&gpu.queue, encoder);
     let ready = drag.signal_after_d3d12(&gpu.queue).expect("signal ready");
-    let release = seam.present_shared(drag, target, size, ready).expect("present shared");
+    let release = seam.present_shared(drag, target, size, ready, false).expect("present shared");
     sync.note_slot_release(slot_idx, release);
 }
 
@@ -652,6 +653,7 @@ fn drag_frame_feeds_every_presented_frame_consumer_behind_seam() {
                 clock,
                 meter,
                 frame_reports,
+                observability: None,
                 rest,
                 damage,
                 trace,

@@ -168,6 +168,7 @@ impl TextSystem {
         if self.families.0 == sans && self.families.1 == mono {
             return;
         }
+        let _warm = crate::profile::TextStageScope::enter(crate::profile::TextStage::Warm);
         self.load_installed(sans);
         self.load_installed(mono);
         self.families = (sans.to_owned(), mono.to_owned());
@@ -209,7 +210,9 @@ impl TextSystem {
     /// followed them.
     #[doc(hidden)]
     pub fn families_behind(&self) -> bool {
-        CHOSEN.with_borrow(|chosen| chosen.epoch != self.chosen) || self.full_faces_behind()
+        CHOSEN.with_borrow(|chosen| chosen.epoch != self.chosen)
+            || self.full_faces_behind()
+            || self.async_fallbacks_ready()
     }
 
     /// Takes up the families and emoji family chosen since it last looked; true when either

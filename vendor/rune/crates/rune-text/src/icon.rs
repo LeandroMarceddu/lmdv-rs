@@ -8,6 +8,8 @@ pub(crate) mod anim;
 mod area;
 pub(crate) mod color;
 mod convex;
+mod dash;
+mod view_box;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,14 +17,35 @@ use swash::zeno::{Cap, Fill, Join, Point, Transform};
 
 use super::{Atlas, Rasterized};
 
-/// An SVG icon body as found in `@opencode/ui`'s catalog: elements inside a square viewBox,
-/// drawn in its element's colour. A body that names its own colours (`fill="#…"`, gradients),
-/// such as a file-type badge, draws in them instead, as full SVG (`use`, clips, gradients).
+/// An SVG icon body as found in `@opencode/ui`'s catalog, drawn in its element's colour.
+///
+/// For square `0 0 view view` fragments, set `view` and pass the inner elements in `body`. For a
+/// non-square or non-zero-origin viewBox, wrap `body` in a root `<svg viewBox="min-x min-y w h">`
+/// (or use [`Icon::svg`]): Rune fits and centres it inside the icon's square box following SVG's
+/// default `preserveAspectRatio="xMidYMid meet"`. A body that names its own colours (`fill="#…"`,
+/// gradients), such as a file-type badge, draws in them instead, as full SVG (`use`, clips,
+/// gradients).
 #[derive(Debug)]
 pub struct Icon {
     pub name: &'static str,
     pub view: f32,
     pub body: &'static str,
+}
+
+impl Icon {
+    /// An SVG icon whose `body` is a root `<svg viewBox="...">...</svg>` (square, non-square, or
+    /// with a non-zero origin). Equivalent to `Icon { name, view: 0.0, body }`.
+    pub const fn svg(name: &'static str, body: &'static str) -> Self {
+        Self { name, view: 0.0, body }
+    }
+
+    /// The resolved `[min_x, min_y, width, height]` viewBox used to map this icon into its square
+    /// box: parsed from a root `<svg viewBox="...">` in `body` when present, otherwise
+    /// `[0.0, 0.0, self.view, self.view]`. Returns `None` if the viewBox is missing, malformed,
+    /// non-positive, or exceeds the viewBox dimension cap.
+    pub fn view_box(&self) -> Option<[f32; 4]> {
+        view_box::resolve(self.body, self.view)
+    }
 }
 
 /// What draws in place of each icon: an app's alternative icon set (`set_icon_swap`).
@@ -93,9 +116,17 @@ fn attr<'a>(el: &'a str, name: &str) -> Option<&'a str> {
         let i = rest.find(name)?;
         let before = rest[..i].chars().last();
         let after = &rest[i + name.len()..];
-        if before.is_some_and(|c| c.is_whitespace()) && after.starts_with("=\"") {
-            let v = &after[2..];
-            return Some(&v[..v.find('"')?]);
+        if before.is_some_and(|c| c.is_whitespace()) {
+            let trimmed = after.trim_start();
+            if let Some(after_eq) = trimmed.strip_prefix('=') {
+                let val = after_eq.trim_start();
+                if let Some(v) = val.strip_prefix('"') {
+                    return Some(&v[..v.find('"')?]);
+                }
+                if let Some(v) = val.strip_prefix('\'') {
+                    return Some(&v[..v.find('\'')?]);
+                }
+            }
         }
         rest = &rest[i + name.len()..];
     }
@@ -231,7 +262,7 @@ struct Scope<'a> {
 }
 
 /// Paint attributes SVG passes from a group to the elements inside it.
-const INHERITED: [&str; 9] = [
+const INHERITED: [&str; 11] = [
     "fill",
     "stroke",
     "stroke-width",
@@ -241,6 +272,8 @@ const INHERITED: [&str; 9] = [
     "fill-rule",
     "fill-opacity",
     "stroke-opacity",
+    "stroke-dasharray",
+    "stroke-dashoffset",
 ];
 
 /// `icon`'s coverage at `px` × `px` device pixels, row-major, as the glyph atlas stores it.
@@ -307,14 +340,12 @@ fn paint_shape(
 /// back to the static parser.
 fn icon_coverage_at(icon: &Icon, px: u32, size: f32, origin: Point) -> Vec<u8> {
     let mut acc = vec![0u8; (px as usize).saturating_mul(px as usize)];
-    if px == 0
-        || icon.body.len() > 256 * 1024
-        || !icon.view.is_finite()
-        || icon.view <= 0.0
-        || icon.view > anim::parse::MAX_VIEW_DIM
-    {
+    if px == 0 || icon.body.len() > 256 * 1024 {
         return acc;
     }
+    let Some(vb) = icon.view_box() else {
+        return acc;
+    };
     if icon.body.contains("<animate") || icon.body.contains("<set") {
         match anim::AnimatedIcons::render_rest_coverage(icon, px, size, origin) {
             anim::RestCoverage::Rendered(cov) => return cov,
@@ -322,11 +353,11 @@ fn icon_coverage_at(icon: &Icon, px: u32, size: f32, origin: Point) -> Vec<u8> {
             anim::RestCoverage::StaticFallback => {}
         }
     }
-    let s = size / icon.view;
     // Each open group with an `opacity`: what it holds so far, and that opacity.
     let mut layers: Vec<(Vec<u8>, f32)> = Vec::new();
     let mut buf = vec![0u8; (px * px) as usize];
-    let root = Scope { ctm: Transform::scale(s, s), paints: true, group: None, layer: false };
+    let vb_diag = dash::view_box_diagonal(vb);
+    let root = Scope { ctm: view_box::transform(vb, size), paints: true, group: None, layer: false };
     let mut scopes: Vec<Scope> = Vec::new();
     let mut elements = 0usize;
     for raw in icon.body.split('>') {
@@ -408,8 +439,26 @@ fn icon_coverage_at(icon: &Icon, px: u32, size: f32, origin: Point) -> Vec<u8> {
                 _ => Join::Miter,
             };
             let miter_limit = get("stroke-miterlimit").and_then(|v| v.parse().ok()).unwrap_or(4.0);
+            let dash_array =
+                attr(el, "stroke-dasharray").and_then(|v| dash::parse_dash_array(v, vb_diag, false)).or_else(|| {
+                    scopes.iter().rev().filter_map(|sc| sc.group).find_map(|g| {
+                        attr(g, "stroke-dasharray").and_then(|v| dash::parse_dash_array(v, vb_diag, false))
+                    })
+                });
+            let dash = dash_array.filter(|arr| !arr.is_none()).map(|array| {
+                let offset = attr(el, "stroke-dashoffset")
+                    .and_then(|v| dash::parse_dash_len(v, vb_diag, true))
+                    .or_else(|| {
+                        scopes.iter().rev().filter_map(|sc| sc.group).find_map(|g| {
+                            attr(g, "stroke-dashoffset").and_then(|v| dash::parse_dash_len(v, vb_diag, true))
+                        })
+                    })
+                    .unwrap_or(0.0);
+                let path_length = attr(el, "pathLength").and_then(dash::parse_path_length);
+                dash::StrokeDashSpec { array, offset, path_length }
+            });
             // The transform scales the width with the geometry.
-            let pen = area::Pen { width: w, cap, join, miter_limit };
+            let pen = area::Pen { width: w, cap, join, miter_limit, dash };
             paint_shape(
                 &shape,
                 ctm,
@@ -528,5 +577,7 @@ fn numbers(s: &str) -> Vec<f32> {
     out
 }
 
+#[cfg(test)]
+mod dash_tests;
 #[cfg(test)]
 mod tests;

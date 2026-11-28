@@ -379,7 +379,14 @@ impl Button {
                 let mut e = e.child(text(self.label).key("label").font(font).color(ink).a11y_hidden());
                 if self.show_shortcut {
                     if let Some(sc) = self.shortcut.as_deref().map(format_shortcut).filter(|s| !s.is_empty()) {
-                        e = e.child(text(sc).key("shortcut").font(font).color(ink.alpha(ink.a * 0.6)).a11y_hidden());
+                        e = e.child(
+                            text(sc)
+                                .key("shortcut")
+                                .font(font)
+                                .color(ink.alpha(ink.a * 0.6))
+                                .dir(rune::Direction::Ltr)
+                                .a11y_hidden(),
+                        );
                     }
                 }
                 e
@@ -408,6 +415,10 @@ pub enum IconButtonVariant {
 }
 
 /// A square icon-only button: `IconButton::new(&icons::PLUS).build(&kit)`.
+///
+/// Per-[`ControlSize`] dimensions, corner radii and glyph sizes default to
+/// [`IconButtonMetrics::kit`](crate::IconButtonMetrics::kit) and can be themed via
+/// [`Kit::metrics`](crate::Kit::metrics).
 pub struct IconButton {
     icon: &'static Icon,
     variant: IconButtonVariant,
@@ -501,14 +512,8 @@ impl IconButton {
             Size::Legacy(ButtonSize::Large) => ControlSize::Large,
             Size::Control(c) => c,
         };
-        // The older sizes' radii, so Small, Regular and Large draw as they did.
-        let (side, radius, glyph) = match size {
-            ControlSize::Mini => (16.0, k.radius.sm, 12.0),
-            ControlSize::Small => (20.0, k.radius.sm, 16.0),
-            ControlSize::Regular => (24.0, k.radius.md, 16.0),
-            ControlSize::Large => (28.0, k.radius.md, 16.0),
-            ControlSize::ExtraLarge => (36.0, k.radius.lg, 18.0),
-        };
+        let m = k.icon_button_metrics(size);
+        let (side, radius, glyph) = (m.size, m.radius, m.icon);
         let mut s = match self.variant {
             IconButtonVariant::Neutral => skin(k, ButtonVariant::Neutral),
             IconButtonVariant::Contrast | IconButtonVariant::Submit => {

@@ -528,7 +528,7 @@
 - Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
 - UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
-- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 35 open OIs (OI-199 accepted: post-close RSS stays resident). v0.11.0.
+- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 35 open OIs (OI-199 resolved by the new Rune pin). v0.11.0.
 
 ## Rune f4ec14e — ported (v0.11.0)
 
@@ -549,6 +549,28 @@
   `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on a
   pristine `f4ec14e`; it is outside the workspace gate.
 - Version 0.11.0; release notes in `docs/releases/v0.11.0.md`.
+
+## Rune af6b1fdd — memory fixes and second port (unreleased)
+
+- Pin moved from `f4ec14e` to `af6b1fdd` (230 commits). The root still repeats
+  eight `[patch.crates-io]` entries; no new vendor patch entries were needed.
+- Upstream fixed the reported retention: #2396 drops last-commit text layouts
+  and compacts scene, paint, memo, node and a11y state at rest; #2403 makes
+  table-cell layouts uncached and shrinks per-node paint state; #2407 calls
+  `malloc_trim(0)` off-thread at rest on Linux/glibc (opt-outs:
+  `App::trim_heap_at_rest(false)` and `RUNE_MALLOC_TRIM=0`).
+- RSS verified on `developer-guide.md`: Wayland ~594 MB -> ~225 MB after rest;
+  X11 ~625 MB -> ~258 MB. A fresh simple-file app is ~220 MB, so the large
+  document returns to the normal baseline. The ~10 s idle delay is accepted;
+  no app-side trim exists in the tree (the experiment was reverted).
+- No patch was retired. 0004 and 0005 apply unchanged; 0001 and 0003 were
+  re-ported (~4-7 h total). New traps handled: `IMAGE_BOX` moved to `1 << 58`
+  because upstream took `1 << 59` for `PILL_BARE`, and `layout_attr_key()`
+  now includes image/rise so paragraph-key reuse cannot serve a stale layout.
+- Applying all four patches to a pristine formatted `af6b1fdd` reproduces
+  `vendor/rune` exactly; 21 patch tests and the full gate are green.
+- No app-side memory code was needed. No tag for this bump; version remains
+  0.11.0.
 
 ## Next up
 

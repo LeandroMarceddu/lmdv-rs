@@ -23,6 +23,11 @@ impl SurfaceSetupError {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn device_lost(message: impl Into<String>) -> Self {
+        Self { kind: rune_gpu::fallback::Failure::DeviceLost, message: message.into() }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn from_configure(prefix: &str, error: crate::window::ConfigureError) -> Self {
         let message = if prefix.is_empty() { error.message } else { format!("{prefix}: {}", error.message) };
         Self { kind: error.kind.into(), message }
@@ -67,6 +72,18 @@ pub(crate) fn format_window_setup_error(err: SurfaceSetupError) -> String {
     err.message
 }
 
+/// How GPU setup recovers when the initial `wgpu::Instance` has no working adapter.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) enum InstanceFallback {
+    /// Linux single-driver Vulkan widened to all installed drivers: keep `tried` so the failed
+    /// driver is skipped.
+    Widen(wgpu::Instance),
+    /// Apple native Metal backend could not initialize on this driver (for example, no
+    /// `MTLSharedEvent`): switch to wgpu's instance and pick/enumerate fresh without excluding
+    /// the same GPU name.
+    SwitchBackend(wgpu::Instance),
+}
+
 impl Gpu {
     /// Latches direct Linux Vulkan driver loading as bypassed, logs once for this switch, and
     /// returns the cached unlimited `wgpu::Instance` with all installed drivers.
@@ -77,6 +94,36 @@ impl Gpu {
             "rune: direct Vulkan driver could not draw this surface ({reason}); retrying with all installed Vulkan drivers"
         );
         Self::wgpu_instance_unlimited()
+    }
+
+    /// Latches Rune's native Metal backend unavailable on this host, logs once, and returns the
+    /// cached wgpu `wgpu::Instance`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn fallback_from_native_metal(reason: &str) -> wgpu::Instance {
+        crate::gpu::backend::mark_metal_unavailable(reason);
+        Self::wgpu_instance()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn next_instance_fallback(
+        can_switch_backend: bool,
+        can_widen: bool,
+        kind: crate::gpu::fallback::Failure,
+        reason: &str,
+    ) -> Option<InstanceFallback> {
+        use crate::gpu::fallback::Failure;
+        if can_switch_backend
+            && matches!(
+                kind,
+                Failure::DeviceCreate | Failure::SurfaceUnsupported | Failure::SurfaceRefused | Failure::ShaderRejected
+            )
+        {
+            return Some(InstanceFallback::SwitchBackend(Self::fallback_from_native_metal(reason)));
+        }
+        if can_widen {
+            return Some(InstanceFallback::Widen(Self::widen_to_unlimited_instance(reason)));
+        }
+        None
     }
 
     /// Picks (or takes a prewarmed) GPU, creates a surface via `make_surface`, and runs `setup`
@@ -93,7 +140,38 @@ impl Gpu {
         make_surface: impl FnMut(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>,
         setup: impl FnMut(&Gpu, &wgpu::Surface<'w>, Option<Renderer>) -> Result<T, SurfaceSetupError>,
     ) -> Result<(Gpu, wgpu::Surface<'w>, T), SurfaceSetupError> {
-        Self::for_surface_setup_from(prewarm::take(), wanted, translucent, make_surface, setup)
+        Self::for_surface_setup_with_latch(None, wanted, translucent, make_surface, setup)
+    }
+
+    /// Like [`Self::for_surface_setup`], but honors a `GpuLossPolicy::Terminal` latch: refuses
+    /// immediately if already failed, checks the latch again right after `prewarm::take()` (so a
+    /// parked warm device that died while waiting trips the owner's latch and never falls back to
+    /// creating a replacement device), and disables adapter fallback under `Terminal`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn for_surface_setup_with_latch<'w, T>(
+        latch: Option<&std::sync::Arc<super::loss_latch::GpuLossLatch>>,
+        wanted: wgpu::Features,
+        translucent: bool,
+        make_surface: impl FnMut(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>,
+        setup: impl FnMut(&Gpu, &wgpu::Surface<'w>, Option<Renderer>) -> Result<T, SurfaceSetupError>,
+    ) -> Result<(Gpu, wgpu::Surface<'w>, T), SurfaceSetupError> {
+        if let Some(latch) = latch
+            && latch.is_failed()
+        {
+            return Err(SurfaceSetupError::device_lost(
+                latch.reason().unwrap_or_else(|| "the GPU device was lost".into()),
+            ));
+        }
+        let early = prewarm::take();
+        if let Some(latch) = latch
+            && latch.is_failed()
+        {
+            drop(early);
+            return Err(SurfaceSetupError::device_lost(
+                latch.reason().unwrap_or_else(|| "the warmed GPU device was lost".into()),
+            ));
+        }
+        Self::for_surface_setup_from_policy(early, latch.is_none(), wanted, translucent, make_surface, setup)
     }
 
     /// Picks a headless GPU and runs `setup` (typically building a `Renderer`), walking remaining
@@ -105,15 +183,18 @@ impl Gpu {
         mut setup: impl FnMut(&Gpu) -> Result<T, SurfaceSetupError>,
     ) -> Result<(Gpu, T), SurfaceSetupError> {
         let instance = Self::instance_for(wanted);
+        let can_switch = crate::gpu::backend::native_instance(&instance);
         let can_widen = Self::is_direct_driver_instance(&instance);
-        let (gpu, (), value) = Self::try_setup_on_with_widen(
+        let (gpu, (), value) = Self::try_setup_on_with_fallback(
             instance,
             (),
             None,
             wanted,
             false,
             |_| Ok(()),
-            |reason| can_widen.then(|| Self::widen_to_unlimited_instance(reason)),
+            |kind, allow_widen, reason| {
+                Self::next_instance_fallback(can_switch, can_widen && allow_widen, kind, reason)
+            },
             |_| None,
             |gpu, _| setup(gpu),
         )?;
@@ -189,8 +270,11 @@ impl Gpu {
     ) -> Result<(Gpu, wgpu::Surface<'w>, T), SurfaceSetupError> {
         use crate::gpu::fallback::State;
         let state = State::need_fallbacks(first_error);
+        let can_switch = crate::gpu::backend::native_instance(&instance);
         let can_widen = Self::is_direct_driver_instance(&instance);
-        let mut widen = |reason: &str| can_widen.then(|| Self::widen_to_unlimited_instance(reason));
+        let mut fallback = |kind, allow_widen, reason: &str| {
+            Self::next_instance_fallback(can_switch, can_widen && allow_widen, kind, reason)
+        };
         let (gpu, surface, value) = Self::run_fallback_chain(
             instance,
             state,
@@ -202,7 +286,7 @@ impl Gpu {
             wanted,
             translucent,
             &mut make_surface,
-            &mut widen,
+            &mut fallback,
             |s| Some(s),
             &mut setup,
         )?;
@@ -210,9 +294,21 @@ impl Gpu {
         Ok((gpu, surface, value))
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(test, target_os = "macos"))]
     pub(super) fn for_surface_setup_from<'w, T>(
         early: Option<(Gpu, Renderer)>,
+        wanted: wgpu::Features,
+        translucent: bool,
+        make_surface: impl FnMut(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>,
+        setup: impl FnMut(&Gpu, &wgpu::Surface<'w>, Option<Renderer>) -> Result<T, SurfaceSetupError>,
+    ) -> Result<(Gpu, wgpu::Surface<'w>, T), SurfaceSetupError> {
+        Self::for_surface_setup_from_policy(early, true, wanted, translucent, make_surface, setup)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn for_surface_setup_from_policy<'w, T>(
+        early: Option<(Gpu, Renderer)>,
+        allow_fallback: bool,
         wanted: wgpu::Features,
         translucent: bool,
         mut make_surface: impl FnMut(&wgpu::Instance) -> Result<wgpu::Surface<'w>, String>,
@@ -231,7 +327,11 @@ impl Gpu {
                             Self::log_surface_gpu(&early);
                             return Ok((early, surface, value));
                         }
-                        Err(err) => match fallback::decide(crate::gpu::pick::env_policy(), err.kind) {
+                        Err(err) => match if allow_fallback {
+                            fallback::decide(crate::gpu::pick::env_policy(), err.kind)
+                        } else {
+                            Decision::Stop
+                        } {
                             Decision::Stop => {
                                 drop((surface, early));
                                 return Err(err);
@@ -244,9 +344,11 @@ impl Gpu {
                                 gpu_events::starting();
                                 let mut fresh_setup =
                                     |gpu: &Gpu, surface: &wgpu::Surface<'w>| setup(gpu, surface, None);
+                                let can_switch = crate::gpu::backend::native_instance(&instance);
                                 let can_widen = Self::is_direct_driver_instance(&instance);
-                                let mut widen =
-                                    |reason: &str| can_widen.then(|| Self::widen_to_unlimited_instance(reason));
+                                let mut fallback = |kind, allow_widen, reason: &str| {
+                                    Self::next_instance_fallback(can_switch, can_widen && allow_widen, kind, reason)
+                                };
                                 let (gpu, surface, value) = Self::run_fallback_chain(
                                     instance,
                                     State::need_fallbacks(err.message),
@@ -258,7 +360,7 @@ impl Gpu {
                                     wanted,
                                     translucent,
                                     &mut make_surface,
-                                    &mut widen,
+                                    &mut fallback,
                                     |s| Some(s),
                                     &mut fresh_setup,
                                 )?;
@@ -281,15 +383,19 @@ impl Gpu {
             }
         };
         gpu_events::starting();
+        let can_switch = crate::gpu::backend::native_instance(&instance);
         let can_widen = Self::is_direct_driver_instance(&instance);
-        let (gpu, surface, value) = Self::try_setup_on_with_widen(
+        let policy_override = (!allow_fallback).then_some(crate::gpu::fallback::Policy::Pinned);
+        let (gpu, surface, value) = Self::try_setup_on_with_fallback(
             instance,
             initial_surface,
-            None,
+            policy_override,
             wanted,
             translucent,
             make_surface,
-            |reason| can_widen.then(|| Self::widen_to_unlimited_instance(reason)),
+            |kind, allow_widen, reason| {
+                Self::next_instance_fallback(can_switch, can_widen && allow_widen, kind, reason)
+            },
             |s| Some(s),
             |gpu, surface| setup(gpu, surface, None),
         )?;
@@ -328,16 +434,45 @@ impl Gpu {
     /// Like [`Self::try_setup_on`], also allowing a single-driver Linux Vulkan instance to widen
     /// via `widen_instance` to an unlimited instance with all installed drivers if the single
     /// driver fails with an automatic fallback error and leaves no working candidates.
-    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn try_setup_on_with_widen<S, T>(
+        instance: wgpu::Instance,
+        surface: S,
+        policy_override: Option<crate::gpu::fallback::Policy>,
+        wanted: wgpu::Features,
+        translucent: bool,
+        make_surface: impl FnMut(&wgpu::Instance) -> Result<S, String>,
+        mut widen_instance: impl FnMut(&str) -> Option<wgpu::Instance>,
+        surface_ref: impl Fn(&S) -> Option<&wgpu::Surface<'_>>,
+        setup: impl FnMut(&Gpu, &S) -> Result<T, SurfaceSetupError>,
+    ) -> Result<(Gpu, S, T), SurfaceSetupError> {
+        Self::try_setup_on_with_fallback(
+            instance,
+            surface,
+            policy_override,
+            wanted,
+            translucent,
+            make_surface,
+            |_, allow_widen, reason| allow_widen.then(|| widen_instance(reason)).flatten().map(InstanceFallback::Widen),
+            surface_ref,
+            setup,
+        )
+    }
+
+    /// Runs the first adapter pick + `setup`, walking remaining adapters on `MoveOn` failures and
+    /// invoking `fallback_instance` once when the initial instance leaves no working adapter
+    /// (Linux direct-driver Vulkan widening or Apple native Metal -> wgpu backend fallback).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn try_setup_on_with_fallback<S, T>(
         mut instance: wgpu::Instance,
         mut surface: S,
         policy_override: Option<crate::gpu::fallback::Policy>,
         wanted: wgpu::Features,
         translucent: bool,
         mut make_surface: impl FnMut(&wgpu::Instance) -> Result<S, String>,
-        mut widen_instance: impl FnMut(&str) -> Option<wgpu::Instance>,
+        mut fallback_instance: impl FnMut(crate::gpu::fallback::Failure, bool, &str) -> Option<InstanceFallback>,
         surface_ref: impl Fn(&S) -> Option<&wgpu::Surface<'_>>,
         mut setup: impl FnMut(&Gpu, &S) -> Result<T, SurfaceSetupError>,
     ) -> Result<(Gpu, S, T), SurfaceSetupError> {
@@ -348,14 +483,14 @@ impl Gpu {
                 match Self::pick_first_adapter(&instance, surface_ref(&surface), policy_override, translucent) {
                     Ok(picked) => picked,
                     Err(err) => {
-                        if !widened
-                            && policy_override != Some(Policy::Pinned)
-                            && Self::env_fallback_policy() == Policy::Automatic
-                            && let Some(unlimited) = widen_instance(&err.message)
-                        {
+                        let allow_widen =
+                            policy_override != Some(Policy::Pinned) && Self::env_fallback_policy() == Policy::Automatic;
+                        if !widened && let Some(next) = fallback_instance(err.kind, allow_widen, &err.message) {
                             widened = true;
                             drop(surface);
-                            instance = unlimited;
+                            instance = match next {
+                                InstanceFallback::Widen(inst) | InstanceFallback::SwitchBackend(inst) => inst,
+                            };
                             surface = make_surface(&instance)
                                 .map_err(|message| SurfaceSetupError { kind: Failure::SurfaceCreate, message })?;
                             continue;
@@ -392,11 +527,11 @@ impl Gpu {
             let effects = fallback::step(&mut state, Event::Failed { kind: fail_kind, error: fail_msg });
             match effects.into_iter().next() {
                 Some(Effect::EnumerateFallbacks) => {
-                    let mut chain_widen = |reason: &str| {
+                    let mut chain_fallback = |kind: Failure, allow_widen: bool, reason: &str| {
                         if widened {
                             None
                         } else {
-                            let next = widen_instance(reason);
+                            let next = fallback_instance(kind, allow_widen, reason);
                             if next.is_some() {
                                 widened = true;
                             }
@@ -414,12 +549,25 @@ impl Gpu {
                         wanted,
                         translucent,
                         &mut make_surface,
-                        &mut chain_widen,
+                        &mut chain_fallback,
                         &surface_ref,
                         &mut setup,
                     );
                 }
-                Some(Effect::FinishErr(message)) => return Err(SurfaceSetupError { kind: fail_kind, message }),
+                Some(Effect::FinishErr(message)) => {
+                    if !widened
+                        && let Some(InstanceFallback::SwitchBackend(next)) =
+                            fallback_instance(fail_kind, false, &message)
+                    {
+                        widened = true;
+                        drop(kept_surface);
+                        instance = next;
+                        surface = make_surface(&instance)
+                            .map_err(|err_msg| SurfaceSetupError { kind: Failure::SurfaceCreate, message: err_msg })?;
+                        continue;
+                    }
+                    return Err(SurfaceSetupError { kind: fail_kind, message });
+                }
                 other => unreachable!("unexpected fallback effect after first failure: {other:?}"),
             }
         }
@@ -438,7 +586,7 @@ impl Gpu {
         wanted: wgpu::Features,
         translucent: bool,
         make_surface: &mut impl FnMut(&wgpu::Instance) -> Result<S, String>,
-        widen_instance: &mut impl FnMut(&str) -> Option<wgpu::Instance>,
+        fallback_instance: &mut impl FnMut(crate::gpu::fallback::Failure, bool, &str) -> Option<InstanceFallback>,
         surface_ref: impl Fn(&S) -> Option<&wgpu::Surface<'_>>,
         setup: &mut impl FnMut(&Gpu, &S) -> Result<T, SurfaceSetupError>,
     ) -> Result<(Gpu, S, T), SurfaceSetupError> {
@@ -466,6 +614,7 @@ impl Gpu {
         let mut last_kind = first_kind;
         let mut last_stopped = false;
         let mut widened = false;
+        let mut switched_backend = false;
         loop {
             let mut next_event = None;
             for effect in fallback::step(&mut state, event) {
@@ -492,16 +641,18 @@ impl Gpu {
                                     Ok(value) => {
                                         let first_error = state.first_error().unwrap_or("").to_owned();
                                         let _ = fallback::step(&mut state, Event::Succeeded);
-                                        let info = gpu.adapter.get_info();
-                                        let what = if draws_surfaces { "this surface" } else { "offscreen" };
-                                        eprintln!(
-                                            "rune: {} ({:?}) could not draw {what} ({first_error}); falling back to {} ({:?}, {:?})",
-                                            first_info.name,
-                                            first_info.backend,
-                                            info.name,
-                                            info.backend,
-                                            info.device_type
-                                        );
+                                        if !switched_backend {
+                                            let info = gpu.adapter.get_info();
+                                            let what = if draws_surfaces { "this surface" } else { "offscreen" };
+                                            eprintln!(
+                                                "rune: {} ({:?}) could not draw {what} ({first_error}); falling back to {} ({:?}, {:?})",
+                                                first_info.name,
+                                                first_info.backend,
+                                                info.name,
+                                                info.backend,
+                                                info.device_type
+                                            );
+                                        }
                                         crate::native_surface::note_device(&gpu.device, draws_surfaces);
                                         return Ok((gpu, surface, value));
                                     }
@@ -524,13 +675,21 @@ impl Gpu {
                         }
                     }
                     Effect::FinishErr(message) => {
+                        let kind = if last_stopped { last_kind } else { first_kind };
                         if !last_stopped
                             && !widened
-                            && let Some(unlimited) = widen_instance(&message)
+                            && let Some(next) = fallback_instance(kind, true, &message)
                         {
                             widened = true;
                             drop(pending_surface.take());
-                            instance = unlimited;
+                            instance = match next {
+                                InstanceFallback::Widen(inst) => inst,
+                                InstanceFallback::SwitchBackend(inst) => {
+                                    switched_backend = true;
+                                    tried.clear();
+                                    inst
+                                }
+                            };
                             let surface = make_surface(&instance).map_err(|err_msg| SurfaceSetupError {
                                 kind: Failure::SurfaceCreate,
                                 message: err_msg,
@@ -553,7 +712,6 @@ impl Gpu {
                             next_event = Some(Event::Candidates(ordered));
                             continue;
                         }
-                        let kind = if last_stopped { last_kind } else { first_kind };
                         return Err(SurfaceSetupError { kind, message });
                     }
                     Effect::EnumerateFallbacks | Effect::FinishOk { .. } => {
@@ -625,3 +783,7 @@ impl Gpu {
         Err(SurfaceSetupError { kind: rune_gpu::fallback::Failure::DeviceCreate, message })
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[path = "surface_setup_tests.rs"]
+mod tests;

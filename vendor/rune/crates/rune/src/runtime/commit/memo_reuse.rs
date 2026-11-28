@@ -233,15 +233,19 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
         radial,
         outline,
         shape,
+        shape_builder,
         grid,
         pixels,
         pixels_fit,
         pixels_wrap,
         pixels_tint,
+        web_image,
         image_filter,
+        image_menu,
         effect,
         backdrop_blur,
         hover_motion,
+        hover_motion_default,
         hover_within,
         press_motion,
         group_opacity,
@@ -298,7 +302,7 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
         }
         && a.icon_inked == *icon_inked && a.icon_one_color == *icon_one_color
         && opt_box_eq(&a.gradient, gradient) && opt_box_eq(&a.radial, radial)
-        && a.outline == *outline && opt_rc_eq(&a.shape, shape)
+        && a.outline == *outline && opt_rc_eq(&a.shape, shape) && opt_rc_eq(&a.shape_builder, shape_builder)
         // A grid built again from the same rows is the same grid.
         && match (&a.grid, grid) {
             (None, None) => true,
@@ -310,8 +314,8 @@ fn same_visual_cold(a: &crate::el::VisualCold, b: &crate::el::VisualCold) -> boo
             (Some(pa), Some(pb)) => Arc::ptr_eq(&pa.source, &pb.source),
             _ => false,
         }
-        && a.pixels_fit == *pixels_fit && a.pixels_wrap == *pixels_wrap && a.pixels_tint == *pixels_tint && a.image_filter == *image_filter && a.effect == *effect && a.backdrop_blur == *backdrop_blur
-        && opt_rc_eq(&a.hover_motion, hover_motion) && opt_rc_eq(&a.hover_within, hover_within)
+        && a.pixels_fit == *pixels_fit && a.pixels_wrap == *pixels_wrap && a.pixels_tint == *pixels_tint && opt_rc_eq(&a.web_image, web_image) && a.image_filter == *image_filter && opt_rc_eq(&a.image_menu, image_menu) && a.effect == *effect && a.backdrop_blur == *backdrop_blur
+        && opt_rc_eq(&a.hover_motion, hover_motion) && a.hover_motion_default == *hover_motion_default && opt_rc_eq(&a.hover_within, hover_within)
         && match (&a.press_motion, press_motion) {
             (None, None) => true,
             (Some(x), Some(y)) => Rc::ptr_eq(x, y) || **x == **y,
@@ -487,10 +491,14 @@ fn same_drop(a: &Option<Box<crate::el::DropSpec>>, b: &Option<Box<crate::el::Dro
         (Some(x), Some(y)) => {
             opt_rc_eq(&x.on_drop, &y.on_drop)
                 && opt_rc_eq(&x.accepts, &y.accepts)
+                && opt_rc_eq(&x.accepts_drag, &y.accepts_drag)
+                && opt_rc_eq(&x.feedback, &y.feedback)
                 && opt_rc_eq(&x.on_hover, &y.on_hover)
                 && opt_rc_eq(&x.on_reject, &y.on_reject)
                 && opt_rc_eq(&x.on_reject_hover, &y.on_reject_hover)
                 && opt_rc_eq(&x.on_move, &y.on_move)
+                && opt_rc_eq(&x.on_hover_within, &y.on_hover_within)
+                && opt_rc_eq(&x.on_move_within, &y.on_move_within)
         }
         _ => false,
     }
@@ -502,6 +510,7 @@ fn same_handlers(a: &crate::cold::Cold<crate::el::Handlers>, b: &crate::cold::Co
     }
     let crate::el::Handlers {
         on_a11y_action,
+        custom_a11y_actions,
         on_paste,
         on_window_focus,
         on_spellcheck,
@@ -551,6 +560,17 @@ fn same_handlers(a: &crate::cold::Cold<crate::el::Handlers>, b: &crate::cold::Co
     a.modal.is_none()
         && modal.is_none()
         && opt_rc_eq(&a.on_a11y_action, on_a11y_action)
+        && match (&a.custom_a11y_actions, custom_a11y_actions) {
+            (None, None) => true,
+            (Some(xa), Some(xb)) => {
+                xa.len() == xb.len()
+                    && xa
+                        .iter()
+                        .zip(xb.iter())
+                        .all(|(x, y)| x.id == y.id && x.label == y.label && Rc::ptr_eq(&x.handler, &y.handler))
+            }
+            _ => false,
+        }
         && match (&a.on_paste, on_paste) {
             (None, None) => true,
             (Some(pa), Some(pb)) => pa.rich == pb.rich && Rc::ptr_eq(&pa.call, &pb.call),

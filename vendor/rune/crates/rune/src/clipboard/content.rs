@@ -96,7 +96,7 @@ impl ClipboardContent {
     /// [`MAX_WEB_FILES`](super::MAX_WEB_FILES), with no paths and no bytes read: call
     /// `WebFile::read` (wasm32) for the ones the app takes. Like the image, only hooks hear them (a
     /// field's `on_input_paste` or a root `on_paste_content`; never a password field). Some
-    /// files come twice: a pasted or dropped PNG is also the [`image`](Self::image), and the
+    /// files come twice: a pasted or dropped raster image is also the [`image`](Self::image), and the
     /// contents of a dropped text file of at most 1 MiB are also the [`text`](Self::text).
     /// Always empty on native platforms.
     pub fn web_files(&self) -> &[WebFile] {
@@ -233,10 +233,12 @@ impl ClipboardImage {
         Some(Self { png, size })
     }
     /// Straight-alpha sRGB RGBA8 pixels (`width * height * 4` bytes, rows top first), encoded
-    /// as PNG on the calling thread. `None` when the length doesn't match, a side is zero, the
-    /// image passes 64 megapixels or its PNG passes [`MAX_IMAGE_BYTES`]. To copy an image an
-    /// [`ImageCache`](crate::ImageCache) decoded, [`Tx::copy_image`](crate::Tx::copy_image)
-    /// encodes it off the event thread instead.
+    /// synchronously as PNG on the calling thread (required because [`Self::png`] is
+    /// synchronous; large images can take seconds—e.g. ~3.3 s for a 4000×3000 photo). Returns
+    /// `None` when the length doesn't match, a side is zero, the image passes 64 megapixels, or
+    /// its PNG passes [`MAX_IMAGE_BYTES`]. To copy an image an [`ImageCache`](crate::ImageCache)
+    /// decoded without blocking the event thread, use [`Tx::copy_image`](crate::Tx::copy_image)
+    /// or [`Tx::copy_image_then`](crate::Tx::copy_image_then) instead.
     ///
     /// ```
     /// # use rune::clipboard::ClipboardImage;

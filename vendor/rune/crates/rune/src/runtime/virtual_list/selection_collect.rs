@@ -115,7 +115,7 @@ impl RuntimeCore {
                 }
                 EndRef::Offscreen(vi, ti) => {
                     let t = self.offscreen_text(vi, ti);
-                    if a >= b || b > t.spec.content.len() {
+                    if a >= b || b > t.spec.content_str().len() {
                         return None;
                     }
                     let piece = offscreen_piece(t, a..b, base_path);
@@ -156,7 +156,7 @@ impl RuntimeCore {
                     if ord < first_ord || ord > last_ord {
                         continue;
                     }
-                    let len = t.spec.content.len();
+                    let len = t.spec.content_str().len();
                     let a = if end_ref == first_end { first_byte.min(len) } else { 0 };
                     let b = if end_ref == last_end { last_byte.min(len) } else { len };
                     if a >= b {
@@ -282,7 +282,7 @@ impl RuntimeCore {
                         if ord < first_ord || ord > last_ord {
                             continue;
                         }
-                        let len = t.spec.content.len();
+                        let len = t.spec.content_str().len();
                         let a = if ord == first_ord { first_byte.min(len) } else { 0 };
                         let b = if ord == last_ord { last_byte.min(len) } else { len };
                         if a >= b {
@@ -573,7 +573,7 @@ impl RuntimeCore {
                             .find(|t| t.path == selector || crate::flight::selects(selector, &t.path, t.key.as_deref()))
                         {
                             let target_path = t.path.clone();
-                            let content = t.spec.content.clone();
+                            let content = t.spec.content_str().to_owned();
                             let (a, b) = (
                                 floor_boundary(&content, byte_range.start),
                                 floor_boundary(&content, byte_range.end.max(byte_range.start)),

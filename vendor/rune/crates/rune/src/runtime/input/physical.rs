@@ -121,9 +121,11 @@ impl RuntimeCore {
     pub(crate) fn physical_input(&mut self, event: PhysicalInput) {
         self.observe_mods(&event);
         if self.cancel_drag_key(&event) {
+            self.kbd.note_key_consumed(true);
             return;
         }
         if matches!(event, PhysicalInput::Key { pressed: true, .. }) && self.pointer.autoscroll_key() {
+            self.kbd.note_key_consumed(true);
             return;
         }
         self.frame.queue.push(Action::Physical(event, None));
@@ -190,10 +192,12 @@ impl RuntimeCore {
     ) -> bool {
         pair_text(&mut event, key.as_ref());
         if self.cancel_drag_key(&event) {
+            self.kbd.note_key_consumed(true);
             return true;
         }
         // A key ends a middle-click autoscroll, and does nothing else.
         if matches!(event, PhysicalInput::Key { pressed: true, .. }) && self.pointer.autoscroll_key() {
+            self.kbd.note_key_consumed(true);
             return true;
         }
         if key.is_none() && matches!(event, PhysicalInput::Modifiers(_) | PhysicalInput::Key { pressed: false, .. }) {
@@ -260,6 +264,7 @@ impl RuntimeCore {
         match event {
             PhysicalInput::Key { key, pressed: true, repeat, .. } => {
                 if self.kbd.held_gate(Some(key), fallback.as_ref().map(|f| &f.key.key), repeat) {
+                    self.kbd.note_key_consumed(false);
                     return false;
                 }
                 if !is_mod(key) {
@@ -296,7 +301,7 @@ impl RuntimeCore {
         let consumed = self.offer_physical(app, &event, tx, &mut live);
         let observed = matches!(event, PhysicalInput::FocusLost) && self.observe_focus_lost(app, tx, &mut live);
         let modifier = self.modifier_dispatch(app, &event, consumed, tx, &mut live);
-        let ran = consumed
+        let key_ran = consumed
             || observed
             || chord
             || modifier
@@ -328,7 +333,10 @@ impl RuntimeCore {
                     }
                     None => false,
                 };
-        let ran = self.dispatch_mods(app, tx, &mut live) || ran;
+        if matches!(event, PhysicalInput::Key { pressed: true, .. }) {
+            self.kbd.note_key_consumed(key_ran);
+        }
+        let ran = self.dispatch_mods(app, tx, &mut live) || key_ran;
         tx.live_only = ran && live == Some(true);
         ran
     }

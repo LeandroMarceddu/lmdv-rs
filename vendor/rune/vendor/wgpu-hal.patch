@@ -248,10 +248,33 @@ index f57ba46..475a9e3 100644
  }
  
 diff --git a/src/dx12/device.rs b/src/dx12/device.rs
-index 63fb313..de341fb 100644
+index 63fb313..04dd48c 100644
 --- a/src/dx12/device.rs
 +++ b/src/dx12/device.rs
-@@ -118,59 +118,15 @@ impl super::Device {
+@@ -37,6 +37,22 @@ use crate::{
+ // this has to match Naga's HLSL backend, and also needs to be null-terminated
+ const NAGA_LOCATION_SEMANTIC: &[u8] = c"LOC".to_bytes();
+ 
++// Serialize raw D3D12 Create*PipelineState FFI calls process-wide.
++//
++// Microsoft's dxilconv.dll (observed in 101.9.2602.1360, commit a9caaf7fb) converts DXBC
++// bytecode to DXIL inside D3D12Core.dll during pipeline creation when the driver cache is
++// cold. Its process-wide ManagedStatic<llvm::PassRegistry> has no lock around PassInfoMap
++// (an LLVM DenseMap) in PassRegistry::getPassInfo (+0xB28B4) or PassRegistry::registerPass
++// (+0xB292C), and its five initialize*Pass functions use bare InterlockedCompareExchange
++// guards that return immediately without waiting for the winning thread to finish
++// registerPass. When two threads enter CreatePipelineState with DXBC concurrently (for
++// example Rune's beside, start_pinned, effect_warm, start_lcd, or rune-video-pipeline),
++// Thread A's DenseMap::find can observe an empty map (it == nullptr) while Thread B
++// allocates PassInfoMap.Buckets before Thread A computes end(), causing a null+0x8 read
++// (0xC0000005 at dxilconv.dll+0xB28E5). Guarding only the raw FFI calls covers every
++// caller while keeping non-FFI pipeline setup parallel.
++static DX12_PIPELINE_STATE_LOCK: Mutex<()> = Mutex::new(());
++
+ impl super::Device {
+     #[allow(clippy::too_many_arguments)]
+     pub(super) fn new(
+@@ -118,59 +134,15 @@ impl super::Device {
          // maximum number of CBV/SRV/UAV descriptors in heap for Tier 1
          let capacity_views = limits.max_non_sampler_bindings as u64;
  
@@ -317,7 +340,7 @@ index 63fb313..de341fb 100644
              },
              heap_views: descriptor::GeneralHeap::new(
                  &raw,
-@@ -179,6 +135,7 @@ impl super::Device {
+@@ -179,6 +151,7 @@ impl super::Device {
              )?,
              sampler_heap: super::sampler::SamplerHeap::new(&raw, &private_caps)?,
              private_caps,
@@ -325,7 +348,7 @@ index 63fb313..de341fb 100644
          };
  
          let mut rtv_pool =
-@@ -232,6 +189,61 @@ impl super::Device {
+@@ -232,6 +205,61 @@ impl super::Device {
          })
      }
  
@@ -387,7 +410,7 @@ index 63fb313..de341fb 100644
      fn create_command_signature(
          raw: &Direct3D12::ID3D12Device,
          root_signature: Option<&Direct3D12::ID3D12RootSignature>,
-@@ -256,23 +268,71 @@ impl super::Device {
+@@ -256,23 +284,71 @@ impl super::Device {
          signature.ok_or(crate::DeviceError::Unexpected)
      }
  
@@ -465,7 +488,7 @@ index 63fb313..de341fb 100644
          Ok(())
      }
  
-@@ -826,6 +886,7 @@ impl crate::Device for super::Device {
+@@ -826,6 +902,7 @@ impl crate::Device for super::Device {
              intermediate_copy_bufs: Vec::new(),
              null_rtv_handle: self.null_rtv_handle,
              list: None,
@@ -473,7 +496,41 @@ index 63fb313..de341fb 100644
              free_lists: Vec::new(),
              pass: super::PassState::new(),
              temp: super::Temp::default(),
-@@ -2346,7 +2407,7 @@ impl crate::Device for super::Device {
+@@ -2163,7 +2240,11 @@ impl crate::Device for super::Device {
+                 let mut stream = stream_desc.to_stream();
+                 unsafe {
+                     profiling::scope!("ID3D12Device2::CreatePipelineState");
+-                    stream.create_pipeline_state(&device).map_err(|err| {
++                    let result = {
++                        let _guard = DX12_PIPELINE_STATE_LOCK.lock();
++                        stream.create_pipeline_state(&device)
++                    };
++                    result.map_err(|err| {
+                         crate::PipelineError::Linkage(shader_stages, err.to_string())
+                     })?
+                 }
+@@ -2171,7 +2252,11 @@ impl crate::Device for super::Device {
+                 unsafe {
+                     // Safety: `stream_desc` entirely outlives the `desc`.
+                     let desc = stream_desc.to_graphics_pipeline_descriptor();
+-                    self.raw.CreateGraphicsPipelineState(&desc).map_err(|err| {
++                    let result = {
++                        let _guard = DX12_PIPELINE_STATE_LOCK.lock();
++                        self.raw.CreateGraphicsPipelineState(&desc)
++                    };
++                    result.map_err(|err| {
+                         crate::PipelineError::Linkage(shader_stages, err.to_string())
+                     })?
+                 }
+@@ -2208,6 +2293,7 @@ impl crate::Device for super::Device {
+ 
+         let pair = {
+             profiling::scope!("ID3D12Device::CreateComputePipelineState");
++            let _guard = DX12_PIPELINE_STATE_LOCK.lock();
+             unsafe {
+                 self.raw.CreateComputePipelineState(
+                     &Direct3D12::D3D12_COMPUTE_PIPELINE_STATE_DESC {
+@@ -2346,7 +2432,7 @@ impl crate::Device for super::Device {
  
          self.counters.fences.add(1);
  
@@ -482,7 +539,7 @@ index 63fb313..de341fb 100644
      }
      unsafe fn destroy_fence(&self, _fence: super::Fence) {
          self.counters.fences.sub(1);
-@@ -2356,7 +2417,7 @@ impl crate::Device for super::Device {
+@@ -2356,7 +2442,7 @@ impl crate::Device for super::Device {
          &self,
          fence: &super::Fence,
      ) -> Result<crate::FenceValue, crate::DeviceError> {
@@ -491,7 +548,7 @@ index 63fb313..de341fb 100644
      }
      unsafe fn wait(
          &self,
-@@ -2367,7 +2428,8 @@ impl crate::Device for super::Device {
+@@ -2367,7 +2453,8 @@ impl crate::Device for super::Device {
          let timeout = timeout.unwrap_or(Duration::MAX);
  
          // We first check if the fence has already reached the value we're waiting for.
@@ -501,7 +558,7 @@ index 63fb313..de341fb 100644
          if fence_value >= value {
              return Ok(true);
          }
-@@ -2408,17 +2470,23 @@ impl crate::Device for super::Device {
+@@ -2408,17 +2495,23 @@ impl crate::Device for super::Device {
  
              log::trace!("Waiting for fence value {value} for {remaining_wait_duration:?}");
  
@@ -529,7 +586,7 @@ index 63fb313..de341fb 100644
                  Foundation::WAIT_TIMEOUT => {
                      log::trace!("Wait timed out!");
                      break Ok(false);
-@@ -2429,7 +2497,10 @@ impl crate::Device for super::Device {
+@@ -2429,7 +2522,10 @@ impl crate::Device for super::Device {
                  }
              };
  
@@ -542,10 +599,20 @@ index 63fb313..de341fb 100644
  
              if fence_value >= value {
 diff --git a/src/dx12/instance.rs b/src/dx12/instance.rs
-index fdb63bc..5f64a80 100644
+index fdb63bc..62e0a77 100644
 --- a/src/dx12/instance.rs
 +++ b/src/dx12/instance.rs
-@@ -187,3 +187,37 @@ impl crate::Instance for super::Instance {
+@@ -44,7 +44,8 @@ impl crate::Instance for super::Instance {
+ 
+             match hr {
+                 Err(err) => log::warn!("Unable to check for tearing support: {err}"),
+-                Ok(()) => supports_allow_tearing = true,
++                // Rune: respect the actual BOOL returned by CheckFeatureSupport instead of assuming true.
++                Ok(()) => supports_allow_tearing = allow_tearing.as_bool(),
+             }
+         }
+ 
+@@ -187,3 +188,37 @@ impl crate::Instance for super::Instance {
              .collect()
      }
  }
@@ -584,7 +651,7 @@ index fdb63bc..5f64a80 100644
 +    }
 +}
 diff --git a/src/dx12/mod.rs b/src/dx12/mod.rs
-index 285d635..398264c 100644
+index 285d635..3e3f872 100644
 --- a/src/dx12/mod.rs
 +++ b/src/dx12/mod.rs
 @@ -92,7 +92,7 @@ mod suballocation;
@@ -637,8 +704,12 @@ index 285d635..398264c 100644
      }
  
      /// Will error with crate::DeviceError::Unexpected if DXGI 1.3 is not available.
-@@ -615,6 +631,8 @@ struct SwapChain {
+@@ -613,8 +629,12 @@ struct SwapChain {
+     waitable: Option<Foundation::HANDLE>,
+     acquired_count: usize,
      present_mode: wgt::PresentMode,
++    /// Rune: whether this swap chain was created with `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING`.
++    allow_tearing: bool,
      format: wgt::TextureFormat,
      size: wgt::Extent3d,
 +    /// Rune: what the next present changed (Surface::set_present_rects); empty is all of it.
@@ -646,7 +717,7 @@ index 285d635..398264c 100644
  }
  
  enum SurfaceTarget {
-@@ -651,6 +669,15 @@ impl Surface {
+@@ -651,6 +671,15 @@ impl Surface {
          Some(self.swap_chain.read().as_ref()?.raw.clone())
      }
  
@@ -662,7 +733,7 @@ index 285d635..398264c 100644
      /// Returns the waitable handle associated with this swap chain, if any.
      /// Handle is only valid while the swap chain is alive.
      pub unsafe fn waitable_handle(&self) -> Option<Foundation::HANDLE> {
-@@ -741,6 +768,279 @@ struct Idler {
+@@ -741,6 +770,279 @@ struct Idler {
      fence: Direct3D12::ID3D12Fence,
  }
  
@@ -942,7 +1013,7 @@ index 285d635..398264c 100644
  #[derive(Debug, Clone)]
  struct CommandSignatures {
      draw: Direct3D12::ID3D12CommandSignature,
-@@ -749,13 +1049,33 @@ struct CommandSignatures {
+@@ -749,13 +1051,33 @@ struct CommandSignatures {
      dispatch: Direct3D12::ID3D12CommandSignature,
  }
  
@@ -977,7 +1048,7 @@ index 285d635..398264c 100644
  }
  
  unsafe impl Send for DeviceShared {}
-@@ -810,6 +1130,7 @@ pub struct Queue {
+@@ -810,6 +1132,7 @@ pub struct Queue {
      idle_fence_value: AtomicU64,
      pending_waits: Mutex<Vec<(Direct3D12::ID3D12Fence, u64)>>,
      pending_signals: Mutex<Vec<(Direct3D12::ID3D12Fence, u64)>>,
@@ -985,7 +1056,7 @@ index 285d635..398264c 100644
  }
  
  impl Queue {
-@@ -992,7 +1313,11 @@ pub struct CommandEncoder {
+@@ -992,7 +1315,11 @@ pub struct CommandEncoder {
  
      null_rtv_handle: descriptor::Handle,
      list: Option<Direct3D12::ID3D12GraphicsCommandList>,
@@ -998,7 +1069,7 @@ index 285d635..398264c 100644
      pass: PassState,
      temp: Temp,
  
-@@ -1018,6 +1343,8 @@ impl fmt::Debug for CommandEncoder {
+@@ -1018,6 +1345,8 @@ impl fmt::Debug for CommandEncoder {
  #[derive(Debug)]
  pub struct CommandBuffer {
      raw: Direct3D12::ID3D12GraphicsCommandList,
@@ -1007,7 +1078,7 @@ index 285d635..398264c 100644
  }
  
  impl crate::DynCommandBuffer for CommandBuffer {}
-@@ -1209,6 +1536,8 @@ unsafe impl Sync for QuerySet {}
+@@ -1209,6 +1538,8 @@ unsafe impl Sync for QuerySet {}
  #[derive(Debug)]
  pub struct Fence {
      raw: Direct3D12::ID3D12Fence,
@@ -1016,7 +1087,71 @@ index 285d635..398264c 100644
  }
  
  impl crate::DynFence for Fence {}
-@@ -1535,7 +1864,9 @@ impl crate::Surface for Surface {
+@@ -1466,6 +1797,24 @@ fn map_surface_color_space(
+     }
+ }
+ 
++/// Rune: computes DXGI swap-chain creation / resize flags for `present_mode`.
++///
++/// Only enables `DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING` when `PresentMode::Immediate` is requested
++/// (matching Dawn/Chromium): setting `ALLOW_TEARING` unconditionally on vsynced (`Fifo`/`Mailbox`)
++/// swap chains advertises tearing/VRR capability to DXGI/DWM/display drivers even though `Present`
++/// never passes `DXGI_PRESENT_ALLOW_TEARING`. Switching between `Immediate` and a vsynced mode
++/// recreates the swap chain rather than calling `ResizeBuffers`.
++pub fn swapchain_flags(
++    supports_allow_tearing: bool,
++    present_mode: wgt::PresentMode,
++) -> Dxgi::DXGI_SWAP_CHAIN_FLAG {
++    let mut flags = Dxgi::DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
++    if supports_allow_tearing && present_mode == wgt::PresentMode::Immediate {
++        flags |= Dxgi::DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
++    }
++    flags
++}
++
+ impl crate::Surface for Surface {
+     type A = Api;
+ 
+@@ -1474,16 +1823,9 @@ impl crate::Surface for Surface {
+         device: &Device,
+         config: &crate::SurfaceConfiguration,
+     ) -> Result<(), crate::SurfaceError> {
+-        let mut flags = Dxgi::DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+-        // We always set ALLOW_TEARING on the swapchain no matter
+-        // what kind of swapchain we want because ResizeBuffers
+-        // cannot change the swapchain's ALLOW_TEARING flag.
+-        //
+-        // This does not change the behavior of the swapchain, just
+-        // allow present calls to use tearing.
+-        if self.supports_allow_tearing {
+-            flags |= Dxgi::DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+-        }
++        let allow_tearing =
++            self.supports_allow_tearing && config.present_mode == wgt::PresentMode::Immediate;
++        let flags = swapchain_flags(self.supports_allow_tearing, config.present_mode);
+ 
+         // While `configure`s contract ensures that no work on the GPU's main queues
+         // are in flight, we still need to wait for the present queue to be idle.
+@@ -1500,7 +1842,17 @@ impl crate::Surface for Surface {
+         // For high latency extra buffers seems excessive, so go with a minimum of 3 and beyond that add 1.
+         let swap_chain_buffer = (config.maximum_frame_latency + 1).min(16);
+ 
+-        let swap_chain = match self.swap_chain.write().take() {
++        let existing = self.swap_chain.write().take().and_then(|sc| {
++            if sc.allow_tearing == allow_tearing {
++                Some(sc)
++            } else {
++                // ResizeBuffers cannot toggle DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING: release the old
++                // swap chain and create a fresh one below.
++                drop(unsafe { sc.release_resources() });
++                None
++            }
++        });
++        let swap_chain = match existing {
+             //Note: this path doesn't properly re-initialize all of the things
+             Some(sc) => {
+                 let raw = unsafe { sc.release_resources() };
+@@ -1535,7 +1887,9 @@ impl crate::Surface for Surface {
                      BufferUsage: Dxgi::DXGI_USAGE_RENDER_TARGET_OUTPUT,
                      BufferCount: swap_chain_buffer,
                      Scaling: Dxgi::DXGI_SCALING_STRETCH,
@@ -1027,15 +1162,18 @@ index 285d635..398264c 100644
                      Flags: flags.0 as u32,
                  };
                  let swap_chain1 = match self.target {
-@@ -1702,6 +2033,7 @@ impl crate::Surface for Surface {
+@@ -1700,8 +2054,10 @@ impl crate::Surface for Surface {
+             waitable,
+             acquired_count: 0,
              present_mode: config.present_mode,
++            allow_tearing,
              format: config.format,
              size: config.extent,
 +            dirty: Vec::new(),
          });
  
          Ok(())
-@@ -1768,6 +2100,14 @@ impl crate::Surface for Surface {
+@@ -1768,6 +2124,14 @@ impl crate::Surface for Surface {
      }
  }
  
@@ -1050,7 +1188,7 @@ index 285d635..398264c 100644
  impl crate::Queue for Queue {
      type A = Api;
  
-@@ -1777,6 +2117,18 @@ impl crate::Queue for Queue {
+@@ -1777,6 +2141,18 @@ impl crate::Queue for Queue {
          _surface_textures: &[&Texture],
          (signal_fence, signal_value): (&Fence, crate::FenceValue),
      ) -> Result<(), crate::DeviceError> {
@@ -1069,7 +1207,7 @@ index 285d635..398264c 100644
          let mut temp_lists = self.temp_lists.lock();
          temp_lists.clear();
          for cmd_buf in command_buffers {
-@@ -1790,25 +2142,48 @@ impl crate::Queue for Queue {
+@@ -1790,25 +2166,48 @@ impl crate::Queue for Queue {
          {
              let mut waits = self.pending_waits.lock();
              for (fence, value) in waits.drain(..) {
@@ -1123,7 +1261,7 @@ index 285d635..398264c 100644
              }
          }
  
-@@ -1838,9 +2213,22 @@ impl crate::Queue for Queue {
+@@ -1838,9 +2237,22 @@ impl crate::Queue for Queue {
          };
  
          profiling::scope!("IDXGISwapchain3::Present");
@@ -1149,7 +1287,7 @@ index 285d635..398264c 100644
  
          Ok(())
      }
-@@ -1851,18 +2239,51 @@ impl crate::Queue for Queue {
+@@ -1851,18 +2263,51 @@ impl crate::Queue for Queue {
      }
  
      unsafe fn wait_for_idle(&self) -> Result<(), crate::DeviceError> {
@@ -2688,3 +2826,140 @@ index 51e7414..b41baca 100644
              entry: _,
              has_nv_optimus,
              android_sdk_version,
+diff --git a/src/vulkan/swapchain/native.rs b/src/vulkan/swapchain/native.rs
+index 218b9ef16..85ea6d4df 100644
+--- a/src/vulkan/swapchain/native.rs
++++ b/src/vulkan/swapchain/native.rs
+@@ -285,7 +285,7 @@ impl Surface for NativeSurface {
+             .collect::<Result<Vec<_>, _>>()?;
+ 
+         let present_semaphores = (0..images.len())
+-            .map(|i| Arc::new(Mutex::new(SwapchainPresentSemaphores::new(i))))
++            .map(|i| Arc::new(Mutex::new(SwapchainPresentSemaphores::new(&device.shared, i))))
+             .collect::<Vec<_>>();
+ 
+         Ok(Box::new(NativeSwapchain {
+@@ -395,24 +395,15 @@ impl Swapchain for NativeSwapchain {
+             unsafe { device.shared.raw.destroy_fence(fence, None) }
+         }
+ 
+-        // We cannot take this by value, as the function returns `self`.
+-        for semaphore in self.acquire_semaphores.drain(..) {
+-            let arc_removed = Arc::into_inner(semaphore).expect(
+-                "Trying to destroy a SwapchainAcquireSemaphore that is still in use by a SurfaceTexture",
+-            );
+-            let mutex_removed = arc_removed.into_inner();
+-
+-            unsafe { mutex_removed.destroy(&device.shared.raw) };
+-        }
+-
+-        for semaphore in self.present_semaphores.drain(..) {
+-            let arc_removed = Arc::into_inner(semaphore).expect(
+-                "Trying to destroy a SwapchainPresentSemaphores that is still in use by a SurfaceTexture",
+-            );
+-            let mutex_removed = arc_removed.into_inner();
+-
+-            unsafe { mutex_removed.destroy(&device.shared.raw) };
+-        }
++        // Drop the swapchain's own Arc references to its semaphores. Each semaphore wrapper
++        // owns an `Arc<DeviceShared>` and calls `vkDestroySemaphore` in `Drop` when its final
++        // Arc is released: on healthy teardown that happens immediately here; when wgpu-core's
++        // `Surface::drop` still holds an `acquired_texture` across `unconfigure()` after a
++        // submit-time `Device::Lost` (because `Surface::present`/`discard` bailed out at
++        // `check_is_valid()?`), releasing the swapchain's Arc avoids panicking and destroys the
++        // semaphores cleanly when `Surface::drop` drops `acquired_texture` immediately after.
++        self.acquire_semaphores.clear();
++        self.present_semaphores.clear();
+     }
+ 
+     unsafe fn acquire(
+@@ -681,8 +672,8 @@ impl NativeSwapchain {
+ }
+ 
+ /// Semaphore used to acquire a swapchain image.
+-#[derive(Debug)]
+ struct SwapchainAcquireSemaphore {
++    device: Arc<DeviceShared>,
+     /// A semaphore that is signaled when this image is safe for us to modify.
+     ///
+     /// When [`vkAcquireNextImageKHR`] returns the index of the next swapchain
+@@ -730,8 +721,9 @@ struct SwapchainAcquireSemaphore {
+ }
+ 
+ impl SwapchainAcquireSemaphore {
+-    fn new(device: &DeviceShared, index: usize) -> Result<Self, crate::DeviceError> {
++    fn new(device: &Arc<DeviceShared>, index: usize) -> Result<Self, crate::DeviceError> {
+         Ok(Self {
++            device: Arc::clone(device),
+             acquire: device
+                 .new_binary_semaphore(&format!("SwapchainImageSemaphore: Index {index} acquire"))?,
+             should_wait_for_acquire: true,
+@@ -766,15 +758,28 @@ impl SwapchainAcquireSemaphore {
+         self.should_wait_for_acquire = true;
+     }
+ 
+-    unsafe fn destroy(&self, device: &ash::Device) {
++}
++
++impl core::fmt::Debug for SwapchainAcquireSemaphore {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        f.debug_struct("SwapchainAcquireSemaphore")
++            .field("acquire", &self.acquire)
++            .field("should_wait_for_acquire", &self.should_wait_for_acquire)
++            .field("previously_used_submission_index", &self.previously_used_submission_index)
++            .finish()
++    }
++}
++
++impl Drop for SwapchainAcquireSemaphore {
++    fn drop(&mut self) {
+         unsafe {
+-            device.destroy_semaphore(self.acquire, None);
++            self.device.raw.destroy_semaphore(self.acquire, None);
+         }
+     }
+ }
+ 
+-#[derive(Debug)]
+ struct SwapchainPresentSemaphores {
++    device: Arc<DeviceShared>,
+     /// A pool of semaphores for ordering presentation after drawing.
+     ///
+     /// The first [`present_index`] semaphores in this vector are:
+@@ -821,8 +826,9 @@ struct SwapchainPresentSemaphores {
+ }
+ 
+ impl SwapchainPresentSemaphores {
+-    pub fn new(frame_index: usize) -> Self {
++    pub fn new(device: &Arc<DeviceShared>, frame_index: usize) -> Self {
+         Self {
++            device: Arc::clone(device),
+             present: Vec::new(),
+             present_index: 0,
+             frame_index,
+@@ -876,10 +882,23 @@ impl SwapchainPresentSemaphores {
+         self.present[0..self.present_index].to_vec()
+     }
+ 
+-    unsafe fn destroy(&self, device: &ash::Device) {
++}
++
++impl core::fmt::Debug for SwapchainPresentSemaphores {
++    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
++        f.debug_struct("SwapchainPresentSemaphores")
++            .field("present", &self.present)
++            .field("present_index", &self.present_index)
++            .field("frame_index", &self.frame_index)
++            .finish()
++    }
++}
++
++impl Drop for SwapchainPresentSemaphores {
++    fn drop(&mut self) {
+         unsafe {
+             for sem in &self.present {
+-                device.destroy_semaphore(*sem, None);
++                self.device.raw.destroy_semaphore(*sem, None);
+             }
+         }
+     }

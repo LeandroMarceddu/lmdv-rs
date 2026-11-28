@@ -102,9 +102,9 @@ plan.
   yet.
 - A few Rune-kit accessibility and localization gaps remain around pane
   grips and the tab strip.
-- Closing a very large document frees the document and its parse, but a few
-  hundred MB of allocator and Rune layout memory can stay resident until the
-  app exits. The memory is reused; it is not an unbounded leak.
+- Rune keeps a closed document's layout memory resident for up to about
+  10 seconds after the last frame (or immediately when the window is hidden),
+  then releases it and trims the allocator. The active peak is unchanged.
 
 ## Development
 

@@ -239,6 +239,7 @@ impl Renderer {
     pub(super) fn encode_fills(&self, encoder: &mut wgpu::CommandEncoder) {
         let Some(pending) = self.fills.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
         let variant::Uber::Windfoil { fill, .. } = &self.uber else { return };
+        let _glyph_atlas = crate::frame::stage::StageGuard::enter(crate::frame::stage::FrameStage::GlyphAtlas);
         let pages: Vec<(&wgpu::Texture, std::ops::Range<u32>)> = pending
             .pages
             .iter()

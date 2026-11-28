@@ -78,8 +78,11 @@ pub(in crate::runtime) enum Action {
     WheelRepost(WheelRepost),
     Gesture(Vec<String>, gesture_dispatch::Gesture),
     Ime(Ime),
-    /// The window went inactive: an open composition becomes text (`Runtime::finish_composition`).
-    FinishIme,
+    /// An open composition becomes text. `reset_ime` tells the platform IME to drop its copy
+    /// (true when the host ended composition; false when the IME itself called `finishComposingText`).
+    FinishIme {
+        reset_ime: bool,
+    },
     Paste(crate::ClipboardContent, Option<Option<String>>),
     /// A `Tx::read_clipboard` callback's id and what the clipboard held.
     ClipboardRead(u64, crate::ClipboardContent),
@@ -94,6 +97,8 @@ pub(in crate::runtime) enum Action {
     /// A text field's menu: the field, the window point it opens at, and the window point where a
     /// press asked for it (none from the keyboard).
     FieldMenu(String, (f32, f32), Option<(f32, f32)>),
+    /// A native touch selection handle drag step queued by edge scroll for a focused text field.
+    HandleDrag(f32, f32),
     Blur,
     /// What assistive technology asked of an element (`a11y/actions.rs`).
     A11y(String, crate::a11y::actions::A11yAct),
@@ -138,7 +143,7 @@ impl ActionQueue {
                 | Action::FarFromBottom(..)
                 | Action::WindowFocus(_)
                 | Action::Physical(crate::PhysicalInput::FocusLost, _)
-                | Action::FinishIme
+                | Action::FinishIme { reset_ime: true }
                 | Action::ClipboardRead(..)
                 | Action::CopyImageDone(..)
                 | Action::UrlOpened(..)
@@ -267,6 +272,7 @@ pub(in crate::runtime) fn live_only_handler(action: &Action) -> Option<&'static 
         Action::Gesture(_, gesture_dispatch::Gesture::SmartMagnify(..)) => "on_smart_magnify",
         Action::Gesture(_, gesture_dispatch::Gesture::Button { .. }) => "on_button",
         Action::A11y(_, crate::a11y::actions::A11yAct::Delegate { .. }) => "on_a11y_action",
+        Action::A11y(_, crate::a11y::actions::A11yAct::CustomAction(_)) => "a11y_action",
         _ => return None,
     })
 }
@@ -314,7 +320,7 @@ fn handler_name(action: &Action) -> &'static str {
         Action::VisibleRows(..) => "on_visible_rows",
         Action::ScreenLayout(..) => "on_screen_layout",
         Action::Files(_) => "on_drop_files",
-        Action::Ime(_) | Action::FinishIme => "a text input's edit",
+        Action::Ime(_) | Action::FinishIme { .. } => "a text input's edit",
         Action::Paste(..) => "on_paste",
         Action::ClipboardRead(..) => "a `read_clipboard` callback",
         Action::CopyImageDone(..) => "a `copy_image_then` callback",
@@ -356,6 +362,8 @@ pub(crate) fn merge(tx: &mut Tx, one: Tx) {
     tx.keep_on_screen.extend(one.keep_on_screen);
     tx.evict_memos.extend(one.evict_memos);
     tx.wakes.extend(one.wakes);
+    tx.request_poll |= one.request_poll;
+    tx.urgent_frame |= one.urgent_frame;
     tx.text_flights.extend(one.text_flights);
     tx.launches.extend(one.launches);
     tx.unclipped_flights |= one.unclipped_flights;
@@ -365,6 +373,12 @@ pub(crate) fn merge(tx: &mut Tx, one: Tx) {
         tx.field_menu_resolution = one.field_menu_resolution;
     } else if one.field_menu_resolution.is_some() {
         tx.field_menu_resolution = one.field_menu_resolution;
+    }
+    if one.popup_menu_opened {
+        tx.popup_menu_opened = true;
+        tx.popup_menu_resolution = one.popup_menu_resolution;
+    } else if one.popup_menu_resolution.is_some() {
+        tx.popup_menu_resolution = one.popup_menu_resolution;
     }
     tx.file_dialogs.extend(one.file_dialogs);
     if let Some(request) = one.window_frame {
@@ -398,6 +412,9 @@ pub(crate) fn merge(tx: &mut Tx, one: Tx) {
     }
     if one.window_backdrop.is_some() {
         tx.window_backdrop = one.window_backdrop;
+    }
+    if one.resize_anchor.is_some() {
+        tx.resize_anchor = one.resize_anchor;
     }
     if one.represented_file.is_some() {
         tx.represented_file = one.represented_file;
@@ -701,17 +718,20 @@ impl RuntimeCore {
                 one.button = button;
                 self.press_link(app, &path, k, &mut one)
             }
-            Action::LinkSecondary(path, k, point) => self.secondary_press_link(app, &path, k, point, &mut one),
+            Action::LinkSecondary(path, k, point) => self.secondary_press_link_or_menu(app, &path, k, point, &mut one),
             Action::LinkHover(path, url, rect, pressing) => {
                 one.pressing = pressing;
                 self.dispatch_link_hover(app, &path, url.as_deref(), rect, &mut one)
             }
             Action::SecondaryPress(path, point) => {
                 let Some(n) = self.node(&path).filter(|n| !self.is_exiting(n.id)) else { return false };
-                let Some(f) = n.handlers.on_secondary_press.clone() else { return false };
-                log_event!(self, "secondary press {path}");
-                f(app.states(), point, &mut one);
-                true
+                if let Some(f) = n.handlers.on_secondary_press.clone() {
+                    log_event!(self, "secondary press {path}");
+                    f(app.states(), point, &mut one);
+                    true
+                } else {
+                    self.open_image_menu_at(app, &path, point.window_x, point.window_y)
+                }
             }
             Action::SecondaryRepost { modal, outer, down, up } => {
                 self.run_secondary_repost(app, &modal, outer.as_deref(), down, up, &mut one)
@@ -773,23 +793,26 @@ impl RuntimeCore {
             Action::Files(event) => self.run_files(app, event, &mut one),
             Action::Key { ev, repeat, stage } => {
                 if self.kbd.held_gate(None, Some(&ev.key), repeat) {
+                    self.kbd.note_key_consumed(false);
                     return false;
                 }
                 if !matches!(ev.key, crate::Key::Modifier { .. }) {
                     self.note_key_down(app, repeat);
                 }
-                if stage {
+                let ran = if stage {
                     self.route_stage_key(app, &ev, &mut one)
                 } else {
                     self.route_key(app, &ev, repeat, &mut one)
-                }
+                };
+                self.kbd.note_key_consumed(ran);
+                ran
             }
             Action::KeyUp(ev) => self.route_key_up(app, &ev, &mut one),
             Action::Wheel { gesture, chain, ev, phased } => self.run_wheel(app, gesture, chain, ev, phased, &mut one),
             Action::WheelRepost(repost) => self.run_wheel_repost(app, repost, &mut one),
             Action::Gesture(chain, gesture) => self.run_gesture(app, chain, gesture, &mut one),
             Action::Ime(ev) => self.run_ime(app, ev, &mut one),
-            Action::FinishIme => self.finish_ime(app, &mut one),
+            Action::FinishIme { reset_ime } => self.finish_ime(app, &mut one, reset_ime),
             Action::Paste(mut content, target) => {
                 if target.is_some_and(|target| target != self.paste_target()) {
                     return false;
@@ -862,6 +885,7 @@ impl RuntimeCore {
             }
             Action::Focus(path, x, y) => self.focus_input(app, path, x, y, &mut one),
             Action::FieldMenu(path, at, local) => self.field_menu(app, path, at, local, &mut one),
+            Action::HandleDrag(x, y) => self.drag_field_handle_view(app, x, y),
             Action::Blur => {
                 if self.kbd.focus.path().is_none() {
                     return false;

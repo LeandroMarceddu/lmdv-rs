@@ -1,12 +1,12 @@
 # Rune pin
 
 - Repository: https://github.com/anomalyco/rune
-- Snapshot commit: `f4ec14ed32256ae0c36e73476825f9245437de5b`
+- Snapshot commit: `af6b1fdd9537a3f278f9c85e0f0893f1e773302a`
 - Branch: `dev`
-- Snapshot date: 2026-11-25
-- Upstream head checked 2026-11-25: `c94de5574743478f19b87c3ee1c6e4b40d234d3d`
-  (5 commits past the pin; `dev` is the default branch and there is no `main`;
-  the pin is the measured rev for [OI-189](OPEN_ITEMS.md))
+- Snapshot date: 2026-11-28
+- Upstream head checked 2026-11-28: `af6b1fdd9537a3f278f9c85e0f0893f1e773302a`
+  (same as the pin; `dev` is the default branch and there is no `main`;
+  this rev includes the OI-199 rest and heap-trim fixes)
 - License: MIT
 - Toolchain pinned by upstream: Rust `1.99.1` (`rust-toolchain.toml`)
 

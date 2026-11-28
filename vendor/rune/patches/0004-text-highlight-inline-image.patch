@@ -1,6 +1,6 @@
 --- a/crates/rune-text/src/layout/cursor.rs
 +++ b/crates/rune-text/src/layout/cursor.rs
-@@ -500,6 +500,12 @@
+@@ -520,6 +520,12 @@
          } else {
              start + m.advance as f64
          };
@@ -13,7 +13,7 @@
          let mut intervals: Vec<(f64, f64)> = Vec::new();
          if plain && a <= lr.start && lr.end <= b {
              intervals.push((start, end));
-@@ -533,21 +539,45 @@
+@@ -553,21 +559,45 @@
                      }
                  }
              }

@@ -4,27 +4,37 @@
 //! None is touched at launch: a system font loads the first time a text has a character the
 //! app's own fonts lack (`TextSystem::load_fallbacks`). The platform's own fallback names the
 //! font and its files, as browsers ask it: DirectWrite on Windows (`direct_write`), CoreText on
-//! Apple platforms (`core_text`), fontconfig in process elsewhere (`fontconfig`). No font
-//! folder is walked and no process is started.
+//! Apple platforms (`core_text`), `font_fallback.xml` / `fonts.xml` on Android (`android`), and
+//! fontconfig in process on Linux/BSDs (`fontconfig`). No font folder is walked and no process is
+//! started. `RUNE_SYSTEM_FONTS=off` or `set_system_fonts(false)` loads none at all (`switch`).
 
 use crate::*;
 
+#[cfg(any(target_os = "android", all(test, not(target_arch = "wasm32"))))]
+mod android;
+mod async_load;
+mod blobs;
 #[cfg(target_vendor = "apple")]
 mod core_text;
 mod coverage;
 #[cfg(windows)]
 mod direct_write;
+mod dispatch;
 #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
 mod fontconfig;
 mod installed;
+mod switch;
+mod warm;
+#[cfg(target_os = "android")]
+use android as platform;
 #[cfg(target_vendor = "apple")]
 use core_text as platform;
 #[cfg(windows)]
 use direct_write as platform;
 #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
 use fontconfig as platform;
-/// Android and the web: no system fonts to ask.
-#[cfg(any(target_os = "android", target_arch = "wasm32"))]
+/// Web: no system fonts to ask.
+#[cfg(target_arch = "wasm32")]
 mod platform {
     pub(crate) fn family_files(_: &[&str]) -> Vec<std::path::PathBuf> {
         Vec::new()
@@ -35,9 +45,30 @@ mod platform {
     pub(super) fn installed_families() -> Vec<super::installed::RawFamily> {
         Vec::new()
     }
+    pub(super) fn prewarm() {}
 }
 
 pub use installed::{InstalledFamily, installed_families};
+pub use switch::{set_system_fonts, system_fonts_enabled};
+
+/// Starts initializing the process-wide system font registry and preloading common fallback
+/// families (symbols, colour emoji, CJK, and system monospace) on a background thread so the
+/// first fallback lookup does not stall the UI or layout thread.
+///
+/// Safe and cheap to call from `main`, `on_ready`, or any thread; subsequent calls do nothing
+/// once warm-up has started. If a synchronous/headless layout needs system fonts while warm-up is
+/// still in progress, it waits for that single in-flight build rather than starting a second one;
+/// live windows draw immediately with loaded fonts and relayout once uncached fallbacks arrive.
+///
+/// Does nothing when system fonts are disabled (`RUNE_SYSTEM_FONTS=off` or
+/// [`set_system_fonts`]`(false)`), or on platforms whose system font registry needs no eager
+/// process-wide build (Apple platforms, Windows, Android, and `wasm32`).
+pub fn prewarm_system_fonts() {
+    if !system_fonts_enabled() {
+        return;
+    }
+    platform::prewarm();
+}
 
 // Common-script symbols can inherit the script of adjacent letters. Put these families at
 // the end of the requested family list, rather than registering only a Zyyy fallback.
@@ -60,7 +91,7 @@ pub(crate) const SYMBOL_FAMILIES: &[&str] = &["Segoe UI Emoji"];
 // without one of them, a Latin combining mark Inter lacks (U+0335, U+0322) draws as tofu.
 // Current Noto releases name Symbols 2 with a space ("Noto Sans Symbols 2"), while older packages
 // used "Noto Sans Symbols2"; list both so either matches fontique's family lookup.
-#[cfg_attr(any(target_vendor = "apple", windows), allow(dead_code))]
+#[cfg_attr(any(target_vendor = "apple", windows, target_os = "android"), allow(dead_code))]
 pub(crate) const LINUX_SYMBOL_FAMILIES: &[&str] = &[
     "DejaVu Sans",
     "Noto Sans",
@@ -70,14 +101,20 @@ pub(crate) const LINUX_SYMBOL_FAMILIES: &[&str] = &[
     "DejaVu Sans Mono",
     "Noto Color Emoji",
 ];
-#[cfg(not(any(target_vendor = "apple", windows)))]
+#[cfg(target_os = "android")]
+pub(crate) const SYMBOL_FAMILIES: &[&str] =
+    &["Roboto", "Noto Sans", "Noto Sans Symbols 2", "Noto Sans Symbols2", "Noto Sans Symbols", "Noto Color Emoji"];
+#[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
 pub(crate) const SYMBOL_FAMILIES: &[&str] = LINUX_SYMBOL_FAMILIES;
 // Only Noto Sans's upright regular file, static or variable, so other Noto Sans* script fonts
 // stay out when matching by file name.
-#[cfg_attr(any(target_vendor = "apple", windows), allow(dead_code))]
+#[cfg_attr(any(target_vendor = "apple", windows, target_os = "android"), allow(dead_code))]
 pub(crate) const LINUX_SYMBOL_FONT_FILES: &[&str] =
     &["dejavusans", "notosans-regular", "notosans[", "notosanssymbols", "notocoloremoji"];
-#[cfg(not(any(target_vendor = "apple", windows)))]
+#[cfg(target_os = "android")]
+pub(crate) const SYMBOL_FONT_FILES: &[&str] =
+    &["roboto", "notosans-regular", "notosans[", "notosanssymbols", "notocoloremoji"];
+#[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
 pub(crate) const SYMBOL_FONT_FILES: &[&str] = LINUX_SYMBOL_FONT_FILES;
 
 // `Family::SystemMono`: the platform's monospaced UI families, most preferred first, and the
@@ -90,20 +127,37 @@ const SYSTEM_MONO_FILES: &[&str] = &["sfnsmono", "menlo"];
 const SYSTEM_MONO_FAMILIES: &[&str] = &["Cascadia Mono", "Consolas", "Courier New"];
 #[cfg(windows)]
 const SYSTEM_MONO_FILES: &[&str] = &["cascadiamono", "consola", "cour"];
+// After Android's own `monospace` family (`android::monospace_files`).
+#[cfg(target_os = "android")]
+const SYSTEM_MONO_FAMILIES: &[&str] = &["Droid Sans Mono", "Roboto Mono", "Noto Sans Mono", "Cutive Mono"];
+#[cfg(target_os = "android")]
+const SYSTEM_MONO_FILES: &[&str] = &["droidsansmono", "robotomono", "notosansmono", "cutivemono"];
 // After fontconfig's own answer (`fontconfig_monospace`).
-#[cfg(not(any(target_vendor = "apple", windows)))]
+#[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
 const SYSTEM_MONO_FAMILIES: &[&str] = &["DejaVu Sans Mono", "Liberation Mono", "Noto Sans Mono", "Ubuntu Mono"];
-#[cfg(not(any(target_vendor = "apple", windows)))]
+#[cfg(not(any(target_vendor = "apple", windows, target_os = "android")))]
 const SYSTEM_MONO_FILES: &[&str] = &["dejavusansmono", "liberationmono", "notosansmono", "ubuntumono"];
 
 /// The installed `Family::SystemMono` families, most preferred first, loading their files.
 pub(crate) fn load_system_mono(collection: &mut Collection, loaded: &mut LoadedFiles) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
+    if !system_fonts_enabled() {
+        return names;
+    }
     // fontconfig's own `monospace`, asked in process.
     #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
     if let Some((family, files)) = fontconfig::monospace() {
         load_files(collection, loaded, files);
         names.push(family);
+    }
+    // Android's own `monospace` family from `font_fallback.xml` / `fonts.xml`.
+    #[cfg(target_os = "android")]
+    for id in load_files(collection, loaded, android::monospace_files()) {
+        if let Some(name) = collection.family_name(id)
+            && !names.iter().any(|n| n == name)
+        {
+            names.push(name.to_owned());
+        }
     }
     load_files(collection, loaded, installed_files(SYSTEM_MONO_FAMILIES, SYSTEM_MONO_FILES).into_iter().take(12));
     for name in SYSTEM_MONO_FAMILIES {
@@ -144,8 +198,16 @@ pub(crate) fn family_list<'a>(list: &'a str, system_mono: &'a [String], sans: &'
 }
 
 /// The installed families among `names`, loading the system font files matching `files`.
-pub(crate) fn load_families(collection: &mut Collection, files: &[&str], names: &[&'static str]) -> Vec<&'static str> {
-    collection.load_fonts_from_paths(installed_files(names, files));
+pub(crate) fn load_families(
+    collection: &mut Collection,
+    loaded: &mut LoadedFiles,
+    files: &[&str],
+    names: &[&'static str],
+) -> Vec<&'static str> {
+    if !system_fonts_enabled() {
+        return Vec::new();
+    }
+    load_files(collection, loaded, installed_files(names, files));
     present_families(collection, names)
 }
 
@@ -222,9 +284,19 @@ fn register_system_cjk(
     families: (&str, &str),
     all: &mut Vec<FamilyId>,
 ) {
+    let added = load_files(collection, loaded, files.into_iter().take(16));
+    register_system_cjk_ids(collection, added, families, all);
+}
+
+pub(super) fn register_system_cjk_ids(
+    collection: &mut Collection,
+    added: Vec<FamilyId>,
+    families: (&str, &str),
+    all: &mut Vec<FamilyId>,
+) {
     let primary = [collection.family_id(families.0), collection.family_id(families.1)];
     let before = all.len();
-    for id in load_files(collection, loaded, files.into_iter().take(16)) {
+    for id in added {
         if !primary.contains(&Some(id)) && !all.contains(&id) {
             all.push(id);
         }
@@ -259,6 +331,8 @@ pub(crate) struct Fallbacks {
     text_symbols: bool,
     /// Cached colour-table check (`COLR`, `CBDT` or `sbix`) per registered `FamilyId`.
     color_families: HashMap<FamilyId, bool>,
+    /// Off-thread fallback loading state (live windows only; disabled in headless/test runs).
+    async_load: async_load::AsyncFallbacks,
 }
 
 impl Fallbacks {
@@ -334,7 +408,8 @@ impl TextSystem {
     #[cfg(not(any(windows, target_vendor = "apple")))]
     fn load_symbol_families(&mut self) {
         self.fallbacks.symbols = true;
-        self.symbol_families = load_families(&mut self.font_cx.collection, SYMBOL_FONT_FILES, SYMBOL_FAMILIES);
+        self.symbol_families =
+            load_families(&mut self.font_cx.collection, &mut self.font_files, SYMBOL_FONT_FILES, SYMBOL_FAMILIES);
         self.emoji = self.symbol_families.iter().copied().find(|f| f.contains("Emoji"));
         #[cfg(all(unix, not(target_vendor = "apple"), not(target_os = "android")))]
         if self.emoji.is_none()
@@ -342,16 +417,29 @@ impl TextSystem {
         {
             self.add_fallback_emoji(&family, files);
         }
+        #[cfg(target_os = "android")]
+        if self.emoji.is_none() {
+            let files = android::emoji_files();
+            if !files.is_empty() {
+                self.add_fallback_emoji("", files);
+            }
+        }
     }
 
-    /// Loads `files` and registers `family` (from fontconfig's generic `emoji`) at the end of
-    /// `symbol_families` as the colour emoji family when none is set yet.
-    #[cfg_attr(not(all(unix, not(target_vendor = "apple"), not(target_os = "android"))), allow(dead_code))]
+    /// Loads `files` and registers `family` (from fontconfig's generic `emoji`, or Android's
+    /// `und-Zsye` fallback) at the end of `symbol_families` as the colour emoji family when none
+    /// is set yet.
+    #[cfg_attr(not(all(unix, not(target_vendor = "apple"))), allow(dead_code))]
     pub(crate) fn add_fallback_emoji(&mut self, family: &str, files: Vec<std::path::PathBuf>) {
         if self.emoji.is_some() {
             return;
         }
         let added = load_files(&mut self.font_cx.collection, &mut self.font_files, files);
+        self.finish_fallback_emoji(family, added);
+    }
+
+    #[cfg_attr(not(all(unix, not(target_vendor = "apple"))), allow(dead_code))]
+    pub(super) fn finish_fallback_emoji(&mut self, family: &str, added: Vec<FamilyId>) {
         let emoji_id = self
             .font_cx
             .collection
@@ -395,10 +483,14 @@ impl TextSystem {
     /// its text falls back to, once, so a missing family draws in the system's font, not
     /// nothing (`load_fallbacks` loads nothing for Latin text). Run where the slots are set.
     pub(crate) fn load_slot_fallbacks(&mut self) {
+        if !system_fonts_enabled() {
+            return;
+        }
         let collection = &mut self.font_cx.collection;
         if slot_resolves(collection, &self.sans) && slot_resolves(collection, &self.mono) {
             return;
         }
+        let _fallback = crate::profile::TextStageScope::enter(crate::profile::TextStage::SystemFallback);
         #[cfg(windows)]
         // Windows' fallback for Latin; `asked` is otherwise never given ASCII.
         if self.fallbacks.asked.insert('A') {
@@ -412,7 +504,7 @@ impl TextSystem {
         }
         #[cfg(not(any(windows, target_vendor = "apple")))]
         if !self.fallbacks.symbols {
-            self.load_symbol_families();
+            let _ = self.load_symbol_families_maybe_async(false);
         }
     }
 
@@ -440,7 +532,12 @@ impl TextSystem {
     /// The families in `files` at the end of every family stack, colour emoji last, so a symbol
     /// with a text form keeps it.
     pub(crate) fn add_symbol_files(&mut self, files: Vec<std::path::PathBuf>) {
-        for id in load_files(&mut self.font_cx.collection, &mut self.font_files, files) {
+        let added = load_files(&mut self.font_cx.collection, &mut self.font_files, files);
+        self.register_symbol_family_ids(added);
+    }
+
+    pub(super) fn register_symbol_family_ids(&mut self, ids: Vec<FamilyId>) {
+        for id in ids {
             let Some(name) = self.font_cx.collection.family_name(id).map(intern) else { continue };
             // A family's tables are read only until the colour emoji family is known.
             let is_emoji = self.emoji == Some(name)
@@ -503,46 +600,6 @@ pub(crate) fn emoji_family_list(list: &str) -> Vec<FontFamilyName<'_>> {
     }
 }
 
-fn load_installed_names<'a>(
-    collection: &mut Collection,
-    loaded: &mut LoadedFiles,
-    tried: &mut std::collections::HashSet<String>,
-    families: impl IntoIterator<Item = FontFamilyName<'a>>,
-) -> bool {
-    let mut added = false;
-    for family in families {
-        let FontFamilyName::Named(name) = family else { continue };
-        if collection.family_id(&name).is_some() || !tried.insert(name.to_lowercase()) {
-            continue;
-        }
-        added |= !load_files(collection, loaded, installed_family_files(&name)).is_empty();
-    }
-    added
-}
-
-/// Loads the installed families the CSS family list `list` names that the collection lacks,
-/// each looked up once (`tried`). Generic CSS keywords (`ui-monospace`, `monospace`, ...) are
-/// skipped so they trigger no system font lookup at launch.
-pub(crate) fn load_installed(
-    collection: &mut Collection,
-    loaded: &mut LoadedFiles,
-    tried: &mut std::collections::HashSet<String>,
-    list: &str,
-) -> bool {
-    load_installed_names(collection, loaded, tried, css_or_named(list))
-}
-
-/// Loads the installed families named by an explicit emoji family setting (`emoji_family_list`)
-/// that the collection lacks, each looked up once (`tried`).
-pub(crate) fn load_installed_emoji(
-    collection: &mut Collection,
-    loaded: &mut LoadedFiles,
-    tried: &mut std::collections::HashSet<String>,
-    list: &str,
-) -> bool {
-    load_installed_names(collection, loaded, tried, emoji_family_list(list))
-}
-
 /// Whether the slot `list` names a family the collection has, or `ui-monospace`, whose
 /// families load with the text that asks for them (`family_list` then falls back to sans).
 fn slot_resolves(collection: &mut Collection, list: &str) -> bool {
@@ -564,22 +621,52 @@ pub(crate) fn named_list(list: &str) -> Vec<FontFamilyName<'_>> {
 /// The families each system font file added to the collection, so a file is loaded once.
 pub(crate) type LoadedFiles = HashMap<std::path::PathBuf, Vec<FamilyId>>;
 
-/// The families of `paths`, in order, loading each file the first time.
+fn register_blob(collection: &mut Collection, blob: parley::fontique::Blob<u8>) -> Vec<FamilyId> {
+    let mut added: Vec<FamilyId> = collection.register_fonts(blob, None).into_iter().map(|(id, _)| id).collect();
+    added.sort_unstable();
+    added.dedup();
+    added
+}
+
+/// The families of `paths`, in order, loading each file the first time via the shared memory-mapped
+/// blob cache. Nothing while system fonts are off (`set_system_fonts`).
 fn load_files(
     collection: &mut Collection,
     loaded: &mut LoadedFiles,
     paths: impl IntoIterator<Item = std::path::PathBuf>,
 ) -> Vec<FamilyId> {
     let mut families: Vec<FamilyId> = Vec::new();
+    if !system_fonts_enabled() {
+        return families;
+    }
     for path in paths {
         let ids = loaded.entry(path).or_insert_with_key(|path| {
-            let before: Vec<FamilyId> = collection.family_ids().collect();
-            collection.load_fonts_from_paths([path]);
-            let mut added: Vec<FamilyId> = collection.family_ids().filter(|id| !before.contains(id)).collect();
-            // `family_ids` iterates a hash map; `FamilyId`s increase in the collection file's face order.
-            added.sort_unstable();
-            added
+            let Some(blob) = blobs::load_blob(path) else {
+                return Vec::new();
+            };
+            register_blob(collection, blob)
         });
+        for id in ids.iter() {
+            if !families.contains(id) {
+                families.push(*id);
+            }
+        }
+    }
+    families
+}
+
+/// Like [`load_files`], registering already-mapped `(PathBuf, Blob<u8>)` entries with zero file I/O.
+pub(super) fn load_preloaded(
+    collection: &mut Collection,
+    loaded: &mut LoadedFiles,
+    entries: impl IntoIterator<Item = (std::path::PathBuf, parley::fontique::Blob<u8>)>,
+) -> Vec<FamilyId> {
+    let mut families: Vec<FamilyId> = Vec::new();
+    if !system_fonts_enabled() {
+        return families;
+    }
+    for (path, blob) in entries {
+        let ids = loaded.entry(path).or_insert_with(|| register_blob(collection, blob));
         for id in ids.iter() {
             if !families.contains(id) {
                 families.push(*id);
@@ -649,6 +736,8 @@ fn walk_font_dirs() -> Vec<(String, std::path::PathBuf)> {
         }
     } else if cfg!(target_os = "ios") {
         dirs.push("/System/Library/Fonts".into());
+    } else if cfg!(target_os = "android") {
+        dirs.extend(["/system/fonts", "/product/fonts", "/system_ext/fonts"].map(Into::into));
     } else if cfg!(windows) {
         let root = std::env::var_os("WINDIR").map_or_else(|| "C:\\Windows".into(), std::path::PathBuf::from);
         dirs.push(root.join("Fonts"));

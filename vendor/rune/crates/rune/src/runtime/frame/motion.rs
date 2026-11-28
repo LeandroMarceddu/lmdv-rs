@@ -180,6 +180,7 @@ impl RuntimeCore {
             animating |= self.build();
         }
         animating |= edge.queued;
+        self.laid_autoscroll();
         self.report_at_bottom();
         animating |= self.report_visible_rows();
         self.report_layout();

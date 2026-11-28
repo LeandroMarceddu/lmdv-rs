@@ -31,8 +31,8 @@ pub(crate) mod traffic_lights;
 pub(crate) mod window_shape;
 
 pub(crate) use geometry::{
-    backing_scale, content_origin, display_bounds, outer_size, overlay_rect, overlay_screen_area, place_window,
-    pointer_display, set_window_frame, window_geometry,
+    backing_scale, content_origin, display_bounds, display_wide_color, outer_size, overlay_rect, overlay_screen_area,
+    place_window, pointer_display, screen_bounds, set_window_frame, window_geometry,
 };
 use geometry::{overlay_rect_on, overlay_rect_on_sized, screen_id};
 use pointer::MouseMonitors;
@@ -42,8 +42,8 @@ pub(crate) use presentation::Prewarm;
 #[cfg(test)]
 pub(crate) use surface::layer_occluded;
 pub(crate) use surface::{
-    PresumeShown, flush_while_launching, launching, pin_contents_top_left, present_with_transaction, surface_occluded,
-    sync_contents_scale, window_occluded,
+    PresumeShown, flush_while_launching, launching, pin_contents, pin_contents_top_left, present_with_transaction,
+    set_contents_gravity, set_drawable_size, surface_occluded, sync_contents_scale, window_occluded,
 };
 use surface::{apply_window_color_space, occlusion_hidden};
 
@@ -163,22 +163,22 @@ pub(crate) fn has_subclass(object: &objc2::runtime::AnyObject, prefix: &[u8]) ->
     std::iter::successors(Some(object.class()), |c| c.superclass()).any(|c| c.name().to_bytes().starts_with(prefix))
 }
 
-pub(crate) fn configure_window(window: &winit::window::Window, options: &crate::MacWindowOptions) {
+pub(crate) fn configure_window(window: &winit::window::Window, options: &crate::MacWindowOptions, wide_color: bool) {
     crate::platform::macos::appearance::install();
     if let Some(window) = ns_window(window) {
-        configure_native(&window, options);
+        configure_native(&window, options, wide_color);
     }
 }
 
 #[allow(unsafe_code)]
-fn configure_native(window: &NSWindow, options: &crate::MacWindowOptions) {
+fn configure_native(window: &NSWindow, options: &crate::MacWindowOptions, wide_color: bool) {
     if let Some(shadow) = options.shadow {
         window.setHasShadow(shadow);
     }
     if let Some(level) = options.level {
         window.setLevel(level);
     }
-    apply_window_color_space(window, options.color_space);
+    apply_window_color_space(window, options.color_space, wide_color);
     // SAFETY: every caller runs on the AppKit main thread.
     unsafe {
         // AppKit saves nothing of a window it could not restore (`launch::ignore_saved_windows`).
@@ -266,15 +266,17 @@ impl Panel {
         interactive: bool,
         options: &OverlayOptions,
         color_space: crate::MacColorSpace,
+        wide_color: bool,
         wake: Option<crate::Waker>,
     ) -> Option<Panel> {
-        Self::adopt_kind(window, at, interactive, options, color_space, wake, false)
+        Self::adopt_kind(window, at, interactive, options, color_space, wide_color, wake, false)
     }
 
     pub fn adopt_window(
         window: &winit::window::Window,
         size: (f32, f32),
         native: &crate::MacWindowOptions,
+        wide_color: bool,
     ) -> Option<Panel> {
         let options = OverlayOptions {
             input: OverlayInput::All,
@@ -288,6 +290,7 @@ impl Panel {
             true,
             &options,
             native.color_space,
+            wide_color,
             None,
             true,
         )?;
@@ -295,7 +298,7 @@ impl Panel {
         if let Some(exclude) = native.exclude_from_capture.take() {
             panel.set_capture_exclusion(exclude);
         }
-        configure_native(&panel.panel, &native);
+        configure_native(&panel.panel, &native, wide_color);
         Some(panel)
     }
 
@@ -306,6 +309,7 @@ impl Panel {
         interactive: bool,
         options: &OverlayOptions,
         color_space: crate::MacColorSpace,
+        wide_color: bool,
         wake: Option<crate::Waker>,
         ordinary: bool,
     ) -> Option<Panel> {
@@ -346,7 +350,7 @@ impl Panel {
             );
         }
         let native = overlay_panel_native_options(options.level, color_space);
-        configure_native(&panel, &native);
+        configure_native(&panel, &native, wide_color);
         if ordinary {
             panel.setTitle(&ns_window.title());
             panel.setTitleVisibility(ns_window.titleVisibility());

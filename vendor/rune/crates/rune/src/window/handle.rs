@@ -10,6 +10,10 @@ pub(super) struct NativeWindow {
     pub(super) window: Mutex<Weak<Window>>,
     pub(super) number: AtomicU32,
     pub(super) ready: AtomicBool,
+    /// True when routed through `Route::Callback` (no `winit::window::Window` backs this handle).
+    pub(super) non_winit: AtomicBool,
+    /// Logical scale bits published by non-winit hosts while shown (0 = unset/closed).
+    pub(super) scale_bits: std::sync::atomic::AtomicU64,
     #[cfg(target_os = "windows")]
     pub(super) no_activate: AtomicBool,
     #[cfg(target_os = "windows")]
@@ -26,6 +30,9 @@ pub(super) enum Route {
     /// The host's event loop and slot.
     #[cfg(not(target_arch = "wasm32"))]
     Bound { proxy: EventLoopProxy<WakeEvent>, slot: usize },
+    /// Non-winit host callback (Android page stack and host-side tests).
+    #[cfg(not(target_arch = "wasm32"))]
+    Callback { send: Arc<dyn Fn(WakeEvent) + Send + Sync>, slot: usize },
 }
 
 impl Default for Route {
@@ -57,13 +64,46 @@ impl WindowHandle {
         *route = Route::Bound { proxy, slot };
     }
 
+    /// Routes requests to a non-winit host callback (Android page stack and host-side tests),
+    /// draining requests queued before binding in order outside the route lock.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+    pub(crate) fn bind_callback(&self, send: Arc<dyn Fn(WakeEvent) + Send + Sync>, slot: usize) {
+        self.native.non_winit.store(true, Ordering::Release);
+        let queued = {
+            let mut route = self.native.route.lock().unwrap();
+            let queued = match &mut *route {
+                Route::Unbound { queued } => std::mem::take(queued),
+                Route::Bound { .. } | Route::Callback { .. } => Vec::new(),
+            };
+            *route = Route::Callback { send: Arc::clone(&send), slot };
+            queued
+        };
+        for request in queued {
+            send(request(slot));
+        }
+    }
+
+    /// Publishes readiness for non-winit hosts (Android page stack).
+    #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+    pub(crate) fn set_ready(&self, ready: bool) {
+        self.native.ready.store(ready, Ordering::Release);
+    }
+
+    /// Publishes or clears the display scale for non-winit hosts (Android page stack).
+    #[cfg_attr(not(any(target_os = "android", test)), allow(dead_code))]
+    pub(crate) fn set_non_winit_scale(&self, scale: Option<f64>) {
+        let bits = scale.filter(|s| s.is_finite() && *s > 0.0).map_or(0, f64::to_bits);
+        self.native.scale_bits.store(bits, Ordering::Release);
+    }
+
     /// A headless run never binds a host; it takes the queued requests instead.
     #[cfg_attr(not(any(feature = "tooling", debug_assertions)), allow(dead_code))]
     pub(crate) fn take_headless(&self) -> Vec<WakeEvent> {
         let queued = match &mut *self.native.route.lock().unwrap() {
             Route::Unbound { queued } => std::mem::take(queued),
             #[cfg(not(target_arch = "wasm32"))]
-            Route::Bound { .. } => Vec::new(),
+            Route::Bound { .. } | Route::Callback { .. } => Vec::new(),
         };
         queued.into_iter().map(|request| request(0)).collect()
     }
@@ -74,19 +114,39 @@ impl WindowHandle {
     }
 
     pub(super) fn send(&self, request: impl FnOnce(usize) -> WakeEvent + Send + 'static) {
-        match &mut *self.native.route.lock().unwrap() {
-            #[cfg(not(target_arch = "wasm32"))]
-            Route::Bound { proxy, slot } => {
-                proxy.send_event(request(*slot)).ok();
+        #[cfg(not(target_arch = "wasm32"))]
+        let callback = {
+            let mut route = self.native.route.lock().unwrap();
+            match &mut *route {
+                Route::Bound { proxy, slot } => {
+                    proxy.send_event(request(*slot)).ok();
+                    return;
+                }
+                Route::Callback { send, slot } => Some((Arc::clone(send), *slot)),
+                Route::Unbound { queued } => {
+                    queued.push(Box::new(request));
+                    return;
+                }
             }
-            Route::Unbound { queued } => queued.push(Box::new(request)),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some((send, slot)) = callback {
+            send(request(slot));
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut route = self.native.route.lock().unwrap();
+            if let Route::Unbound { queued } = &mut *route {
+                queued.push(Box::new(request));
+            }
         }
     }
 
     /// The first frame has completed for the current native lifetime. For a launcher
     /// this confirms GPU completion of an alpha-zero frame before reveal. False after destruction.
     pub fn is_ready(&self) -> bool {
-        self.window().is_ok() && self.native.ready.load(Ordering::Acquire)
+        self.native.ready.load(Ordering::Acquire)
+            && (self.native.non_winit.load(Ordering::Acquire) || self.window().is_ok())
     }
     pub fn key(&self) -> &str {
         &self.key
@@ -109,43 +169,22 @@ impl WindowHandle {
     /// is and how it is shown (on macOS the position is asked of the window server: about
     /// 1,700 µs in a first frame). None while it's closed. Call it on the UI thread.
     pub fn scale(&self) -> Option<f64> {
-        Some(self.window().ok()?.scale_factor())
+        if let Ok(window) = self.window() {
+            return Some(window.scale_factor());
+        }
+        let bits = self.native.scale_bits.load(Ordering::Acquire);
+        (bits != 0).then(|| f64::from_bits(bits))
     }
     /// Where the window is on the desktop and whether it's maximized, minimized or full screen,
     /// to save and reopen it there. None while it's closed, and on Wayland, which hides window
     /// positions. Call it on the UI thread.
     pub fn placement(&self) -> Option<crate::windows::WindowPlacement> {
         let window = self.window().ok()?;
-        let (outer, inner) = (window.outer_position().ok()?, window.inner_position().ok()?);
-        let size = window.inner_size();
         #[cfg(target_os = "macos")]
         let panel = crate::platform::macos::is_panel(&window);
         #[cfg(not(target_os = "macos"))]
         let panel = false;
-        let (maximized, minimized, full_screen) = if panel {
-            (false, false, false)
-        } else {
-            (window.is_maximized(), window.is_minimized().unwrap_or(false), window.fullscreen().is_some())
-        };
-        #[cfg(target_os = "windows")]
-        let restore = ((maximized || minimized) && !full_screen)
-            .then(|| crate::platform::win32::restore_frame(&window))
-            .flatten();
-        #[cfg(not(target_os = "windows"))]
-        let restore = None;
-        Some(crate::windows::WindowPlacement {
-            position: (outer.x, outer.y),
-            content_position: (inner.x, inner.y),
-            content_size: (size.width, size.height),
-            scale: window.scale_factor(),
-            maximized,
-            minimized,
-            full_screen,
-            restore,
-            display: window
-                .current_monitor()
-                .map(|m| ((m.position().x, m.position().y), (m.size().width, m.size().height))),
-        })
+        crate::window::placement::sample_native_placement(&window, panel, None)
     }
     /// Shows `state` on the window's taskbar button: a progress bar and a count badge (see
     /// [`crate::Taskbar`]). macOS shows the count on the Dock icon, summed over the app's windows
@@ -268,13 +307,36 @@ impl WindowHandle {
         #[cfg(target_arch = "wasm32")]
         let _ = backdrop;
     }
-    /// Physical desktop pixels; retained across recreation. Unsupported on Wayland.
+    /// Physical desktop pixels; retained across recreation. On macOS, resolved against connected
+    /// displays' backing scales; for unambiguous mixed-scale moves when physical display rects
+    /// overlap, use [`Self::set_logical_position`]. Unsupported on Wayland.
     pub fn set_position(&self, position: (i32, i32)) {
         self.send(move |slot| WakeEvent::Position(slot, position));
+    }
+    /// Outer position in logical desktop points (top-left origin; negative coordinates are valid).
+    /// On macOS this moves the window directly in AppKit global points, unaffected by the
+    /// window's current display scale. Retained across recreation. Unsupported on Wayland.
+    pub fn set_logical_position(&self, position: (f64, f64)) {
+        self.send(move |slot| WakeEvent::LogicalPosition(slot, position));
     }
     pub fn place(&self, display: crate::DisplayTarget, placement: crate::OverlayPlacement) {
         let place = crate::windows::PlaceRequest::new(display, placement);
         self.send(move |slot| WakeEvent::Place(slot, place));
+    }
+    /// Sets which edge or corner of this window stays fixed when Rune resizes it
+    /// ([`App::resize_anchor`](crate::App::resize_anchor),
+    /// [`Tx::set_resize_anchor`](crate::Tx::set_resize_anchor)). Retained across native window
+    /// recreation.
+    ///
+    /// ```no_run
+    /// use rune::{AppSpec, ResizeAnchor, WindowSpec, el};
+    ///
+    /// let spec = WindowSpec::new("launcher", AppSpec::new("Launcher", (600.0, 400.0), || (), |_, _| el()))
+    ///     .on_created(|handle| handle.set_resize_anchor(ResizeAnchor::Bottom));
+    /// let _ = spec;
+    /// ```
+    pub fn set_resize_anchor(&self, anchor: crate::ResizeAnchor) {
+        self.send(move |slot| WakeEvent::ResizeAnchor(slot, anchor));
     }
     /// [`crate::Tx::resize_window`] from outside a handler, on `tok::motion::DEFAULT`.
     pub fn resize(&self, size: (f32, f32)) {
@@ -318,7 +380,8 @@ impl WindowHandle {
         }
         self.hide();
     }
-    /// Focus/activate an already-visible window, restoring it if minimized. Wayland requests attention.
+    /// Focus/activate an already-visible window, restoring it if minimized.
+    /// On Wayland this requests attention; use [`activate`](Self::activate) for compositor-authorized focus.
     pub fn focus(&self) {
         self.send(WakeEvent::Focus);
     }
@@ -328,6 +391,14 @@ impl WindowHandle {
     /// apply once the window's host starts.
     pub fn open(&self) {
         self.send(|slot| WakeEvent::Window(slot, WindowRequest::Open(None)));
+    }
+    /// Show, restore and focus the window with an activation token another process forwarded
+    /// (`XDG_ACTIVATION_TOKEN` on Wayland, `DESKTOP_STARTUP_ID` on X11), so the compositor
+    /// lets it take focus (see [`AppHandle::activate`](crate::AppHandle::activate)).
+    /// An empty token or a platform without activation tokens behaves like [`open`](Self::open).
+    pub fn activate(&self, token: impl Into<String>) {
+        let token = Some(token.into()).filter(|t| !t.is_empty());
+        self.send(move |slot| WakeEvent::Window(slot, WindowRequest::Open(token)));
     }
     pub fn close(&self) {
         self.send(|slot| WakeEvent::Window(slot, WindowRequest::Close));

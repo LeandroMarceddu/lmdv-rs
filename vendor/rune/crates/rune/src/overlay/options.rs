@@ -7,7 +7,7 @@ use crate::{Align, Cx, El, OverlaySpec, ScreenEdge};
 pub struct DisplayId(pub(crate) winit::monitor::MonitorHandle, Option<NativeDisplayId>);
 
 /// Native display identity. Windows handles retain their full pointer width.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum NativeDisplayId {
     MacOS(u32),
     Windows(isize),
@@ -71,6 +71,11 @@ pub enum OverlayPlacement {
     /// exactly over an element of a window. On macOS one point space spans displays of any
     /// scale, and the overlay draws at the backing scale of the display it lands on.
     /// Elsewhere a rect off the primary display is exact only where displays share a scale.
+    ///
+    /// On Windows, `Rect` stays in full display coordinates for both placement and
+    /// [`ContentSizing`](crate::ContentSizing) (unlike `Edge`, it does not clamp to
+    /// [`crate::Display::work_area`]); pass [`ConfiguredOverlay::max_size`] if a
+    /// content-sized `Rect` overlay should stay within the work area.
     Rect { x: f32, y: f32, width: f32, height: f32 },
     /// Covers the entire selected display (including taskbar/menu-bar areas).
     FullScreen,
@@ -197,10 +202,14 @@ pub struct ConfiguredOverlay<T: 'static> {
     pub(crate) setup: Option<fn(&mut T, crate::Waker)>,
     pub(crate) runtime: crate::app::RuntimeConfig<T>,
     pub(crate) font_smoothing: Option<crate::FontSmoothing>,
+    pub(crate) wheel_glide: Option<bool>,
+    pub(crate) wheel_line: Option<Option<f32>>,
     pub(crate) macos_level: Option<isize>,
     pub(crate) macos_color_space: crate::MacColorSpace,
     pub(crate) window_backdrop: crate::WindowBackdrop,
     pub(crate) frame_latency: Option<u32>,
+    pub(crate) wide_color: bool,
+    pub(crate) keyboard_dispatch: crate::KeyboardDispatch,
     pub(crate) on_materials: Option<crate::system_material::OnMaterials>,
     pub(crate) animate_reveal: bool,
     pub(crate) release_after: Option<std::time::Duration>,
@@ -234,6 +243,20 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// ```
     pub fn on_field_menu(mut self, f: fn(&mut T, crate::FieldMenuRequest, &mut crate::Tx)) -> Self {
         self.runtime.on_field_menu = Some(f);
+        self
+    }
+    /// Fallback handler for pop-up and context menus when native pop-ups are unavailable (such as
+    /// Linux), like [`App::on_popup_menu`](crate::App::on_popup_menu).
+    ///
+    /// ```no_run
+    /// use rune::{OverlayOptions, OverlaySpec, PopupMenuRequest, Tx, el};
+    ///
+    /// let _overlay = OverlaySpec::new("quick", (320.0, 200.0), |_: &(), _| el())
+    ///     .options(OverlayOptions::default())
+    ///     .on_popup_menu(|_: &mut (), _req: PopupMenuRequest, _tx: &mut Tx| {});
+    /// ```
+    pub fn on_popup_menu(mut self, f: fn(&mut T, crate::PopupMenuRequest, &mut crate::Tx)) -> Self {
+        self.runtime.on_popup_menu = Some(f);
         self
     }
     /// Composite this overlay's translucent fills, blurs, shadows, images, video and text in
@@ -285,10 +308,31 @@ impl<T: 'static> ConfiguredOverlay<T> {
         self.font_smoothing = Some(mode);
         self
     }
-    /// Called before each frame; true means state changed, not that another frame is due.
-    /// Defaults to the app's poll when its state type matches this overlay's. Other state
-    /// types have no inherited poll. Use `Tx::wake_after` for the next timed update;
-    /// deadlines also run while hidden, like the window host, without drawing.
+    /// Whether whole mouse-wheel notches ease smoothly rather than jumping immediately for this
+    /// overlay. Defaults to the app's [`App::wheel_glide`](crate::App::wheel_glide).
+    pub fn wheel_glide(mut self, on: bool) -> Self {
+        self.wheel_glide = Some(on);
+        self
+    }
+    /// Window points scrolled per mouse-wheel line/notch for this overlay, overriding the app's
+    /// [`App::wheel_line`](crate::App::wheel_line) (and the platform default). Positive finite
+    /// values set an explicit distance; zero, negative, or non-finite values restore the
+    /// platform default for this overlay even if the app sets a custom distance.
+    pub fn wheel_line(mut self, points: f32) -> Self {
+        self.wheel_line = Some(crate::app::normalize_wheel_line(points));
+        self
+    }
+    /// Called at the start of every frame (unless a resting timer's poll already stood for it)
+    /// so background data and timers can update the tree before input routes. Queued input and
+    /// event handlers then run; whenever a non-`live_only` handler runs, `poll` runs again at the
+    /// same frame clock before the view commits, alternating with any input `poll` itself queues
+    /// (`Tx::send_key`) up to 4 follow-up rounds so work queued in a turn never waits for the next
+    /// mouse move or wake. Idle frames, animation-only frames, `Tx::live_only` handlers, layout
+    /// observers, and overlays without `poll` run no extra poll; call `Tx::request_poll` from a
+    /// `live_only` handler or outside a frame when one is still needed. True means state changed,
+    /// not that another frame is due. Defaults to the app's poll when its state type matches this
+    /// overlay's. Use `Tx::wake_after` for the next timed update; deadlines also run while hidden,
+    /// like the window host, without drawing.
     pub fn poll(mut self, f: fn(&mut T, f64, &mut crate::Tx) -> bool) -> Self {
         self.poll = Some(f);
         self
@@ -410,7 +454,10 @@ impl<T: 'static> ConfiguredOverlay<T> {
     ///
     /// Each show and prewarm measures what changed while hidden (at the target monitor's scale
     /// and active [`RendererKind`](crate::RendererKind), clamped to [`Self::min_size`],
-    /// [`Self::max_size`], and the display's work area) without committing, so the first frame
+    /// [`Self::max_size`], and the target display's sizing bounds — on Windows,
+    /// [`Display::work_area`](crate::Display::work_area) for edge placements and full display
+    /// bounds for [`OverlayPlacement::Rect`], matching placement coordinates; full display
+    /// bounds elsewhere) without committing, so the first frame
     /// presents at the content's height with no flash. While shown, a height change resizes
     /// and re-places the overlay before painting in the same frame (no spring; on Wayland
     /// layer-shell, holds the previous frame until the compositor confirms the new size).
@@ -456,7 +503,9 @@ impl<T: 'static> ConfiguredOverlay<T> {
     }
     /// Minimum logical size `(width, height)` in points for axes fitted by [`Self::sizing`].
     /// Clamped to at least `(1.0, 1.0)` and never exceeding [`Self::max_size`] or the target
-    /// display's work area.
+    /// display's sizing bounds (on Windows, [`Display::work_area`](crate::Display::work_area)
+    /// for edge placements and full display bounds for [`OverlayPlacement::Rect`]; full display
+    /// bounds on other platforms).
     ///
     /// ```no_run
     /// use rune::{ContentSizing, OverlayOptions, OverlaySpec, el};
@@ -473,7 +522,11 @@ impl<T: 'static> ConfiguredOverlay<T> {
     /// Maximum logical size `(width, height)` in points for axes fitted by [`Self::sizing`].
     /// Also applied as the root Taffy `max_size` constraint so wrapping text wraps at `size.0`
     /// instead of laying out on one unbounded line; further capped by the target display's
-    /// work area and the surface's physical pixel limit.
+    /// sizing bounds (on Windows, [`Display::work_area`](crate::Display::work_area) for edge
+    /// placements and full display bounds for [`OverlayPlacement::Rect`]; full display bounds
+    /// on other platforms) and the surface's physical pixel limit. Pass bounds derived from
+    /// [`Display::work_area`](crate::Display::work_area) here when a content-sized
+    /// [`OverlayPlacement::Rect`] overlay should not exceed the work area.
     ///
     /// ```no_run
     /// use rune::{ContentSizing, OverlayOptions, OverlaySpec, col, text};
@@ -590,6 +643,32 @@ impl<T: 'static> ConfiguredOverlay<T> {
         self.frame_latency = Some(latency.clamp(1, 2));
         self
     }
+    /// Opt into wide-color extended-range linear sRGB output on macOS (`Rgba16Float` with
+    /// `kCGColorSpaceExtendedLinearSRGB`), like [`App::wide_color`](crate::App::wide_color).
+    /// Off by default (standard 8-bit sRGB).
+    pub fn wide_color(mut self, enabled: bool) -> Self {
+        self.wide_color = enabled;
+        self
+    }
+    /// Controls when this key-taking native overlay drains queued keyboard input
+    /// ([`KeyboardDispatch`](crate::KeyboardDispatch)), like
+    /// [`App::keyboard_dispatch`](crate::App::keyboard_dispatch).
+    ///
+    /// Defaults to [`KeyboardDispatch::Batched`](crate::KeyboardDispatch::Batched). Ignored for
+    /// overlays with [`KeyPolicy::None`](crate::KeyPolicy::None) and on web, iOS, and headless
+    /// hosts.
+    ///
+    /// ```no_run
+    /// use rune::{KeyPolicy, KeyboardDispatch, OverlayOptions, OverlaySpec, el};
+    ///
+    /// let _overlay = OverlaySpec::new("palette", (420.0, 280.0), |_: &(), _| el())
+    ///     .options(OverlayOptions { keys: KeyPolicy::OnDemand, ..Default::default() })
+    ///     .keyboard_dispatch(KeyboardDispatch::Immediate);
+    /// ```
+    pub fn keyboard_dispatch(mut self, mode: crate::KeyboardDispatch) -> Self {
+        self.keyboard_dispatch = mode;
+        self
+    }
     /// Selects which rendering backend presents this overlay (defaults to
     /// [`RendererKind::Gpu`](crate::RendererKind::Gpu)).
     ///
@@ -662,10 +741,14 @@ impl<T: 'static> OverlaySpec<T> {
             setup: None,
             runtime: crate::app::RuntimeConfig::default(),
             font_smoothing: None,
+            wheel_glide: None,
+            wheel_line: None,
             macos_level: None,
             macos_color_space: crate::MacColorSpace::Srgb,
             window_backdrop: crate::WindowBackdrop::None,
             frame_latency: None,
+            wide_color: false,
+            keyboard_dispatch: crate::KeyboardDispatch::Batched,
             on_materials: None,
             animate_reveal: false,
             release_after: None,

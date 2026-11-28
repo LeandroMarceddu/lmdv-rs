@@ -22,6 +22,7 @@ use wgpu::naga;
 use super::derive::{self, Use};
 use super::encode::Rec;
 use super::layout::{COMPUTE, GroupRaw, LayoutRaw, PipelineLayout};
+use super::resource::MetalBuffer;
 use super::shader::{Stage, compile};
 use super::store::SWAPS;
 use super::submit::Keep;
@@ -316,8 +317,29 @@ impl ComputePassInterface for MetalComputePass {
         let groups = MTLSize { width: x as usize, height: y as usize, depth: z as usize };
         self.raw.dispatchThreadgroups_threadsPerThreadgroup(groups, pipeline.workgroup);
     }
-    fn dispatch_workgroups_indirect(&mut self, _: &DispatchBuffer, _: wgpu::BufferAddress) {
-        super::unsupported!("indirect dispatches")
+    fn dispatch_workgroups_indirect(&mut self, indirect_buffer: &DispatchBuffer, indirect_offset: wgpu::BufferAddress) {
+        let buffer = indirect_buffer.as_custom::<MetalBuffer>().expect("a Metal buffer");
+        let raw = buffer.raw();
+        let offset = match crate::indirect::validate_dispatch(buffer.usage, indirect_offset, raw.size) {
+            Ok(offset) => offset,
+            Err(error) => {
+                if !self.rec.lock().shared().capture_error(wgpu::ErrorFilter::Validation, error.clone()) {
+                    panic!("{error}");
+                }
+                return;
+            }
+        };
+        self.flush();
+        let Some(workgroup) = self.pipeline.as_ref().map(|p| p.workgroup) else { return };
+        // SAFETY: `offset` is 4-byte aligned and `offset..offset + 12` fits within `raw.size`
+        // (validated above), `raw` stays alive in `self.keep` until the command buffer completes,
+        // and `workgroup` matches the bound compute pipeline's entry point.
+        unsafe {
+            self.raw.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup(
+                &raw.raw, offset, workgroup,
+            );
+        }
+        self.keep.push(raw);
     }
     fn transition_resources<'a>(
         &mut self,

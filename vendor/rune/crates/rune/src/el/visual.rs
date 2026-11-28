@@ -1,4 +1,5 @@
 //! `Visual`: hot inline paint fields on `El` and `Node`, with rarely set extras behind `Cold`.
+use std::cell::RefCell;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -9,6 +10,39 @@ use crate::color::Color;
 use crate::el::{Outline, RadialGradient, Shadow};
 use crate::shape::Shape;
 use crate::text::Icon;
+
+/// Paint-time [`Shape`] builder (`El::shape_with`, `canvas_with`), cached per `(size, scale)`
+/// so scrolling or unrelated repaints do not re-invoke the closure while size and scale hold.
+pub(crate) struct ShapeBuilder {
+    build: Box<dyn Fn([f32; 2], f32) -> Shape>,
+    cached: RefCell<Option<([u32; 3], Rc<Shape>)>>,
+}
+
+impl std::fmt::Debug for ShapeBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ShapeBuilder(..)")
+    }
+}
+
+impl ShapeBuilder {
+    pub(crate) fn new(build: impl Fn([f32; 2], f32) -> Shape + 'static) -> Self {
+        Self { build: Box::new(build), cached: RefCell::new(None) }
+    }
+
+    pub(crate) fn resolve(&self, size: [f32; 2], scale: f32) -> Option<Rc<Shape>> {
+        let key = [size[0].to_bits(), size[1].to_bits(), scale.to_bits()];
+        let mut cache = self.cached.borrow_mut();
+        if let Some((k, sh)) = cache.as_ref()
+            && *k == key
+        {
+            return (!sh.is_empty()).then(|| Rc::clone(sh));
+        }
+        let sh = Rc::new((self.build)(size, scale));
+        let out = (!sh.is_empty()).then(|| Rc::clone(&sh));
+        *cache = Some((key, sh));
+        out
+    }
+}
 
 /// Rarely set visual extras shared behind `Cold<VisualCold>` so common boxes and text pay 8 bytes.
 #[doc(hidden)]
@@ -53,6 +87,9 @@ pub struct VisualCold {
     pub outline: Option<Outline>,
     /// Vector strokes and fills in the element's own points, over the fill.
     pub shape: Option<Rc<Shape>>,
+    /// Paint-time shape builder (`El::shape_with`, `canvas_with`), evaluated with laid-out size
+    /// and device scale.
+    pub(crate) shape_builder: Option<Rc<ShapeBuilder>>,
     /// A terminal's cell grid (`grid`), painted over the fill.
     pub(crate) grid: Option<Rc<crate::el::grid::Grid>>,
     /// An RGBA image scaled into the element's rect, over the fill and shape.
@@ -65,14 +102,21 @@ pub struct VisualCold {
     /// Colour whose RGB and alpha tint `pixels`'s alpha mask (`El::pixels_tint`); `None` draws
     /// the image's own colours.
     pub(crate) pixels_tint: Option<Color>,
+    /// Display-only web `<img>` URL and fit (`El::web_image`, `El::web_image_fit`).
+    pub(crate) web_image: Option<Rc<crate::web_image::WebImage>>,
     /// Sampling filter for `pixels` (`El::image_filter`); `Linear` by default.
     pub(crate) image_filter: crate::ImageFilter,
+    /// Opt-in image context menu (`El::image_menu`).
+    pub(crate) image_menu: Option<Rc<crate::ImageMenu>>,
     /// An effect slot (`El::effect`).
     pub(crate) effect: Option<crate::el::effect::EffectSlot>,
     /// Backdrop blur standard deviation in points (`El::backdrop_blur`); 0 is off.
     pub(crate) backdrop_blur: f32,
     /// The hover track's enter and exit curves (default: snappy spring both ways).
     pub hover_motion: Option<Rc<(Anim, Anim)>>,
+    /// True when `hover_motion` came from a theme/token default (`El::token_hover_motion`), so
+    /// an enclosing `El::hover_motion_within` overrides it.
+    pub(crate) hover_motion_default: bool,
     /// Hover curves for this element and the hover tracks below it without their own.
     pub(crate) hover_within: Option<Rc<(Anim, Anim)>>,
     /// The press tracks' down and up curves (default: instant down, snappy/pop up).
@@ -179,15 +223,19 @@ impl Empty for VisualCold {
         radial: None,
         outline: None,
         shape: None,
+        shape_builder: None,
         grid: None,
         pixels: None,
         pixels_fit: None,
         pixels_wrap: None,
         pixels_tint: None,
+        web_image: None,
         image_filter: crate::ImageFilter::Linear,
+        image_menu: None,
         effect: None,
         backdrop_blur: 0.0,
         hover_motion: None,
+        hover_motion_default: false,
         hover_within: None,
         press_motion: None,
         group_opacity: None,
@@ -344,6 +392,19 @@ impl Visual {
             b.border_width = width;
             b.border = c;
         }
+    }
+
+    #[inline]
+    pub(crate) fn has_shape(&self) -> bool {
+        self.cold.get().is_some_and(|c| c.shape.is_some() || c.shape_builder.is_some())
+    }
+
+    pub(crate) fn resolve_shape(&self, size: [f32; 2], scale: f32) -> Option<Rc<Shape>> {
+        let cold = self.cold.get()?;
+        if let Some(sh) = &cold.shape {
+            return Some(Rc::clone(sh));
+        }
+        cold.shape_builder.as_ref()?.resolve(size, scale)
     }
 }
 

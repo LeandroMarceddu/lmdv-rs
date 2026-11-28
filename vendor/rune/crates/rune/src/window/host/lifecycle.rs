@@ -127,14 +127,45 @@ impl Host {
 
     pub(in crate::window) fn set_position(&mut self, event_loop: &ActiveEventLoop, position: (i32, i32)) {
         self.placement = None;
+        self.logical_position = None;
         self.options.position = Some(position);
         self.reopen.clear_position();
         if !is_wayland(event_loop)
             && let Some(w) = &self.win
         {
+            #[cfg(target_os = "macos")]
+            {
+                let (screens, main_scale) = crate::platform::macos::screen_bounds();
+                let current = w.window.scale_factor();
+                let fallback = if current > 0.0 && current.is_finite() { current } else { main_scale };
+                let resolved =
+                    crate::window::placement::resolve_mac_physical_position(position, None, &screens, fallback);
+                w.window.set_outer_position(winit::dpi::Position::Logical(winit::dpi::LogicalPosition::new(
+                    resolved.logical_position.0,
+                    resolved.logical_position.1,
+                )));
+            }
+            #[cfg(not(target_os = "macos"))]
             w.window.set_outer_position(PhysicalPosition::new(position.0, position.1));
         }
         self.sync_origin();
+        self.placement_watch.mark_dirty();
+    }
+
+    pub(in crate::window) fn set_logical_position(&mut self, event_loop: &ActiveEventLoop, position: (f64, f64)) {
+        self.placement = None;
+        self.options.position = None;
+        self.logical_position = Some(position);
+        self.reopen.clear_position();
+        if !is_wayland(event_loop)
+            && let Some(w) = &self.win
+        {
+            w.window.set_outer_position(winit::dpi::Position::Logical(winit::dpi::LogicalPosition::new(
+                position.0, position.1,
+            )));
+        }
+        self.sync_origin();
+        self.placement_watch.mark_dirty();
     }
 
     /// Whether this window must never take foreground activation on reveal.
@@ -173,24 +204,67 @@ impl Host {
         let _ = w;
     }
 
+    pub(in crate::window) fn set_resize_anchor(&mut self, anchor: crate::ResizeAnchor) {
+        self.resize_anchor = anchor;
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = self.win.as_ref().and_then(|w| w.surface.as_ref()) {
+            crate::platform::macos::set_contents_gravity(surface, anchor);
+        }
+    }
+
     pub(in crate::window) fn set_color_scheme(&mut self, scheme: crate::ColorScheme) {
         self.color_scheme = scheme;
         self.apply_window_color_scheme();
     }
 
-    pub(in crate::window) fn apply_window_color_scheme(&mut self) {
-        let target = crate::window::window_theme_for_platform(
-            self.color_scheme,
-            crate::window::app_color_scheme(),
-            cfg!(target_os = "macos"),
+    pub(in crate::window) fn window_theme(&self) -> Option<winit::window::Theme> {
+        let app = crate::window::app_color_scheme();
+        #[cfg(target_os = "macos")]
+        let platform = crate::window::ThemePlatform::MacOs;
+        #[cfg(target_os = "linux")]
+        let platform = crate::window::ThemePlatform::Linux {
+            system_dark: if self.color_scheme.effective_for_window(app) == crate::ColorScheme::System {
+                crate::platform::preferences::resolved_linux_dark(self.args.theme.as_deref())
+            } else {
+                true
+            },
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let platform = crate::window::ThemePlatform::Windows;
+        crate::window::window_theme_for_platform(self.color_scheme, app, platform)
+    }
+
+    pub(in crate::window) fn effective_menu_scheme(&self) -> crate::ColorScheme {
+        match self.args.theme.as_deref() {
+            Some("light") => crate::ColorScheme::Light,
+            Some("dark") => crate::ColorScheme::Dark,
+            _ => self.color_scheme.effective_for_window(crate::window::app_color_scheme()),
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(in crate::window) fn sync_windows_menu_theme(&self) {
+        let rt = self.app.rt();
+        let mode = crate::platform::win32::dark_mode::menu_theme_for_window(
+            self.effective_menu_scheme(),
+            rt.backdrop_dark(),
+            rt.env.system_dark,
         );
+        crate::platform::win32::dark_mode::set_menu_theme(mode);
+    }
+
+    pub(in crate::window) fn apply_window_color_scheme(&mut self) {
+        let target = self.window_theme();
         let Some(w) = &self.win else { return };
         let color_scheme = self.color_scheme;
         let changed = crate::window::sync_window_theme(&mut self.applied_theme, target, |theme| {
             #[cfg(target_os = "windows")]
             if theme.is_none() {
-                crate::platform::win32::dark_mode::refresh_color_policy();
+                crate::platform::win32::dark_mode::with_system_theme_query(|| w.window.set_theme(theme));
+            } else {
+                w.window.set_theme(theme);
             }
+            #[cfg(not(target_os = "windows"))]
             w.window.set_theme(theme);
             #[cfg(target_os = "macos")]
             if let Some(panel) = &w.native.panel {
@@ -199,6 +273,10 @@ impl Host {
             #[cfg(not(target_os = "macos"))]
             let _ = color_scheme;
         });
+        #[cfg(target_os = "windows")]
+        if self.win.as_ref().is_some_and(|w| w.window.has_focus()) {
+            self.sync_windows_menu_theme();
+        }
         if changed {
             self.sync_window_backdrop(true);
         }
@@ -423,7 +501,7 @@ impl Host {
         reveal: Reveal,
         mut token: Option<String>,
     ) {
-        if self.life.finished() {
+        if self.life.finished() || self.poll_gpu_loss() {
             return;
         }
         let mut built = false;
@@ -435,11 +513,7 @@ impl Host {
                     rt.set_system_scroll_bars_state(
                         crate::platform::scroll_bars::current().with_override(self.args.scroll_bars),
                     );
-                    #[cfg(target_os = "linux")]
-                    {
-                        rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
-                        rt.double_click_interval = crate::platform::preferences::double_click_interval();
-                    }
+                    crate::input::host_events::refresh_accessibility_preferences(rt);
                 }
                 RevealEffect::Build => built = self.build_for_show(),
                 RevealEffect::ApplyFrame => {
@@ -485,6 +559,7 @@ impl Host {
                 RevealEffect::Shown { live } => {
                     self.life.show();
                     self.app.set_live_visible(live);
+                    self.placement_watch.mark_dirty();
                 }
                 RevealEffect::CancelTimerFrame => self.app.rt_mut().cancel_timer_frame(),
                 RevealEffect::Number => {
@@ -587,6 +662,10 @@ impl Host {
     /// Applies everything other threads asked for since the last wake-up. A `wake` polls a
     /// hidden window first, so a reveal in the same turn sees what `poll` changed.
     pub(in crate::window) fn drain(&mut self, event_loop: &ActiveEventLoop, wake: bool) {
+        if self.poll_gpu_loss() {
+            self.drain_terminal(event_loop, wake);
+            return;
+        }
         let shown = self.shown_win().is_some();
         let stale_before = self.app.rt().needs_commit();
         let clipboard = self.clipboard.receive_core(self.app.rt_mut());
@@ -630,6 +709,9 @@ impl Host {
         if let Some(position) = requests.position {
             self.set_position(event_loop, position);
         }
+        if let Some(position) = requests.logical_position {
+            self.set_logical_position(event_loop, position);
+        }
         if let Some(place) = requests.place {
             self.place(event_loop, place);
         }
@@ -650,6 +732,7 @@ impl Host {
             self.clipboard.flush_core(self.app.rt_mut());
         }
         let (changed, quiet) = (changed || answered, quiet && !answered);
+        let urgent = requests.urgent || self.app.rt_mut().take_urgent_frame();
         // A launcher's cached reveal draws nothing; a hidden one renders its changes hidden,
         // paced (`refresh_hidden`). A covered or minimised one runs them without asking for a
         // frame it wouldn't draw.
@@ -674,7 +757,10 @@ impl Host {
                 true
             }
             WakeWork::Paint => {
-                if let Some(w) = &self.win {
+                if let Some(w) = &mut self.win {
+                    if urgent && !w.backing_off(crate::time::now()) {
+                        w.admit_urgent_frame();
+                    }
                     w.request_redraw();
                 }
                 true
@@ -695,7 +781,7 @@ impl Host {
         if event_loop.exiting() || self.shown_win().is_some() {
             return false;
         }
-        let changed = self.app.poll_hidden();
+        let changed = if !shows && !self.launcher() { self.app.hidden_wake() } else { self.app.poll_hidden() };
         self.clipboard.flush_core(self.app.rt_mut());
         // A show this turn minimizes after it: this poll holds the ask across its own shell, and
         // a callback's ask during that shell is the one it takes first.
@@ -736,13 +822,17 @@ impl Host {
         self.apply_tx_macos_document();
         self.show_title();
         self.apply_tx_color_scheme();
-        self.apply_tx_window_backdrop();
+        self.apply_tx_resize_anchor();
+        if !self.gpu_loss_failed() {
+            self.apply_tx_window_backdrop();
+        }
         if self.app.rt_mut().take_toggle_maximized()
             && let Some(w) = self.shown_win()
         {
             w.toggle_maximized();
             #[cfg(target_os = "windows")]
             crate::platform::win32::apply_window_styles(&w.window, &self.windows_window);
+            self.placement_watch.mark_dirty();
         }
         if let Some(req) = self.app.rt_mut().take_full_screen_request()
             && let Some(w) = self.shown_win()
@@ -753,6 +843,7 @@ impl Host {
             }
             #[cfg(target_os = "windows")]
             crate::platform::win32::apply_window_styles(&w.window, &self.windows_window);
+            self.placement_watch.mark_dirty();
         }
         if let Some(menu) = self.app.rt_mut().take_window_menu()
             && let Some(w) = self.shown_win()
@@ -765,7 +856,8 @@ impl Host {
         }
         // A new `Cx::set_titlebar` or `Cx::titlebar_height` resizes the caption buttons and the band
         // the frame hit-tests, and moves the traffic lights.
-        if self.app.rt_mut().take_titlebar_changed()
+        if !self.gpu_loss_failed()
+            && self.app.rt_mut().take_titlebar_changed()
             && let Some(w) = &self.win
         {
             sync_chrome_core(self.app.rt_mut(), w, self.chrome, self.titlebar);
@@ -792,6 +884,15 @@ impl Host {
                 self.app.popup_cancel(&mut self.popup);
                 self.app.file_dialog_cancel(&mut self.file_dialog);
                 return;
+            }
+            if self.gpu_loss_failed() {
+                if self.app.rt().shell_request.is_none()
+                    && !self.app.rt().has_user_close_request()
+                    && !self.app.rt().host.minimize.field()
+                {
+                    return;
+                }
+                continue;
             }
             let paints = self.shown_win().is_some_and(|w| !self.life.covered() && !w.minimized());
             // A painting macOS window moves its frame over its next frames (`redraw`).
@@ -843,7 +944,7 @@ impl Host {
             CloseDecision::Close => self.close(event_loop),
             CloseDecision::Defer => {
                 self.shell(event_loop);
-                if self.life.finished() || event_loop.exiting() {
+                if self.life.finished() || event_loop.exiting() || self.gpu_loss_failed() {
                     return;
                 }
                 if let Some(w) = self.shown_win() {
@@ -938,11 +1039,10 @@ impl Host {
         if let Some(trace) = &mut self.trace {
             trace.settle_presents(crate::frame::present_time::SETTLE);
         }
-        #[cfg(target_os = "macos")]
         if self.keep_running {
-            self.frame_presented.drain();
+            self.drain_frame_presented();
         } else {
-            self.frame_presented.reset();
+            self.reset_frame_presented();
         }
         if let Some(after) = self.app.rt_mut().shell_request.take().and_then(Shell::after) {
             let _ = crate::quit::send(crate::quit::Event::Start { ending: false, after });
@@ -995,10 +1095,14 @@ impl Host {
         self.stop_showing();
         self.wind_down();
         let launcher = self.launcher();
+        if !launcher {
+            self.app.rt_mut().drop_images();
+        }
         if self.release_gpu && !launcher {
             self.release();
         } else if is_wayland(event_loop) {
             // Wayland has no hidden toplevel: unmap by destroying, recreate on open.
+            self.reset_frame_presented();
             self.win = None;
             self.native_handle.native.ready.store(false, Ordering::Release);
             self.native_handle.native.number.store(0, Ordering::Release);
@@ -1020,6 +1124,11 @@ impl Host {
             if launcher {
                 w.request_redraw();
             }
+            #[cfg(target_os = "macos")]
+            if crate::window::HiddenDrawable::should_shrink_window(launcher, self.release_gpu) {
+                w.shrink_hidden_drawable();
+            }
+            self.reset_frame_presented();
         }
     }
 
@@ -1036,8 +1145,8 @@ impl Host {
         // after any Fn change the monitor saw first.
         #[cfg(target_os = "macos")]
         {
-            self.fn_key();
-            self.media_keys();
+            self.fn_key(None);
+            self.media_keys(None);
         }
     }
 
@@ -1083,6 +1192,7 @@ impl Host {
     /// that releases its GPU when closed. The next `open` makes a window, a device and a surface
     /// (an app that sees `AppHandle::window_error` and the window gone can ask for one).
     pub(in crate::window) fn release(&mut self) {
+        self.assert_no_live_frame_texture();
         #[cfg(target_os = "windows")]
         self.on_resize_sync_event(crate::window::win32::resize_sync::Event::Destroy);
         #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
@@ -1090,13 +1200,13 @@ impl Host {
             let native = &mut w.native;
             native.materials.teardown(native.mode.handover_mut());
         }
+        self.reset_frame_presented();
         self.win = None;
         #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
-        self.app.rt_mut().paint.set_native_materials(false);
-        #[cfg(target_os = "macos")]
-        self.frame_presented.reset();
+        self.app.rt_mut().paint.set_windows_acrylic_materials(false);
         self.native_handle.native.ready.store(false, Ordering::Release);
         self.native_handle.native.number.store(0, Ordering::Release);
+        self.terminal_loss.prepare_clean_gpu_drop(self.gpu.as_ref().map(|(g, _)| g));
         self.gpu = None;
         self.app.release_compositor_gpu();
         let rt = self.app.rt_mut();
@@ -1112,7 +1222,7 @@ impl Host {
             rt.set_backdrop_opaque_fallback(false);
         }
         rt.text.atlas.invalidate();
-        rt.images.invalidate();
+        rt.drop_images();
     }
 
     /// Creates the window. When the first window can't be created and the app didn't ask to stay
@@ -1121,15 +1231,26 @@ impl Host {
     /// open can retry.
     pub(in crate::window) fn create(&mut self, event_loop: &ActiveEventLoop, token: Option<String>, focus: bool) {
         let result = self.try_create(event_loop, token, focus);
+        if let Err(ref error) = result
+            && self.is_terminal_gpu_policy()
+        {
+            self.latch_loss_latch(crate::render::loss_latch::GpuFailureKind::InitFailed, error.clone());
+        }
         self.finish_create(result);
     }
 
     pub(crate) fn finish_create(&mut self, result: Result<(), String>) {
         match result {
-            Ok(()) => self.shared.set_window_error(None),
+            Ok(()) => {
+                if !self.gpu_loss_failed() {
+                    self.shared.set_window_error(None);
+                }
+            }
             Err(error) => {
                 let key = self.native_handle.key();
-                self.shared.set_window_error(Some(error.clone()));
+                if !self.gpu_loss_failed() {
+                    self.shared.set_window_error(Some(error.clone()));
+                }
                 if self.life.fail_create(self.keep_running, self.shown) {
                     self.startup_error = Some(format!("could not create the window {key}: {error}"));
                 } else {
@@ -1161,6 +1282,9 @@ impl Host {
             self.app.set_live_visible(live);
             self.app.rt_mut().cancel_timer_frame();
             self.rest_step(RestEvent::Unseen);
+            if !self.launcher() {
+                self.app.rt_mut().drop_images();
+            }
             return;
         }
         // Its first frame uncovered draws what a covered one owed.
@@ -1175,7 +1299,7 @@ impl Host {
         #[cfg(target_os = "macos")]
         if l.native.pacing.is_none() {
             l.native.pacing = crate::platform::display_link::DisplayLink::new(&l.window, self.frame_wake.clone())
-                .map(|p| p.with_ambient_period(self.ambient_period));
+                .map(|p| self.pacing_config.apply(p));
         }
         if was {
             self.app.rt_mut().settle_all();
@@ -1195,20 +1319,22 @@ impl Host {
     }
 
     fn give_back(&mut self, all: bool) {
-        {
-            let rt = self.app.rt_mut();
-            rt.text.rest();
-            rt.images.rest();
-            if let Some(rewind) = rt.motion.rewind() {
-                rewind.rest();
-            }
+        if all && !self.launcher() {
+            self.app.rt_mut().drop_images();
         }
+        self.app.rt_mut().rest();
         self.app.run_on_rest();
         if let Some((gpu, renderer)) = &mut self.gpu {
-            // Poll once (non-blocking) at idle rest only if recyclable oversized chunks are in
-            // flight so their completed buffers return before `give_back(false)` trims them;
-            // ordinary windows skip polling to avoid the 4-9 ms Iris Xe post-poll penalty.
-            if !all && renderer.has_oversized_uploads_in_flight() {
+            // Poll once (non-blocking) at idle rest on macOS (retiring completed Metal command
+            // buffers, drawables, and `Keep` texture/buffer references at zero GPU-wait cost) or
+            // when recyclable oversized chunks are in flight; ordinary Windows/Linux windows skip
+            // polling to avoid the 4-9 ms Iris Xe post-poll penalty.
+            if !all
+                && crate::window::rest::should_poll_on_idle_rest(
+                    cfg!(target_os = "macos"),
+                    renderer.has_oversized_uploads_in_flight(),
+                )
+            {
                 rune_gpu::health::poll(&gpu.device, wgpu::PollType::Poll).ok();
             }
             let rt = self.app.rt_mut();
@@ -1221,5 +1347,6 @@ impl Host {
                 renderer.trim_uploads();
             }
         }
+        crate::window::rest::maybe_trim_heap();
     }
 }

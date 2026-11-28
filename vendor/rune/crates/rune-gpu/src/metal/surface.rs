@@ -103,7 +103,14 @@ impl SurfaceInterface for MetalSurface {
         wgpu::SurfaceCapabilities {
             format_capabilities: formats
                 .iter()
-                .map(|&format| wgpu::SurfaceFormatCapabilities { format, color_spaces: wgpu::SurfaceColorSpaces::SRGB })
+                .map(|&format| {
+                    let mut color_spaces = wgpu::SurfaceColorSpaces::SRGB;
+                    if format == F::Rgba16Float {
+                        color_spaces |=
+                            wgpu::SurfaceColorSpaces::EXTENDED_SRGB_LINEAR | wgpu::SurfaceColorSpaces::EXTENDED_SRGB;
+                    }
+                    wgpu::SurfaceFormatCapabilities { format, color_spaces }
+                })
                 .collect(),
             formats,
             present_modes: vec![wgpu::PresentMode::Fifo, wgpu::PresentMode::Immediate],
@@ -118,19 +125,58 @@ impl SurfaceInterface for MetalSurface {
     fn configure(&self, device: &DispatchDevice, config: &wgpu::SurfaceConfiguration) {
         let device = device.as_custom::<MetalDevice>().expect("a Metal device");
         assert!(
-            matches!(config.color_space, wgpu::SurfaceColorSpace::Auto | wgpu::SurfaceColorSpace::Srgb),
+            matches!(
+                config.color_space,
+                wgpu::SurfaceColorSpace::Auto
+                    | wgpu::SurfaceColorSpace::Srgb
+                    | wgpu::SurfaceColorSpace::ExtendedSrgbLinear
+                    | wgpu::SurfaceColorSpace::ExtendedSrgb
+            ),
             "RUNE_GPU_BACKEND=metal: surface color space {:?}",
             config.color_space
         );
         *self.configured.lock() = Some((device.shared.clone(), config.format));
         let layer = &self.layer;
         layer.setDevice(Some(&device.shared.device));
-        // Preserve the colour space the window gave the layer (`pin_contents_top_left`):
-        // `setPixelFormat` resets `colorspace` to the format's default (sRGB for 8-bit formats),
-        // which would otherwise silently re-tag an `Unmanaged` layer on resize.
+        // Preserve the colour space the window gave the layer (`pin_contents_top_left`) for
+        // default sRGB / Auto configurations: `setPixelFormat` resets `colorspace` to the
+        // format's default (sRGB for 8-bit formats), which would otherwise silently re-tag an
+        // `Unmanaged` layer on resize. Extended-range configurations explicitly tag the layer
+        // and opt into EDR on macOS so Core Animation keeps wide-gamut values outside [0, 1].
         let colorspace = layer.colorspace();
         layer.setPixelFormat(pixel_format(config.format));
-        layer.setColorspace(colorspace.as_deref());
+        match config.color_space {
+            wgpu::SurfaceColorSpace::Auto | wgpu::SurfaceColorSpace::Srgb => {
+                layer.setColorspace(colorspace.as_deref());
+                #[cfg(target_os = "macos")]
+                if layer.wantsExtendedDynamicRangeContent() {
+                    layer.setWantsExtendedDynamicRangeContent(false);
+                }
+            }
+            wgpu::SurfaceColorSpace::ExtendedSrgbLinear => {
+                #[cfg(target_os = "macos")]
+                if !layer.wantsExtendedDynamicRangeContent() {
+                    layer.setWantsExtendedDynamicRangeContent(true);
+                }
+                // SAFETY: `kCGColorSpaceExtendedLinearSRGB` is a CoreGraphics static constant.
+                let space = objc2_core_graphics::CGColorSpace::with_name(Some(unsafe {
+                    objc2_core_graphics::kCGColorSpaceExtendedLinearSRGB
+                }));
+                layer.setColorspace(space.as_deref());
+            }
+            wgpu::SurfaceColorSpace::ExtendedSrgb => {
+                #[cfg(target_os = "macos")]
+                if !layer.wantsExtendedDynamicRangeContent() {
+                    layer.setWantsExtendedDynamicRangeContent(true);
+                }
+                // SAFETY: `kCGColorSpaceExtendedSRGB` is a CoreGraphics static constant.
+                let space = objc2_core_graphics::CGColorSpace::with_name(Some(unsafe {
+                    objc2_core_graphics::kCGColorSpaceExtendedSRGB
+                }));
+                layer.setColorspace(space.as_deref());
+            }
+            _ => unreachable!(),
+        }
         layer.setFramebufferOnly(config.usage == wgpu::TextureUsages::RENDER_ATTACHMENT);
         match config.alpha_mode {
             wgpu::CompositeAlphaMode::Opaque => layer.setOpaque(true),

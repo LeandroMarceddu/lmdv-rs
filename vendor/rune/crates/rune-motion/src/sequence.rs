@@ -31,10 +31,11 @@ impl Beat {
     /// so siblings don't move. An `El::live_offset` owns the offset, so beats don't move it.
     ///
     /// While a sequence plays (a repeating one from its start until the element drops it), and
-    /// while a one-shot waits out its `delay` holding its first beat, the offset follows the
+    /// while a holding one-shot waits out its `delay` on its first beat, the offset follows the
     /// beats and an `El::offset` change lands at once. Once a one-shot has finished, or before a
-    /// repeating one starts, an `El::offset` change springs as usual (toward the one-shot's last
-    /// beat). Dropping the sequence springs the element back to its `El::offset`.
+    /// repeating or [`Sequence::release`] one starts, an `El::offset` change springs as usual
+    /// (toward [`Sequence::rest`]). Dropping the sequence springs the element back to its
+    /// `El::offset`.
     pub const fn translate(mut self, x: f32, y: f32) -> Self {
         self.translate = [x, y];
         self
@@ -53,14 +54,25 @@ impl Beat {
     }
 }
 
-/// An opacity/scale/translate/rotate keyframe sequence, one-shot by default (holds its final pose) or looping
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SequenceMode {
+    /// One-shot that holds its first beat during `delay` and its last beat after ending.
+    Hold,
+    /// One-shot that leaves the element at its own pose when not playing (CSS `animation-fill-mode: none`).
+    Release,
+    /// Loops continuously until removed (CSS `animation-iteration-count: infinite`).
+    Repeating,
+}
+
+/// An opacity/scale/translate/rotate keyframe sequence: one-shot holding its final pose by
+/// default, releasing back to the element's own pose with [`Sequence::release`], or looping
 /// continuously with [`Sequence::repeating`]. Static slices keep specs Copy, like Cycle; use a
 /// new element key to replay a finite sequence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sequence {
     frames: &'static [Beat],
     pub(crate) delay: f64,
-    pub(crate) repeating: bool,
+    pub(crate) mode: SequenceMode,
 }
 
 impl Sequence {
@@ -75,11 +87,31 @@ impl Sequence {
                 && p.rotate.is_finite()),
             "invalid keyframe pose"
         );
-        Self { frames, delay: 0.0, repeating: false }
+        Self { frames, delay: 0.0, mode: SequenceMode::Hold }
     }
     pub fn delay(mut self, seconds: f64) -> Self {
         assert!(seconds.is_finite() && seconds >= 0.0);
         self.delay = seconds;
+        self
+    }
+    /// Return the element to its own opacity, scale, offset and rotation when this one-shot isn't
+    /// playing (before a [`delay`](Self::delay), after the last beat, under Reduce Motion, or on
+    /// settle), instead of holding its beats (like CSS `animation-fill-mode: none`).
+    ///
+    /// ```
+    /// use rune_motion::{Beat, Easing, LoopSpec, LoopTrack, Sequence};
+    ///
+    /// const TURN: &[Beat] = &[
+    ///     Beat::new(0.0).rotate(0.0),
+    ///     Beat::new(0.2).rotate(core::f32::consts::PI).easing(Easing::LINEAR),
+    /// ];
+    /// let track = LoopTrack::new(LoopSpec::sequence(Sequence::new(TURN).release()), 0.0);
+    /// assert!((track.pose(0.1, false).unwrap().rotate - core::f32::consts::FRAC_PI_2).abs() < 1e-5);
+    /// assert!(!track.active(0.2));
+    /// assert_eq!(track.pose(0.2, false).unwrap().rotate, 0.0);
+    /// ```
+    pub const fn release(mut self) -> Self {
+        self.mode = SequenceMode::Release;
         self
     }
     /// Loop the sequence continuously instead of holding its final pose (like CSS
@@ -102,8 +134,11 @@ impl Sequence {
     /// # let _ = spec;
     /// ```
     pub const fn repeating(mut self) -> Self {
-        self.repeating = true;
+        self.mode = SequenceMode::Repeating;
         self
+    }
+    pub(crate) const fn is_repeating(self) -> bool {
+        matches!(self.mode, SequenceMode::Repeating)
     }
     pub fn duration(self) -> f64 {
         self.frames.last().unwrap().at
@@ -113,10 +148,15 @@ impl Sequence {
     pub fn moves(self) -> bool {
         self.frames.iter().any(|b| b.translate != [0.0; 2] || b.rotate != 0.0)
     }
-    /// The pose the sequence rests at when it isn't playing: a one-shot sequence's last beat, a
-    /// repeating one's first (where Reduce Motion holds it).
+    /// The pose the sequence rests at when it isn't playing: a holding one-shot's last beat, a
+    /// [`Self::release`] one-shot's neutral pose (leaving the element's own opacity, scale, offset
+    /// and rotation intact), or a repeating one's first beat (where Reduce Motion holds it).
     pub fn rest(self) -> Beat {
-        if self.repeating { self.frames[0] } else { self.frames[self.frames.len() - 1] }
+        match self.mode {
+            SequenceMode::Hold => self.frames[self.frames.len() - 1],
+            SequenceMode::Release => Beat::new(self.duration()),
+            SequenceMode::Repeating => self.frames[0],
+        }
     }
     pub(crate) fn sample(self, elapsed: f64) -> Beat {
         if elapsed <= 0.0 {

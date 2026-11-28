@@ -85,7 +85,7 @@ fn scroll_carries(s: &ScrollState, now: f64) -> bool {
 }
 
 /// `inner` is `outer` or inside it.
-fn holds(outer: &str, inner: &str) -> bool {
+pub(in crate::runtime) fn holds(outer: &str, inner: &str) -> bool {
     inner == outer || inner.len() > outer.len() && inner.starts_with(outer) && inner.as_bytes()[outer.len()] == b'/'
 }
 
@@ -130,6 +130,7 @@ impl RuntimeCore {
         if self.pointer.hover_hold.released() && !self.layout_moving() {
             self.pointer.hover_hold.settled();
         }
+        let top = (!self.pointer.left()).then(|| self.top_hover_hit(x, y)).flatten();
         let hovered = (!self.pointer.left()).then(|| self.hover_target(x, y)).flatten();
         let within = self.within_next();
         let held = self.decide_hold(hovered, within.as_ref(), None);
@@ -138,8 +139,19 @@ impl RuntimeCore {
             self.apply_within(inside, held);
         }
         self.apply_hovered(hovered, held);
+        self.apply_hover_hit(top, held);
         self.refresh_link_hover(held);
         held
+    }
+
+    fn apply_hover_hit(&mut self, mut top: Option<usize>, held: bool) {
+        if held {
+            top = self.pointer.hover_hit.as_deref().and_then(|p| self.hover_live(p));
+        }
+        if top.map(|i| self.tree.nodes[i].path.as_str()) == self.pointer.hover_hit.as_deref() {
+            return;
+        }
+        self.pointer.hover_hit = top.map(|i| self.tree.nodes[i].path.clone());
     }
 
     /// Queue `on_hover_change` for elements the pointer entered or left.

@@ -13,8 +13,10 @@ mod controls;
 mod diff;
 mod display;
 pub(crate) mod field_menu;
+pub(crate) mod popup_menu;
 
 pub(crate) use diff::{custom_diff, sample_diff, scroll_bars_diff};
+mod hard_breaks;
 mod icons;
 pub(crate) mod images;
 mod index;
@@ -22,6 +24,8 @@ mod inputs;
 mod link_hover;
 mod link_popover;
 mod markdown;
+mod metrics;
+mod overlay_metrics;
 mod overlays;
 pub(crate) mod sidebar;
 mod split_view;
@@ -64,6 +68,7 @@ use overlays::{
     popover_controlled, popover_wheel_outside, popup_list_rich_inline, toast_all, tooltip_help_arrow, tooltip_keybind,
     tooltip_path, tooltip_simple, tooltip_title_description,
 };
+use popup_menu::menu_popup_menu_fallback;
 
 pub(super) type Story = fn(&G, &Kit, &mut Vec<El>) -> El;
 
@@ -294,6 +299,7 @@ stories! {
     "rune-menu--submenu-options" => menu_submenu_options,
     "rune-menu--submenu-small-window" => menu_submenu_small_window,
     "rune-menu--field-menu-fallback" => menu_field_menu_fallback,
+    "rune-menu--popup-menu-fallback" => menu_popup_menu_fallback,
     "ui-tooltip--simple" => tooltip_simple,
     "ui-tooltip--with-keybind" => tooltip_keybind,
     "ui-tooltip--path" => tooltip_path,
@@ -301,6 +307,7 @@ stories! {
     "rune-tooltip--help-arrow" => tooltip_help_arrow,
     "components-hover-card--basic" => hover_card_basic,
     "rune-hover-card--placements" => hover_card_placements,
+    "rune-overlays--metrics" => overlay_metrics::overlays_metrics,
     "rune-overlays--tx-callbacks" => overlays_tx_callbacks,
     "rune-focus--keyboard" => focus_keyboard,
     "rune-focus--key-preview" => combobox::key_preview,
@@ -344,6 +351,8 @@ stories! {
     "rune-keybind--symbols" => keybind_symbols,
     "rune-keybind--keep-case" => keybind_keep_case,
     "rune-switch--sizes" => switch_sizes,
+    "rune-switch--flat" => metrics::switch_flat,
+    "rune-metrics--themes" => metrics::metrics_themes,
     "rune-slider--basic" => slider_basic,
     "rune-slider--sizes" => slider_sizes,
     "rune-slider--states" => slider_states,
@@ -375,6 +384,7 @@ stories! {
     "rune-markdown--code" => markdown_code,
     "rune-markdown--styled" => markdown_styled,
     "rune-markdown--wrap-and-frames" => markdown_wrap_and_frames,
+    "rune-markdown--hard-breaks" => hard_breaks::markdown_hard_breaks,
     "rune-text--selectable-help" => text_selectable_help,
     "rune-text--truncate-middle" => text_truncate_middle,
     "rune-text--max-lines-elide" => text_max_lines_elide,

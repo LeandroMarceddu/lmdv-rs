@@ -517,6 +517,7 @@ impl OverlayCore {
         if self.pointer_owner.step(OwnershipEvent::Wheel(InputSource::Native)).is_empty() {
             return false;
         }
+        let wheel = crate::platform::layer_shell_machine::pointer::apply_wheel_line(wheel, app.rt().wheel_line());
         host_events::wheel_core(app.rt_mut(), wheel) != host_events::WheelOutcome::Ignored
     }
 

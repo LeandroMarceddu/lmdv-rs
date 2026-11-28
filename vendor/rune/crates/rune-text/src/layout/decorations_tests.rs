@@ -88,6 +88,8 @@ fn strike_decorations_per_box_metrics_when_pill_splits_a_line() {
         fg: None,
         ring: None,
         radius: None,
+        pad_x: None,
+        margin_x: None,
         bare: None,
     }];
     let layout =
@@ -627,6 +629,8 @@ fn strike_decorations_scales_linearly_with_struck_ranges_and_boxes() {
                 fg: None,
                 ring: None,
                 radius: None,
+                pad_x: None,
+                margin_x: None,
                 bare: None,
             });
             if i + 1 < n {
@@ -696,6 +700,8 @@ fn highlight_decorations_scales_linearly_with_boxes_and_highlights() {
                 fg: None,
                 ring: None,
                 radius: None,
+                pad_x: None,
+                margin_x: None,
                 bare: None,
             });
             if i + 1 < n {

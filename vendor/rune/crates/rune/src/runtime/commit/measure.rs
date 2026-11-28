@@ -105,6 +105,7 @@ impl RuntimeCore {
             titlebar_inset: self.host.titlebar_inset / self.host.zoom.k,
             chrome: self.host.titlebar.insets.zoomed(self.host.zoom.k),
             safe_area: self.safe_area(),
+            keyboard_inset: self.keyboard_inset(),
             maximized: self.host.maximized,
             full_screen: self.host.full_screen,
             window_backdrop: self.host.window_backdrop,
@@ -114,6 +115,8 @@ impl RuntimeCore {
             system_accent: self.host.system_accent,
             system_contrast: self.host.system_contrast,
             system_increased_contrast: self.host.system_increased_contrast,
+            system_text_scale: self.host.system_text_scale,
+            system_reduced_transparency: self.host.system_reduced_transparency,
             system_scroll_bars: self.host.scroll_bars.state,
             system_languages: self.host.system_languages.clone(),
             languages_gen: self.host.languages_gen,
@@ -126,6 +129,8 @@ impl RuntimeCore {
             caret_read: false,
             wm_state: self.host.wm_state,
             wm_state_read: false,
+            primary_pointer: self.host.primary_pointer,
+            primary_pointer_read: false,
             layout_seen: self.commit.layout_seen.rects.clone(),
             layout_reads: Vec::new(),
             commits: self.commit.commits,
@@ -208,18 +213,10 @@ impl Measurement<'_> {
                 0.0
             };
             // Rows that shrank or went leave the offset past the end until scrolling clamps it;
-            // what shows then is the end.
+            // what shows then is the end. Never present a blank caused by an estimate: expand
+            // and measure again first.
             let (offset, pinned) = v.locate(offset, held);
-            let offset = offset.min(v.max_offset());
-            let end = v.row_end(v.range.end);
-            let mounted_height = (end - v.before).max(0.0);
-            // Never present a blank caused by an estimate. Expand and measure again first.
-            retry |= if pinned {
-                v.range.start > 0 && mounted_height < v.viewport
-            } else {
-                (v.range.start > 0 && offset < v.pad_top + v.before)
-                    || (v.range.end < v.keys.len() && offset + v.viewport > v.pad_top + end)
-            };
+            retry |= v.viewport_uncovered(offset, pinned);
         }
         retry
     }
@@ -335,6 +332,7 @@ impl Measurement<'_> {
             titlebar: self.titlebar,
             caret_read: self.caret_read,
             wm_state_read: Some(self.wm_state_read),
+            primary_pointer_read: Some(self.primary_pointer_read),
             layout_reads: self.layout_reads,
             memo_flattened: Some(memo_pending),
             memo_reused,
@@ -720,6 +718,8 @@ impl Measurement<'_> {
             system_accent: this.system_accent,
             system_contrast: this.system_contrast,
             system_increased_contrast: this.system_increased_contrast,
+            system_text_scale: this.system_text_scale,
+            system_reduced_transparency: this.system_reduced_transparency,
             system_scroll_bars: this.system_scroll_bars,
             system_languages: this.system_languages.clone(),
             system_reduced_motion: this.system_reduced_motion,
@@ -732,7 +732,10 @@ impl Measurement<'_> {
             caret_read: std::cell::Cell::new(false),
             wm_state: this.wm_state,
             wm_state_read: std::cell::Cell::new(false),
+            primary_pointer: this.primary_pointer,
+            primary_pointer_read: std::cell::Cell::new(false),
             safe_area: this.safe_area,
+            keyboard_inset: this.keyboard_inset,
             layout: this.layout_seen.clone(),
             layout_reads: Default::default(),
         };
@@ -746,6 +749,7 @@ impl Measurement<'_> {
                 self.env,
                 self.system_accent,
                 self.system_reduced_motion,
+                self.system_reduced_transparency,
                 self.languages_gen,
                 crate::theme::blends_srgb(),
                 self.memo_chrome_bits(),
@@ -784,6 +788,7 @@ impl Measurement<'_> {
                             self.env,
                             self.system_accent,
                             self.system_reduced_motion,
+                            self.system_reduced_transparency,
                             self.languages_gen,
                             crate::theme::blends_srgb(),
                             self.memo_chrome_bits(),
@@ -807,6 +812,7 @@ impl Measurement<'_> {
             // Reads made by memos this build reused count as made again.
             self.caret_read = cx.caret_read.get() || replayed.caret;
             self.wm_state_read = cx.wm_state_read.get();
+            self.primary_pointer_read = cx.primary_pointer_read.get();
             self.layout_reads = cx.layout_reads.take();
             for read in replayed.layout {
                 layout_read::note_read_at(&mut self.layout_reads, &read.key, read.same, read.at);

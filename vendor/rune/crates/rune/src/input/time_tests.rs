@@ -271,9 +271,11 @@ fn web_dom_input_classification_covers_every_user_input_kind() {
         assert!(is_web_dom_input(kind), "web dom kind {kind:?} must stamp arrival time");
     }
     for kind in [
+        "init",
         "viewport",
         "dpr",
         "motion",
+        "languages",
         "primary_pointer",
         "contrast",
         "focus",

@@ -100,6 +100,7 @@ impl Drop for TurnGuard {
 /// A menu handed over and waiting for its posted message.
 struct Pending {
     show: Show,
+    dark: bool,
     session: Rc<Session>,
     wake: Option<Waker>,
 }
@@ -118,7 +119,7 @@ impl Drop for OwnedMenu {
 /// in `session` and `wake` brings the host to read it. False when the window has no Win32
 /// handle. A session cancelled before then never opens; one whose window was hidden by then
 /// answers `None`.
-pub(super) fn show(window: &Arc<Window>, show: Show, session: Rc<Session>, wake: Option<Waker>) -> bool {
+pub(super) fn show(window: &Arc<Window>, show: Show, dark: bool, session: Rc<Session>, wake: Option<Waker>) -> bool {
     let Some(hwnd) = crate::platform::win32::hwnd(window) else { return false };
     // Each menu has its own subclass, named in its message: one handed over earlier whose
     // message hasn't come yet was cancelled, and goes when that message comes.
@@ -126,7 +127,7 @@ pub(super) fn show(window: &Arc<Window>, show: Show, session: Rc<Session>, wake:
     // SAFETY: Win32 calls on a live window owned by this thread; a subclass's data is the
     // `Pending` boxed here, taken back exactly once, by whoever removes the subclass.
     unsafe {
-        let pending = Box::into_raw(Box::new(Pending { show, session, wake }));
+        let pending = Box::into_raw(Box::new(Pending { show, dark, session, wake }));
         if SetWindowSubclass(hwnd, Some(procedure), id, pending as usize) == 0 {
             drop(Box::from_raw(pending));
             return false;
@@ -145,11 +146,6 @@ pub(super) fn show(window: &Arc<Window>, show: Show, session: Rc<Session>, wake:
 pub(super) fn stop(_: Tracking) {
     // SAFETY: ends this thread's active menu, which is this session's.
     unsafe { EndMenu() };
-}
-
-/// Menus from now on are dark or light, whatever the system's appearance.
-pub(super) fn scheme(dark: bool) {
-    crate::platform::win32::dark_mode::menus(dark);
 }
 
 /// The event loop starts on this thread: menus follow the system's app mode until a window
@@ -255,6 +251,7 @@ fn track(hwnd: HWND, pending: &Pending, pointer: &mut Option<(f32, f32)>) -> Opt
         if IsWindow(hwnd) == 0 || IsWindowVisible(hwnd) == 0 {
             return None;
         }
+        let _menu_theme = crate::platform::win32::dark_mode::scoped_popup_menus(pending.dark);
         let mut ids = Vec::new();
         let menu = build(&pending.show.menu, &mut ids)?;
         let (x, y, params) = placement(hwnd, &pending.show);

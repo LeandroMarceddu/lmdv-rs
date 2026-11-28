@@ -324,7 +324,9 @@ impl paint_state::PaintState {
             return Err("a slide that scrolls or folds");
         }
         let parent = n.parent.map_or(root_inh, |p| self.inh_scratch[p]);
-        if parent.in_cache || parent.skip_paint || parent.turn != 0 || parent.rounded.is_some() || parent.blur != 0.0 {
+        let pcold = self.inh_cold_of(&parent);
+        if parent.in_cache() || parent.skip_paint() || parent.turn != 0 || pcold.rounded.is_some() || pcold.blur != 0.0
+        {
             return Err("a slide in a layer");
         }
         let plain = (i..end).all(|j| {

@@ -321,7 +321,7 @@ impl ImageZoom {
     }
 }
 
-type Lens<S> = fn(&mut S) -> &mut ImageZoom;
+type Lens<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut ImageZoom>;
 type OnClose<S> = Rc<dyn Fn(&mut S, &mut Tx)>;
 type OnKey<S> = Rc<dyn Fn(&mut S, &KeyEvent, &mut Tx) -> bool>;
 
@@ -342,35 +342,36 @@ struct PreviewHandlers<S> {
 
 impl<S: 'static> PreviewBind for PreviewHandlers<S> {
     fn body(&self, e: El) -> El {
-        let (lens, close) = (self.lens, self.close.clone());
+        let (drag_lens, wheel_lens, magnify_lens, close) =
+            (self.lens.clone(), self.lens.clone(), self.lens.clone(), self.close.clone());
         let mut e = e
             .on_drag(move |s: &mut S, d: &mut Drag, tx: &mut Tx| {
-                if lens(s).press(d, true, tx)
+                if drag_lens(s).press(d, true, tx)
                     && let Some(c) = &close
                 {
                     c(s, tx);
                 }
             })
-            .on_wheel(move |s: &mut S, ev, tx| lens(s).wheel(ev, tx));
+            .on_wheel(move |s: &mut S, ev, tx| wheel_lens(s).wheel(ev, tx));
         if cfg!(target_os = "macos") {
-            e = e.on_magnify(move |s: &mut S, ev, tx| lens(s).magnify(ev, tx));
+            e = e.on_magnify(move |s: &mut S, ev, tx| magnify_lens(s).magnify(ev, tx));
         }
         e
     }
 
     fn root(&self, e: El) -> El {
-        let lens = self.lens;
+        let (modal_lens, drag_lens, key_lens) = (self.lens.clone(), self.lens.clone(), self.lens.clone());
         let (dismiss, close, key_close) = (self.close.clone(), self.close.clone(), self.close.clone());
         let first = self.key.clone();
         e.modal_tx(false, move |s: &mut S, tx: &mut Tx| {
-            if lens(s).owns_escape() {
-                lens(s).fit(tx)
+            if modal_lens(s).owns_escape() {
+                modal_lens(s).fit(tx)
             } else if let Some(c) = &dismiss {
                 c(s, tx)
             }
         })
         .on_drag(move |s: &mut S, d: &mut Drag, tx: &mut Tx| {
-            if lens(s).press(d, false, tx)
+            if drag_lens(s).press(d, false, tx)
                 && let Some(c) = &close
             {
                 c(s, tx);
@@ -381,7 +382,7 @@ impl<S: 'static> PreviewBind for PreviewHandlers<S> {
             if first.as_ref().is_some_and(|f| f(s, ev, tx)) {
                 return true;
             }
-            match lens(s).key(ev, tx) {
+            match key_lens(s).key(ev, tx) {
                 Some(true) => {
                     if let Some(c) = &key_close {
                         c(s, tx);
@@ -395,17 +396,17 @@ impl<S: 'static> PreviewBind for PreviewHandlers<S> {
     }
 
     fn zoom_out(&self, b: IconButton) -> IconButton {
-        let lens = self.lens;
+        let lens = self.lens.clone();
         b.on_press_tx(move |s: &mut S, tx: &mut Tx| lens(s).zoom_out(tx))
     }
 
     fn zoom_in(&self, b: IconButton) -> IconButton {
-        let lens = self.lens;
+        let lens = self.lens.clone();
         b.on_press_tx(move |s: &mut S, tx: &mut Tx| lens(s).zoom_in(tx))
     }
 
     fn fit(&self, b: Button) -> Button {
-        let lens = self.lens;
+        let lens = self.lens.clone();
         b.on_press_tx(move |s: &mut S, tx: &mut Tx| lens(s).fit(tx))
     }
 
@@ -423,7 +424,7 @@ struct PreviewCore {
     natural: [f32; 2],
     image: El,
     icons: Option<[&'static Icon; 2]>,
-    labels: [String; 4],
+    labels: Option<[String; 4]>,
     format: fn(u32) -> String,
     controls: Option<rune::Transition>,
     pan_cursors: bool,
@@ -435,7 +436,7 @@ impl PreviewCore {
             natural,
             image,
             icons: None,
-            labels: ["Zoom out".into(), "Zoom to fit".into(), "Zoom in".into(), "Close".into()],
+            labels: None,
             format: |n| format!("{n}%"),
             controls: None,
             pan_cursors: true,
@@ -470,7 +471,14 @@ impl PreviewCore {
     /// The zoom bar (`image-preview-controls`): −, the level (which fits it), +, a divider and
     /// close, on the first layer with the floating shadow.
     fn bar(&self, zoom: &ImageZoom, k: &Kit, bind: &dyn PreviewBind) -> El {
-        let [out, fit, into, close_label] = self.labels.clone();
+        let [out, fit, into, close_label] = self.labels.clone().unwrap_or_else(|| {
+            [
+                rune::labels::label(rune::Label::ZoomOut),
+                rune::labels::label(rune::Label::ZoomToFit),
+                rune::labels::label(rune::Label::ZoomIn),
+                rune::labels::label(rune::Label::Close),
+            ]
+        });
         let level = (self.format)(zoom.level());
         let mut bar =
             row().key("image-preview-controls").gap(2.0).padding(2.0).center_y().radius(8.0).fill(k.c.layer_01);
@@ -523,8 +531,15 @@ pub struct Preview<S> {
 impl<S: 'static> Preview<S> {
     /// `image` (the app's element drawing the picture, with its key and shared-element id) is
     /// placed and sized here; `natural` is its size in pixels.
-    pub fn new(lens: Lens<S>, natural: [f32; 2], image: El) -> Preview<S> {
-        Preview { core: PreviewCore::new(natural, image), handlers: PreviewHandlers { lens, close: None, key: None } }
+    pub fn new(
+        lens: impl for<'a> Fn(&'a mut S) -> &'a mut ImageZoom + 'static,
+        natural: [f32; 2],
+        image: El,
+    ) -> Preview<S> {
+        Preview {
+            core: PreviewCore::new(natural, image),
+            handlers: PreviewHandlers { lens: Rc::new(lens), close: None, key: None },
+        }
     }
 
     /// How the zoom bar comes and goes (as the image flies, or with the scrim).
@@ -560,7 +575,7 @@ impl<S: 'static> Preview<S> {
         zoom_in: impl Into<String>,
         close: impl Into<String>,
     ) -> Self {
-        self.core.labels = [zoom_out.into(), fit.into(), zoom_in.into(), close.into()];
+        self.core.labels = Some([zoom_out.into(), fit.into(), zoom_in.into(), close.into()]);
         self
     }
 

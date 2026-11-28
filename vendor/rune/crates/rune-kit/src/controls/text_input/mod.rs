@@ -5,7 +5,7 @@ use rune::{Color, El, Icon, RichStyle, Span, TextEdit, TextStyle, Tx, el, icon, 
 
 use crate::{Acts, Kit, State};
 
-fn kit_rich_style(k: &Kit) -> RichStyle {
+pub(crate) fn kit_rich_style(k: &Kit) -> RichStyle {
     RichStyle {
         link: k.c.text_accent,
         code_fg: None,
@@ -19,7 +19,7 @@ fn kit_rich_style(k: &Kit) -> RichStyle {
 /// Shared shell painting (text-input.css:5-75, textarea.css): the base fill, input elevation,
 /// hover overlay, a 1 point focus or invalid ring just inside the box in place of the shadow
 /// (or the kit's own radius and ring, `Kit::metrics.field`), disabled dimming.
-fn shell(k: &Kit, e: El, state: State, invalid: bool, focused: bool) -> El {
+pub(crate) fn shell(k: &Kit, e: El, state: State, invalid: bool, focused: bool) -> El {
     let c = &k.c;
     let m = k.field_metrics();
     let hover = state == State::Hover && !invalid && !focused;
@@ -82,6 +82,11 @@ macro_rules! rich_forwarders {
             self.edits.visual(move |e| e.pill_image(image));
             self
         }
+        /// See [`El::pill_inline_image`](rune::El::pill_inline_image).
+        pub fn pill_inline_image(mut self, image: impl Fn(&str) -> Option<rune::InlineImage> + 'static) -> Self {
+            self.edits.visual(move |e| e.pill_inline_image(image));
+            self
+        }
         /// See [`El::pill_style`](rune::El::pill_style).
         pub fn pill_style(mut self, style: impl Fn(&str) -> rune::PillStyle + 'static) -> Self {
             self.edits.visual(move |e| e.pill_style(style));
@@ -95,6 +100,16 @@ macro_rules! rich_forwarders {
         /// See [`El::pill_copy_text`](rune::El::pill_copy_text).
         pub fn pill_copy_text(mut self, f: impl Fn(&str) -> Option<String> + 'static) -> Self {
             self.edits.visual(move |e| e.pill_copy_text(f));
+            self
+        }
+        /// Virtual keyboard layout and input mode hint ([`El::input_mode`](rune::El::input_mode)).
+        pub fn input_mode(mut self, mode: rune::InputMode) -> Self {
+            self.edits.visual(move |e| e.input_mode(mode));
+            self
+        }
+        /// Browser and OS autofill hint ([`El::autofill`](rune::El::autofill), HTML `autocomplete`).
+        pub fn autofill(mut self, hint: rune::Autofill) -> Self {
+            self.edits.visual(move |e| e.autofill(hint));
             self
         }
     };
@@ -214,10 +229,11 @@ macro_rules! field_hook_forwarders {
         }
         /// Called when the focused inner editor loses focus: the window losing focus (another
         /// app, a hidden window), Tab, a click elsewhere or `Tx::focus` moving it off, so a form
-        /// can commit a half-typed value. Return stays [`Self::on_submit`]. An open IME
-        /// composition is finished first. Not called for a field removed from the view while
-        /// focused. Skipped when disabled. Keys are untouched: held modifiers still release
-        /// ([`El::on_focus_lost`](rune::El::on_focus_lost)).
+        /// can commit a half-typed value. Use [`Self::on_focus_change`] for in-window focus gain
+        /// and loss that stays silent on window deactivation and return. Return stays
+        /// [`Self::on_submit`]. An open IME composition is finished first. Not called for a field
+        /// removed from the view while focused. Skipped when disabled. Keys are untouched: held
+        /// modifiers still release ([`El::on_focus_lost`](rune::El::on_focus_lost)).
         /// ```
         /// # use rune::TextEdit;
         /// # use rune_kit::{Kit, TextArea, TextField, TextInput};
@@ -231,6 +247,28 @@ macro_rules! field_hook_forwarders {
         /// ```
         pub fn on_blur<S: 'static>(mut self, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
             self.edits.blur(f);
+            self
+        }
+        /// Called with `true` when the inner editor gains focus and `false` when focus leaves it
+        /// inside the window: Tab, pointer clicks, assistive technology, programmatic
+        /// [`Tx::focus`](rune::Tx::focus)/[`Tx::blur`](rune::Tx::blur), modal autofocus/return,
+        /// and disabling or removing the field while focused
+        /// ([`El::on_focus_change`](rune::El::on_focus_change)). Stays silent on window
+        /// deactivation and return (use [`Self::on_blur`] when window deactivation should also
+        /// notify). Read [`Tx::focus_visible`](rune::Tx::focus_visible) inside the callback to
+        /// distinguish keyboard focus from pointer focus. Skipped when disabled.
+        /// ```
+        /// # use rune::TextEdit;
+        /// # use rune_kit::{Kit, TextArea, TextField, TextInput};
+        /// # struct App { edit: TextEdit, active: bool }
+        /// # let s = App { edit: TextEdit::default(), active: false };
+        /// # let k = Kit::neutral(true);
+        /// # let _ =
+        #[doc = concat!($ctor, ".on_edit(|s: &mut App| &mut s.edit).on_focus_change(|s: &mut App, focused, _| s.active = focused).build(&k)")]
+        /// # ;
+        /// ```
+        pub fn on_focus_change<S: 'static>(mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) -> Self {
+            self.edits.focus_change(f);
             self
         }
     };
@@ -280,6 +318,9 @@ impl EditActs {
     fn blur<S: 'static>(&mut self, f: impl Fn(&mut S, &mut Tx) + 'static) {
         self.handlers.push(Box::new(move |e: El| e.on_focus_lost(f)));
     }
+    fn focus_change<S: 'static>(&mut self, f: impl Fn(&mut S, bool, &mut Tx) + 'static) {
+        self.handlers.push(Box::new(move |e: El| e.on_focus_change(f)));
+    }
     fn secondary_press<S: 'static>(&mut self, f: impl Fn(&mut S, rune::PointerPress, &mut Tx) + 'static) {
         self.handlers.push(Box::new(move |e: El| e.on_secondary_press(f)));
     }
@@ -301,7 +342,13 @@ impl EditActs {
 
 /// What assistive technology reads for a field's editor: its name (the label, else the
 /// placeholder), a description, and whether it can be used.
-fn name_field(e: El, label: Option<&str>, placeholder: &str, description: Option<&str>, disabled: bool) -> El {
+pub(crate) fn name_field(
+    e: El,
+    label: Option<&str>,
+    placeholder: &str,
+    description: Option<&str>,
+    disabled: bool,
+) -> El {
     let e = match label.filter(|l| !l.is_empty()).or(Some(placeholder).filter(|p| !p.is_empty())) {
         Some(name) => e.label(name),
         None => e,
@@ -631,7 +678,7 @@ impl TextInput {
             let mut b = row()
                 .key("action")
                 .role("button")
-                .label(if self.clear { "Clear" } else { "Copy" })
+                .label(rune::labels::label(if self.clear { rune::Label::Clear } else { rune::Label::Copy }))
                 .size(side, side)
                 .self_center()
                 .center()

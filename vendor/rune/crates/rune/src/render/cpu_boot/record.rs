@@ -47,7 +47,7 @@ pub fn encode(scene: &Scene<'_>) -> Vec<u8> {
         for v in [image.width, height] {
             out.extend_from_slice(&v.to_le_bytes());
         }
-        out.extend_from_slice(image.data);
+        out.extend_from_slice(&image.data);
     }
     out
 }
@@ -82,7 +82,11 @@ impl Recording {
             instances: &self.instances,
             glyph_pages: self.glyph_pages.iter().map(Vec::as_slice).collect(),
             outlines: None,
-            images: self.images.iter().map(|(width, data)| Image { width: *width, data, dirty: None }).collect(),
+            images: self
+                .images
+                .iter()
+                .map(|(width, data)| Image { width: *width, data: std::borrow::Cow::Borrowed(data), dirty: None })
+                .collect(),
             size: self.size,
             clear: self.clear,
             lcd: self.lcd,

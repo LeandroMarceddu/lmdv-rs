@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::rc::Rc;
 
-use rune::{Color, Drag, El, GrowthSpec, KeyEvent, PointerEvent, PointerPress, ScrollSpec, Tx, col};
+use rune::{Anim, Color, Drag, El, GrowthSpec, KeyEvent, PointerEvent, PointerPress, ScrollSpec, Tx, col};
 
 use super::render::{build_row_el, header_row};
 use super::window::{self, BandParams, ColumnPlan};
@@ -25,6 +25,7 @@ pub(super) struct RowSpec {
     pub(super) zebra: bool,
     pub(super) cursor_outline: bool,
     pub(super) focus: Color,
+    pub(super) hover_motion: Option<(Anim, Anim)>,
 }
 
 pub(super) trait TableBind {
@@ -309,6 +310,7 @@ impl TableCore {
                 zebra,
                 cursor_outline,
                 focus: k.c.border_focus,
+                hover_motion: k.motion.hover,
             },
         );
         if let Some((overscan, edge)) = virtual_overscan {
@@ -640,8 +642,8 @@ impl<S: 'static> Table<S> {
     ///
     /// Smaller values mount fewer offscreen rows and reduce per-frame scroll work at the cost of
     /// more frequent window-move commits while scrolling; larger values commit less often while
-    /// keeping more offscreen nodes mounted. Clamping and non-finite handling follow
-    /// [`El::virtual_overscan`].
+    /// keeping more offscreen nodes mounted. Clamping, non-finite handling, and disabling the
+    /// default 32-row `stick_bottom` pinned floor follow [`El::virtual_overscan`].
     ///
     /// ```
     /// use std::borrow::Cow;

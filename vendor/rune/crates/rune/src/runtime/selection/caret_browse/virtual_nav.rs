@@ -1,7 +1,7 @@
 //! Virtual-list boundary, paging, document-end, and offscreen-collapse navigation for
 //! `El::caret_browsing(true)`, driven by the explicit `pending::State` state machine.
 
-use super::pending::{self, Effect, Event, Landing, Target};
+use super::pending::{self, Effect, Event, Landing, Scope, Target};
 use super::{horiz_dist, pill_ranges, snap_out_of_pill};
 use crate::edit::CaretMove;
 use crate::runtime::selectable::phase;
@@ -108,6 +108,7 @@ impl RuntimeCore {
             }
             let row_key = v.keys.get(next_row)?.clone();
             return Some(Target {
+                scope: Scope::default(),
                 host_path,
                 list_path: ve.list_path,
                 row_index: next_row,
@@ -138,6 +139,7 @@ impl RuntimeCore {
                 let v = self.commit.virtuals.get(&list_path)?;
                 if !v.keys.is_empty() && !v.range.contains(&0) {
                     return Some(Target {
+                        scope: Scope::default(),
                         host_path,
                         list_path,
                         row_index: 0,
@@ -165,6 +167,7 @@ impl RuntimeCore {
                 let last = v.keys.len().checked_sub(1)?;
                 if !v.range.contains(&last) {
                     return Some(Target {
+                        scope: Scope::default(),
                         host_path,
                         list_path,
                         row_index: last,
@@ -206,6 +209,7 @@ impl RuntimeCore {
                 return None;
             }
             Some(Target {
+                scope: Scope::default(),
                 host_path,
                 list_path: list_path.clone(),
                 row_index: 0,
@@ -228,6 +232,7 @@ impl RuntimeCore {
                 return None;
             }
             Some(Target {
+                scope: Scope::default(),
                 host_path,
                 list_path: list_path.clone(),
                 row_index: last,
@@ -308,6 +313,7 @@ impl RuntimeCore {
         }
         let row_key = v.keys.get(target_row)?.clone();
         Some(Target {
+            scope: Scope::default(),
             host_path: self.tree.nodes[host].path.clone(),
             list_path,
             row_index: target_row,
@@ -332,6 +338,7 @@ impl RuntimeCore {
         let v = self.commit.virtuals.get(&t.list_path)?;
         let row_index = v.index_of(&t.row_key)?;
         Some(Target {
+            scope: Scope::default(),
             host_path: self.tree.nodes[host].path.clone(),
             list_path: t.list_path.clone(),
             row_index,
@@ -395,6 +402,7 @@ impl RuntimeCore {
         };
         let row_key = v.keys.get(row_index)?.clone();
         Some(Target {
+            scope: Scope::default(),
             host_path,
             list_path,
             row_index,
@@ -416,12 +424,32 @@ impl RuntimeCore {
 
     /// Starts a pending virtual-row caret move and drives it to landing (or cancellation) within
     /// the bounded `MAX_SEEK_HOPS` scroll/remount rounds.
-    pub(super) fn request_and_drive_pending_caret(&mut self, app: &mut dyn AppDriver, target: Target) {
+    pub(super) fn request_and_drive_pending_caret(
+        &mut self,
+        app: &mut dyn AppDriver,
+        mut target: Target,
+        scope: Scope,
+    ) {
+        target.scope = scope;
         let effects = pending::step(&mut self.edit.selectable.pending_move, Event::Request(target));
         for eff in effects {
             self.run_pending_effect(app, eff);
         }
         self.drive_pending_caret(app);
+    }
+
+    /// Resolves the live host node for a pending virtual-row target, respecting whether the seek
+    /// belongs to a focused `El::caret_browsing(true)` host or an active plain selection.
+    fn pending_target_host(&self, target: &Target) -> Option<usize> {
+        match target.scope {
+            Scope::FocusedCaretHost => {
+                self.caret_browsing_focused_host().filter(|&h| self.tree.nodes[h].path == target.host_path)
+            }
+            Scope::ActiveSelection => {
+                self.selection_holder_end()?;
+                self.live(&target.host_path).filter(|&h| self.tree.nodes[h].selection_group || self.is_selectable(h))
+            }
+        }
     }
 
     /// Checks an in-flight `PendingCaretMove` against the committed tree and executes its
@@ -444,7 +472,7 @@ impl RuntimeCore {
     }
 
     fn inspect_pending_target(&self, target: &Target) -> Event {
-        let host = self.caret_browsing_focused_host().filter(|&h| self.tree.nodes[h].path == target.host_path);
+        let host = self.pending_target_host(target);
         let Some(host) = host else {
             return Event::Check {
                 host_valid: false,
@@ -582,8 +610,7 @@ impl RuntimeCore {
     }
 
     fn land_pending_caret(&mut self, target: Target) {
-        let Some(host) = self.caret_browsing_focused_host().filter(|&h| self.tree.nodes[h].path == target.host_path)
-        else {
+        let Some(host) = self.pending_target_host(&target) else {
             return;
         };
         let row_texts = self.mounted_row_texts(host, &target.list_path, &target.row_key);
@@ -620,7 +647,7 @@ impl RuntimeCore {
                     && let Some(spec) = self.tree.nodes[first].text.as_ref()
                 {
                     let pills = pill_ranges(spec);
-                    crate::edit::next_word_in(&spec.content, 0, &pills)
+                    crate::edit::next_word_in(spec.content_str(), 0, &pills)
                 } else {
                     0
                 };
@@ -629,7 +656,7 @@ impl RuntimeCore {
             Landing::WordBackward => {
                 let byte = self.tree.nodes[last].text.as_ref().map_or(0, |spec| {
                     let pills = pill_ranges(spec);
-                    crate::edit::prev_word_in(&spec.content, spec.content.len(), &pills)
+                    crate::edit::prev_word_in(spec.content_str(), spec.content_str().len(), &pills)
                 });
                 (last, byte, parley::Affinity::Downstream)
             }
@@ -695,6 +722,10 @@ impl RuntimeCore {
         {
             let far = (EndRef::Mounted(dest_node) != anchor_end).then(|| phase::Far::new(dest_path, dest_content));
             self.select_step(phase::Event::SetFocus { focus: dest_byte, far });
+            #[cfg(any(target_os = "linux", test))]
+            if self.has_nonempty_selection() {
+                self.primary_selection_changed();
+            }
         } else {
             self.select_step(phase::Event::Select(phase::Selection::new(
                 dest_path,

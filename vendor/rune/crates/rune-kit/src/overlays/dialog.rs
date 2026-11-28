@@ -119,21 +119,25 @@ impl Dialog {
         if !self.open {
             return;
         }
-        let mut title = col().grow(1.0).shrink().gap(4.0).child(
-            text(self.title.clone())
-                .font(if self.description.is_some() {
-                    TextStyle { size: 15.0, tracking: -0.13, ..k.ty.ui_medium }.lh(20.0)
-                } else {
-                    k.ty.ui_medium.lh(16.0)
-                })
-                .color(k.c.text_base),
-        );
+        let dm = k.dialog_metrics();
+        let title_font = dm.title.unwrap_or_else(|| {
+            if self.description.is_some() {
+                TextStyle { size: 15.0, tracking: -0.13, ..k.ty.ui_medium }.lh(20.0)
+            } else {
+                k.ty.ui_medium.lh(16.0)
+            }
+        });
+        let mut title =
+            col().grow(1.0).shrink().gap(4.0).child(text(self.title.clone()).font(title_font).color(k.c.text_base));
         if let Some(description) = self.description.clone() {
             title = title.child(text(description).font(k.ty.ui.lh(20.0)).color(k.c.text_muted).wrap().w_full());
         }
-        let mut header = row().key("header").w_full().padding(16.0).items_start().child(title);
+        let mut header = row().key("header").w_full().padding(dm.padding).items_start().child(title);
         if let Some(button) = self.button {
-            let close_label = self.close_label.filter(|l| !l.trim().is_empty()).unwrap_or_else(|| "Close".into());
+            let close_label = self
+                .close_label
+                .filter(|l| !l.trim().is_empty())
+                .unwrap_or_else(|| rune::labels::label(rune::Label::Close));
             let dismiss = IconButton::new(k.glyph.close)
                 .variant(IconButtonVariant::Ghost)
                 .control_size(ControlSize::Regular)
@@ -157,7 +161,7 @@ impl Dialog {
                 .max_w(self.width)
                 .shrink()
                 .min_h(0.0)
-                .radius(6.0)
+                .radius(dm.radius)
                 .fill(k.c.layer_01)
                 .child(header)
                 .child(body)

@@ -65,6 +65,7 @@ impl Host {
             w.native.prime.stop();
         }
         w.window.set_minimized(true);
+        self.placement_watch.mark_dirty();
     }
 
     /// `Tx::set_title`: shows a title set since the window last showed one, hidden or covered
@@ -90,6 +91,14 @@ impl Host {
     pub(in crate::window) fn apply_tx_window_backdrop(&mut self) {
         if let Some(backdrop) = self.app.rt_mut().host.window_backdrop_request.take() {
             self.set_window_backdrop(backdrop);
+        }
+    }
+
+    /// `Tx::set_resize_anchor`: applies a per-window resize anchor requested since the shell or
+    /// frame request last checked, retaining it on `Host` across native window recreation.
+    pub(in crate::window) fn apply_tx_resize_anchor(&mut self) {
+        if let Some(anchor) = self.app.rt_mut().host.window_resize_anchor.take() {
+            self.set_resize_anchor(anchor);
         }
     }
 

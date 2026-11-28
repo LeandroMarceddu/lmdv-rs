@@ -147,8 +147,14 @@ impl FontSmoothing {
     /// `On` draws as `Off` when the user turned smoothing off (`AppleFontSmoothing` 0), as AppKit
     /// and SwiftUI then do.
     pub fn pipeline(self) -> ApplePipeline {
+        self.pipeline_with_user_smoothing(smoothing_allowed_by_user())
+    }
+
+    /// [`Self::pipeline`] with macOS's `AppleFontSmoothing` user setting supplied explicitly
+    /// (`true` ignores a host `AppleFontSmoothing = 0`, as deterministic headless snapshots do).
+    pub(crate) fn pipeline_with_user_smoothing(self, user_smoothing_allowed: bool) -> ApplePipeline {
         match self {
-            FontSmoothing::On if !smoothing_allowed_by_user() => ApplePipeline::UNSMOOTHED,
+            FontSmoothing::On if !user_smoothing_allowed => ApplePipeline::UNSMOOTHED,
             FontSmoothing::On | FontSmoothing::Windfoil => ApplePipeline::SMOOTHED,
             _ => ApplePipeline::UNSMOOTHED,
         }
@@ -337,9 +343,10 @@ pub(crate) fn coverage_exponent(mode: FontSmoothing, fill: [f32; 4], apple: bool
     {
         return 1.0;
     }
-    // Linux's curve is for `Off` only (a fit, not yet a Linux capture); Chromium-weight outline
-    // modes keep the curve they were drawn with everywhere.
-    let [black, white] = if windows || apple || mode != FontSmoothing::Off { WINDOWS_GAMMA } else { LINUX_GAMMA };
+    // Chromium-weight outline modes on Apple platforms keep Windows' curve (as the lab drew them);
+    // Linux (and other non-Windows, non-Apple targets) takes Linux Chromium's gamma across `Off`
+    // and every Chromium-weight outline mode.
+    let [black, white] = if windows || apple { WINDOWS_GAMMA } else { LINUX_GAMMA };
     let luma = ((0.2126 * fill[0] + 0.7152 * fill[1] + 0.0722 * fill[2]) / fill[3]).clamp(0.0, 1.0);
     let line = black + (white - black) * luma;
     if windows { line + windows_correction(luma * 255.0) } else { line }

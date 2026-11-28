@@ -18,9 +18,10 @@ use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use rune_motion::NodeId;
 use std::{cell::Cell, rc::Rc};
 
-/// The host view: flipped, so frames come straight from Rune's top-left points, and never hit,
-/// so clicks fall through to winit's view behind it in the hit-test order.
-fn host_class() -> Option<&'static AnyClass> {
+/// The host view: flipped, so frames come straight from Rune's top-left points, never hit by
+/// pointer events, and hidden from AppKit accessibility so backdrop effect views neither appear
+/// in VoiceOver nor capture accessibility hit tests.
+pub(super) fn host_class() -> Option<&'static AnyClass> {
     const NAME: &std::ffi::CStr = c"RuneMaterialHost";
     if let Some(class) = AnyClass::get(NAME) {
         return Some(class);
@@ -32,10 +33,31 @@ fn host_class() -> Option<&'static AnyClass> {
     unsafe extern "C-unwind" fn hit_test(_: &AnyObject, _: Sel, _: CGPoint) -> *mut AnyObject {
         std::ptr::null_mut()
     }
-    // SAFETY: the signatures match -[NSView isFlipped] and -[NSView hitTest:].
+    unsafe extern "C-unwind" fn is_a11y_element(_: &AnyObject, _: Sel) -> Bool {
+        Bool::NO
+    }
+    unsafe extern "C-unwind" fn is_a11y_ignored(_: &AnyObject, _: Sel) -> Bool {
+        Bool::YES
+    }
+    unsafe extern "C-unwind" fn a11y_children(_: &AnyObject, _: Sel) -> *mut AnyObject {
+        let Some(array) = AnyClass::get(c"NSArray") else { return std::ptr::null_mut() };
+        // SAFETY: `+[NSArray array]` returns an autoreleased empty NSArray.
+        unsafe { msg_send![array, array] }
+    }
+    // SAFETY: the signatures match NSView's `isFlipped`, `hitTest:`, and NSAccessibility's
+    // `isAccessibilityElement`, `accessibilityIsIgnored`, `accessibilityChildren`,
+    // `accessibilityChildrenInNavigationOrder`, and `accessibilityHitTest:`.
     unsafe {
         builder.add_method(sel!(isFlipped), flipped as unsafe extern "C-unwind" fn(_, _) -> _);
         builder.add_method(sel!(hitTest:), hit_test as unsafe extern "C-unwind" fn(_, _, _) -> _);
+        builder.add_method(sel!(isAccessibilityElement), is_a11y_element as unsafe extern "C-unwind" fn(_, _) -> _);
+        builder.add_method(sel!(accessibilityIsIgnored), is_a11y_ignored as unsafe extern "C-unwind" fn(_, _) -> _);
+        builder.add_method(sel!(accessibilityChildren), a11y_children as unsafe extern "C-unwind" fn(_, _) -> _);
+        builder.add_method(
+            sel!(accessibilityChildrenInNavigationOrder),
+            a11y_children as unsafe extern "C-unwind" fn(_, _) -> _,
+        );
+        builder.add_method(sel!(accessibilityHitTest:), hit_test as unsafe extern "C-unwind" fn(_, _, _) -> _);
     }
     Some(builder.register())
 }

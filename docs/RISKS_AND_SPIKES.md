@@ -32,7 +32,7 @@ Reviewed at every phase gate. A risk with no owner is not managed.
 | RK-22 | **Typst build time/binary size** may hurt iteration. | M | M | Feature-gate PDF; split helper binary if needed; measure P0/P5. | `cargo check` slows unacceptably | open |
 | RK-23 | **Clipboard/rich copy** differs on Linux (no RTF). | L | L | Use text+HTML; document paste targets; test LibreOffice/Word. | Formatting lost in a target | accepted |
 | RK-24 | **RTL/bidi UI** is not automatic in Rune. | M | L | Rune text is bidi; shell rows need `.dir(Rtl)`; defer full RTL UI to P6/P7. | Arabic/Hebrew UI mirrors wrong | open |
-| RK-25 | **Large-document RSS stays resident after close** (OI-199): the model and parse are freed, but allocator and Rune layout state keep the last article's footprint until exit. | M | L | Accepted for v1; memory is reused, not per-close growth. If pressure appears: deferred `malloc_trim`, then a Rune cache-trim hook, with an RSS regression. | OOM or RSS growing per close | accepted |
+| RK-25 | **Large-document RSS stays resident after close** (OI-199): the model and parse are freed, but allocator and Rune layout state keep the last article's footprint until exit. | M | L | Mitigated by Rune #2396/#2403/#2407 at pin `af6b1fdd`: rest releases layout/scene/paint/memo state and trims glibc; verified RSS drops to the simple-file baseline within ~10 s. No app-side trim shipped. | OOM or RSS growing per close | mitigated |
 
 ## 2. Spikes
 

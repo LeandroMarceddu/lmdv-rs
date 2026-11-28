@@ -350,3 +350,144 @@ fn frame_summary_is_copy_and_step_and_flush_preserves_haptics_for_host() {
         "embed_frame::flush_requests must preserve haptics for LayerHost::take_haptics()",
     );
 }
+
+#[test]
+fn embed_frame_keeps_file_dialog_when_host_handles_them_and_refuses_otherwise() {
+    #[derive(Default)]
+    struct S {
+        answers: Vec<Result<Option<String>, String>>,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        el().size(40.0, 20.0)
+    }
+
+    let start = crate::time::now();
+    // Default embedded host refuses file dialogs.
+    let mut rt_default = Runtime::new(S::default(), view, (40.0, 20.0), Env::default());
+    let mut clock = FrameClock::new(start);
+    rt_default.wall_start = Some(start);
+    rt_default.update(|_, tx| {
+        tx.pick_file(crate::FileDialogOptions::default(), |s: &mut S, res, _| {
+            s.answers.push(res.map(|h| h.map(|f| f.name().to_owned())).map_err(|e| e.0));
+        });
+    });
+    {
+        let (core, mut app) = rt_default.split_mut();
+        step_and_flush(&mut clock, core, &mut app, start, false);
+    }
+    assert!(rt_default.file_dialog().is_none(), "default embedded host refuses dialogs");
+    rt_default.frame(1.0 / 60.0);
+    assert_eq!(rt_default.state.answers, [Err("native file dialogs are unsupported in embedded views".to_owned())]);
+
+    // Embedded host with host.file_dialogs = true keeps the dialog pending for the host to present.
+    let mut rt_host = Runtime::new(S::default(), view, (40.0, 20.0), Env::default());
+    rt_host.host.file_dialogs = true;
+    let mut clock2 = FrameClock::new(start);
+    rt_host.wall_start = Some(start);
+    rt_host.update(|_, tx| {
+        tx.pick_file(crate::FileDialogOptions::default(), |s: &mut S, res, _| {
+            s.answers.push(res.map(|h| h.map(|f| f.name().to_owned())).map_err(|e| e.0));
+        });
+    });
+    {
+        let (core, mut app) = rt_host.split_mut();
+        step_and_flush(&mut clock2, core, &mut app, start, false);
+    }
+    assert!(
+        rt_host.file_dialog().is_some() && rt_host.file_dialog_handles(),
+        "embedding host with file_dialogs keeps handle dialog pending"
+    );
+    rt_host.resolve_file_dialog_handle(Some(crate::FileHandle::from_bytes("doc.pdf", b"pdf".to_vec()))).unwrap();
+    rt_host.frame(1.0 / 60.0);
+    assert_eq!(rt_host.state.answers, [Ok(Some("doc.pdf".to_owned()))]);
+}
+
+#[test]
+fn embed_frame_honors_on_popup_menu_fallback_and_cancels_when_unregistered() {
+    use crate::{App, AppSpec, PopupItem, PopupMenu, PopupMenuRequest, Tx};
+
+    #[derive(Default)]
+    struct S {
+        opened: Vec<PopupMenuRequest>,
+        picks: Vec<Option<String>>,
+    }
+    fn view(_: &S, _: &mut Cx<S>) -> El {
+        el().key("anchor").size(120.0, 32.0).on_press_tx(|_: &mut S, tx: &mut Tx| {
+            let menu = PopupMenu::new().item(PopupItem::new("light", "Light")).item(PopupItem::new("dark", "Dark"));
+            tx.popup_menu(menu, "anchor", |s: &mut S, picked, _| {
+                s.picks.push(picked.map(str::to_owned));
+            });
+        })
+    }
+
+    let start = crate::time::now();
+
+    // Without App::on_popup_menu, flush_requests cancels the pop-up with None immediately.
+    let mut rt_plain = Runtime::new(S::default(), view, (200.0, 100.0), Env::default());
+    rt_plain.wall_start = Some(start);
+    let mut clock_plain = FrameClock::new(start);
+    {
+        let (core, mut app) = rt_plain.split_mut();
+        step_and_flush(&mut clock_plain, core, &mut app, start, false);
+    }
+    rt_plain.pointer_down(20.0, 16.0);
+    rt_plain.pointer_up(20.0, 16.0);
+    {
+        let (core, mut app) = rt_plain.split_mut();
+        step_and_flush(&mut clock_plain, core, &mut app, start + FRAME_60HZ, false);
+    }
+    assert!(rt_plain.popup_menu().is_none());
+    assert_eq!(rt_plain.state.picks, [None], "unregistered on_popup_menu resolves to None");
+
+    // With App::on_popup_menu active (Android / iOS), flush_requests keeps the open fallback menu
+    // alive across frames until the app answers with Tx::resolve_popup_menu.
+    let mut rt = App::new(AppSpec::new("embed-popup", (200.0, 100.0), S::default, view))
+        .on_popup_menu(|s: &mut S, req, _| s.opened.push(req))
+        .headless_runtime((200.0, 100.0), Env::default());
+    rt.core_mut().host.force_popup_menu_fallback = true;
+    rt.wall_start = Some(start);
+    let mut clock = FrameClock::new(start);
+    {
+        let (core, mut app) = rt.split_mut();
+        step_and_flush(&mut clock, core, &mut app, start, false);
+    }
+    rt.pointer_down(20.0, 16.0);
+    rt.pointer_up(20.0, 16.0);
+    {
+        let (core, mut app) = rt.split_mut();
+        step_and_flush(&mut clock, core, &mut app, start + FRAME_60HZ, false);
+    }
+    assert_eq!(rt.state.opened.len(), 1, "App::on_popup_menu receives the request on LayerHost");
+    assert!(rt.state.picks.is_empty(), "flush_requests must not cancel an active fallback pop-up");
+    assert!(rt.popup_menu().is_some(), "open fallback pop-up remains active across frames");
+
+    // Another idle frame must still keep the menu open.
+    {
+        let (core, mut app) = rt.split_mut();
+        step_and_flush(&mut clock, core, &mut app, start + FRAME_60HZ * 2, false);
+    }
+    assert!(rt.state.picks.is_empty());
+
+    // App answers the menu via Tx::resolve_popup_menu.
+    rt.update(|_, tx| tx.resolve_popup_menu(Some("dark")));
+    {
+        let (core, mut app) = rt.split_mut();
+        step_and_flush(&mut clock, core, &mut app, start + FRAME_60HZ * 3, false);
+    }
+    assert!(rt.popup_menu().is_none());
+    assert_eq!(rt.state.picks, [Some("dark".to_owned())]);
+
+    // A pop-up queued before a missed drawable is also delivered instead of cancelled.
+    rt.update(|_, tx| {
+        tx.popup_menu(PopupMenu::new().item(PopupItem::new("copy", "Copy")), (10.0, 10.0), |s: &mut S, picked, _| {
+            s.picks.push(picked.map(str::to_owned))
+        });
+    });
+    let summary = {
+        let (core, mut app) = rt.split_mut();
+        missed_step(core, &mut app, start + FRAME_60HZ * 4, false, false)
+    };
+    assert!(summary.animating, "delivered fallback menu dirties runtime for next frame");
+    assert_eq!(rt.state.opened.len(), 2);
+    assert_eq!(rt.state.picks.len(), 1, "missed_step must not cancel fallback pop-up");
+}

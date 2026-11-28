@@ -27,7 +27,9 @@ use crate::Runtime;
 use crate::runtime::Waker;
 use crate::{PointerPress, Shortcut, Tx};
 
+mod request;
 mod style;
+pub use request::PopupMenuRequest;
 pub use style::PopupMenuStyle;
 
 #[cfg(target_os = "macos")]
@@ -50,13 +52,11 @@ mod host {
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) type Tracking = ();
     #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn show(_: &Arc<Window>, _: Show, _: Rc<Session>, _: Option<Waker>) -> bool {
+    pub(super) fn show(_: &Arc<Window>, _: Show, _: bool, _: Rc<Session>, _: Option<Waker>) -> bool {
         false
     }
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn stop(_: Tracking) {}
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(super) fn scheme(_: bool) {}
     #[cfg(not(target_arch = "wasm32"))]
     pub(super) fn start(_: Waker) {}
 }
@@ -467,6 +467,9 @@ pub(crate) struct Request {
     pub on_pick: PickFn,
     /// A text field's own menu, whose picks the runtime acts on.
     pub field: Option<Box<crate::runtime::field_menu::FieldMenu>>,
+    /// True for text-selection menus (a field's menu or selectable text's Copy menu) that a host
+    /// with `host.text_menus` takes through `take_text_menu`.
+    pub text_menu: bool,
 }
 
 impl Request {
@@ -522,7 +525,7 @@ impl Tx {
                 on_pick(s, picked, tx);
             }
         });
-        let request = Request { menu, anchor: anchor.into(), on_pick, field: None };
+        let request = Request { menu, anchor: anchor.into(), on_pick, field: None, text_menu: false };
         self.popups.push(Call(Rc::new(RefCell::new(Some(request)))));
     }
 
@@ -734,6 +737,19 @@ impl Presenter {
         window: Option<&Arc<Window>>,
         paints: bool,
     ) -> bool {
+        if rt.popup_menu_fallback_active(app) {
+            if window.is_none() {
+                if rt.popup_menu().is_some() {
+                    rt.cancel_popups(app);
+                    return true;
+                }
+                return false;
+            }
+            if paints && rt.popup_waits_for_layout() {
+                return true;
+            }
+            return rt.deliver_popup_menu_fallback_from_host(app);
+        }
         let mut redraw = false;
         loop {
             if window.is_some() && paints && rt.popup_waits_for_layout() {
@@ -743,9 +759,9 @@ impl Presenter {
             redraw = true;
             if let (Some(show), Some(window)) = (show, window) {
                 // As dark as what the window draws, which may not be the system's appearance.
-                host::scheme(rt.backdrop_dark().unwrap_or(rt.env.system_dark));
+                let dark = rt.backdrop_dark().unwrap_or(rt.env.system_dark);
                 let session = Rc::new(Session::default());
-                if host::show(window, show, session.clone(), self.wake.clone()) {
+                if host::show(window, show, dark, session.clone(), self.wake.clone()) {
                     self.session = Some(session);
                     return true;
                 }

@@ -15,10 +15,7 @@ use crate::frame::host_step::{self, Acquire, FrameHost, Gate, RenderPrep, StepIn
 use crate::render::{Gpu, OFFSCREEN_FORMAT, OFFSCREEN_FORMAT_LINEAR, Renderer};
 use crate::runtime::{AppDriver, Env, Runtime, RuntimeCore};
 use crate::time::Instant;
-use crate::tooling::{
-    Args, FrameTiming, Kind, Trace,
-    headless::{step_window_frame, take_window_frame},
-};
+use crate::tooling::{Args, FrameTiming, Kind, Trace};
 use crate::window::{Life, WakeEvent};
 use crate::{WindowHandle, WindowSpec};
 
@@ -275,6 +272,7 @@ struct WindowInit {
     chrome: crate::Chrome,
     titlebar: Option<crate::Titlebar>,
     fit_height: bool,
+    resize_anchor: crate::ResizeAnchor,
     min_size: Option<(f32, f32)>,
     on_frame_encoded: Option<OnFrameEncoded>,
     fps: f64,
@@ -303,6 +301,8 @@ pub(crate) struct Window {
     /// The app's own window, not one `App::window` added.
     main: bool,
     fit_height: bool,
+    resize_anchor: crate::ResizeAnchor,
+    visible: [f32; 4],
     limits: ((f32, f32), Option<(f32, f32)>),
     frame_anim: Option<crate::window::frame::FrameAnim>,
     idle: bool,
@@ -333,10 +333,11 @@ impl Window {
         let own = app.resolve_args(inherited_window_args(args, selected));
         let comp = app.compositor.take();
         let on_frame_encoded = app.on_frame_encoded.take();
-        let (open, keep_running, fit_height, on_close_request, on_quit_request, on_close, on_reopen) = (
+        let (open, keep_running, fit_height, resize_anchor, on_close_request, on_quit_request, on_close, on_reopen) = (
             app.open,
             app.keep_running,
             app.fit_content_height,
+            app.resize_anchor,
             app.on_close_request,
             app.on_quit_request,
             app.on_close,
@@ -346,17 +347,27 @@ impl Window {
         let (chrome, titlebar) = (app.chrome, app.titlebar);
         let (playground, attach_playground) = (app.playground.take(), app.attach_playground);
         crate::credentials::note_headless_runtime();
-        let (spec, state, shared, runtime) = app.into_parts(own.scene.as_deref());
+        let (spec, state, shared, mut runtime) = app.into_parts(own.scene.as_deref());
+        runtime.respect_user_font_smoothing = false;
+        if let Some(mode) = own.font_smoothing.or(args.font_smoothing) {
+            runtime.font_smoothing = mode;
+        }
         let shortcuts = crate::shortcuts::Guard::attach(&shared, Arc::new(|| {}), true, false);
         let menus = crate::native_menu::MenuGuard::attach(&shared, true);
         let size = own.size.unwrap_or(spec.size);
         let min_size = spec.min_size;
         let dark = own.theme.as_deref() != Some("light");
-        let mut rt = crate::tooling::runtime_for(&spec, state, size, Env::new(dark, scale), Arc::new(|| {}));
+        let mut rt = crate::tooling::runtime_for_configured(
+            &spec,
+            state,
+            size,
+            Env::new(dark, scale),
+            Arc::new(|| {}),
+            Some(runtime),
+        );
         if let Some(attach) = attach_playground {
             attach(&mut rt, playground, &spec, own.playground.clone(), own.variant.clone(), false);
         }
-        rt.configure(runtime);
         let (shared_core, shortcuts_core) = (shared.core.clone(), shared.shortcuts.core.clone());
         let typed =
             Box::new(TypedDesktopApp { rt, shared, comp, on_close_request, on_quit_request, on_close, on_reopen });
@@ -374,6 +385,7 @@ impl Window {
                 chrome,
                 titlebar,
                 fit_height,
+                resize_anchor,
                 min_size,
                 on_frame_encoded,
                 fps: args.fps.max(1.0),
@@ -400,6 +412,7 @@ impl Window {
             chrome,
             titlebar,
             fit_height,
+            resize_anchor,
             min_size,
             on_frame_encoded,
             fps,
@@ -446,6 +459,8 @@ impl Window {
             panel: native.nonactivating_panel,
             main,
             fit_height,
+            resize_anchor,
+            visible: [0.0, 0.0, 1920.0, 1080.0],
             limits,
             frame_anim: None,
             idle: true,
@@ -545,11 +560,56 @@ impl Window {
     fn place(&mut self, desktop: &VirtualDesktop, request: &crate::windows::PlaceRequest, t: f64) {
         let size = (self.frame[2], self.frame[3]);
         let (display, frame) = desktop.place(request, size);
+        if let Some(d) = desktop.displays.iter().find(|d| d.id == display) {
+            self.visible = d.frame.map(|v| v as f32);
+        }
         let record = json!({ "t": t, "window": self.key, "display": display, "frame": frame });
         println!("rune-placed {record}");
         self.placed = Some(record);
         self.position = None;
         self.resize(frame);
+    }
+
+    fn take_desktop_frame(&mut self, start: f64) {
+        if let Some(anchor) = self.app.rt_mut().host.window_resize_anchor.take() {
+            self.resize_anchor = anchor;
+        }
+        let rt = self.app.rt_mut();
+        rt.host.fit.take_held();
+        let Some(request) = rt.host.window_frame.take() else { return };
+        if request.size.is_none() && !request.center {
+            return;
+        }
+        let size = request.size.map(|s| crate::window::frame::clamp_size(s, self.limits.0, self.limits.1));
+        let scale = rt.window_scale();
+        let base = self.frame_anim.as_ref().map_or(self.frame, |a| a.to);
+        let to = crate::window::frame::snap_anchored(
+            crate::window::frame::target(base, size, request.center, self.visible, self.resize_anchor),
+            scale,
+            self.resize_anchor,
+        );
+        self.frame_anim = Some(crate::window::frame::FrameAnim::retarget(
+            self.frame_anim.as_ref(),
+            request.spring,
+            start,
+            self.frame,
+            to,
+        ));
+    }
+
+    fn step_desktop_frame(&mut self, scale: f32) {
+        let Some(moving) = self.frame_anim else { return };
+        let rect = crate::window::frame::snap_anchored(moving.sample(self.virtual_t).0, scale, self.resize_anchor);
+        if self.frame != rect {
+            self.frame = rect;
+            self.resize_from = (rect[2], rect[3]);
+            let rt = self.app.rt_mut();
+            rt.step_viewport((rect[2], rect[3]), scale);
+            rt.set_window_origin((rect[0], rect[1]));
+        }
+        if moving.done(self.virtual_t) {
+            self.frame_anim = None;
+        }
     }
 
     fn move_to(&mut self, (x, y): (f32, f32)) {
@@ -596,6 +656,7 @@ impl Member for Window {
 
     fn start(&mut self, desktop: &VirtualDesktop) {
         let display = desktop.display_at(self.position);
+        self.visible = display.frame.map(|v| v as f32);
         let (w, mut h) = match self.physical {
             Some((w, h)) => ((f64::from(w) / display.scale) as f32, (f64::from(h) / display.scale) as f32),
             None => (self.frame[2], self.frame[3]),
@@ -623,6 +684,9 @@ impl Member for Window {
         if let Some(p) = requests.position {
             self.move_to(desktop.to_points(p));
         }
+        if let Some((x, y)) = requests.logical_position {
+            self.move_to((x as f32, y as f32));
+        }
         if let Some(place) = &requests.place {
             self.place(desktop, place, t);
         }
@@ -640,10 +704,12 @@ impl Member for Window {
                 WakeEvent::Window(_, request) => self.request(request, &mut changes),
                 WakeEvent::Place(_, place) => self.place(desktop, &place, t),
                 WakeEvent::Position(_, p) => self.move_to(desktop.to_points(p)),
+                WakeEvent::LogicalPosition(_, (x, y)) => self.move_to((x as f32, y as f32)),
                 WakeEvent::Focus(_) if self.life.shown() => {
                     changes.front = true;
                     changes.keys = true;
                 }
+                WakeEvent::ResizeAnchor(_, anchor) => self.resize_anchor = anchor,
                 WakeEvent::Frame(_, mut request) => {
                     let rt = self.app.rt_mut();
                     request.spring = (request.animate && !rt.reduced_motion).then_some(crate::tok::motion::DEFAULT);
@@ -688,16 +754,10 @@ impl Member for Window {
     }
     fn advance(&mut self, dt: f64) {
         self.virtual_t += dt;
-        take_window_frame(self.app.rt_mut(), &mut self.frame_anim, self.virtual_t, self.limits);
+        self.take_desktop_frame(self.virtual_t);
         if !self.idle {
             let scale = self.app.rt().window_scale();
-            step_window_frame(self.app.rt_mut(), &mut self.frame_anim, self.virtual_t, scale);
-            let (w, h) = self.app.rt().window_viewport();
-            if (self.frame[2], self.frame[3]) != (w, h) {
-                self.frame[2] = w;
-                self.frame[3] = h;
-                self.resize_from = (w, h);
-            }
+            self.step_desktop_frame(scale);
         }
         {
             let rt = self.app.rt_mut();
@@ -706,7 +766,9 @@ impl Member for Window {
         let animating = self.app.frame(dt);
         if self.app.rt().host.window_frame.is_some() {
             let shown = if self.app.rt_mut().host.fit.take_held() { 0.0 } else { dt };
-            take_window_frame(self.app.rt_mut(), &mut self.frame_anim, self.virtual_t - shown, self.limits);
+            self.take_desktop_frame(self.virtual_t - shown);
+        } else if let Some(anchor) = self.app.rt_mut().host.window_resize_anchor.take() {
+            self.resize_anchor = anchor;
         }
         self.idle = !animating && self.frame_anim.is_none();
     }

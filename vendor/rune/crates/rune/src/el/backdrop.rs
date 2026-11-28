@@ -7,15 +7,34 @@ impl El {
     /// window under the node's rect and corner radius (the largest of its corners), which follow
     /// layout and animation like any other paint.
     ///
-    /// - **macOS & Windows**: native on macOS in transparent windows (`NSGlassEffectView` /
-    ///   `NSVisualEffectView`), and on Windows 11 Build 22000+ transparent DirectComposition
-    ///   windows and overlays when the off-by-default `windows-system-material` Cargo feature is
-    ///   enabled and the system permits effects (Transparency effects enabled, Battery/Energy Saver
-    ///   off, composition effects supported/fast, High Contrast off, and not in a Remote Desktop
-    ///   session). Whenever the system will not draw the material, Rune tears down native visuals
-    ///   and draws the element's fallback fill instead. On Windows and macOS the native material
-    ///   sits behind the element, replaces its fill, ignores ancestor clips, and punches a hole
-    ///   inside the node's outer shadows.
+    /// ### Fill rules (Windows 11 and Linux Wayland)
+    ///
+    /// On Windows 11 (`windows-system-material`) and Linux Wayland, the element's fill decides
+    /// whether behind-window blur is requested:
+    /// - **No fill**: the material draws alone (Windows 11 Acrylic supplies Microsoft's WinUI 3
+    ///   theme tint; Wayland draws transparent over compositor blur).
+    /// - **Translucent fill (`alpha < 1.0`)**: the fill draws as a tint over the live blur.
+    /// - **Opaque fill (`alpha >= 1.0`)**: the fill wins and **no material or blur is requested**
+    ///   (use this for a surface that is a material only when the theme makes it translucent, such
+    ///   as `rune-kit::Toolbar`). Drop `.fill(...)` or lower its alpha to restore blur.
+    ///
+    /// On macOS, native views sit behind the element and always replace its fill while active.
+    ///
+    /// - **macOS**: native in transparent windows (`NSGlassEffectView` / `NSVisualEffectView`).
+    ///   The native view sits behind the element, replaces its fill, ignores ancestor clips, and
+    ///   punches a hole inside the node's outer shadows.
+    /// - **Windows 11 Build 22000+**: opt-in behind the off-by-default `windows-system-material`
+    ///   Cargo feature on transparent DirectComposition hardware-GPU windows and overlays when the
+    ///   system permits effects (Transparency effects enabled, Battery/Energy Saver off,
+    ///   composition effects supported/fast, High Contrast off, and not in a Remote Desktop
+    ///   session). Uses Microsoft's Windows 11 Acrylic Luminosity + Color `CompositionEffectBrush`
+    ///   over `HostBackdropBrush` (`Popover` = Default Acrylic, `Sidebar` = Base Acrylic,
+    ///   `Glass` = clearer chromatic Acrylic), following light/dark theme switches and degrading to
+    ///   a WCAG >=4.5:1 flat tint if the effect factory fails. Light-theme Acrylic matches
+    ///   Microsoft's WinUI 3 light brushes (`#FCFCFC` / `#F3F3F3`) and is intended for dark text
+    ///   chosen from `cx.system_dark()` (white text over light Acrylic will look washed out).
+    ///   Whenever the system will not draw the material, Rune tears down visuals and draws the
+    ///   element's fallback fill instead.
     /// - **Linux Wayland**: active on transparent GPU windows and overlays (`zwlr_layer_shell_v1`
     ///   and toplevel fallbacks) when [`WindowBackdrop::None`](crate::WindowBackdrop::None) is
     ///   active and the compositor advertises `ext_background_effect_v1` (`Capability::Blur`) or
@@ -51,28 +70,56 @@ impl El {
     /// content on every platform, use [`El::backdrop_blur`](Self::backdrop_blur).
     ///
     /// ```no_run
-    /// use rune::{Color, Cx, El, SystemMaterial, WindowBackdrop, el};
+    /// use rune::{Color, El, SystemMaterial, el};
     ///
-    /// fn launcher_card(_: &(), cx: &mut Cx<()>) -> El {
-    ///     let base = rune::tok::theme(cx.system_dark()).bg;
-    ///     let bg = if cx.window_backdrop_supported(WindowBackdrop::Blur) {
-    ///         base.alpha(0.75)
-    ///     } else {
-    ///         base
-    ///     };
-    ///     el().w_full().h_full().center().child(
-    ///         el().size(750.0, 474.0).radius(12.0)
-    ///             .shadow(16.0, 40.0, Color::BLACK.alpha(0.35))
-    ///             .fill(bg)
-    ///             .system_material(SystemMaterial::Popover),
-    ///     )
-    /// }
+    /// // 1. No fill: the platform material supplies its own tint (theme-aware Acrylic on Windows 11).
+    /// let _material_only: El = el()
+    ///     .size(220.0, 48.0).radius(24.0)
+    ///     .system_material(SystemMaterial::Popover);
+    ///
+    /// // 2. Translucent fill (alpha < 1.0): draws as an authored tint over the live blur.
+    /// let _tinted: El = el()
+    ///     .size(320.0, 180.0).radius(12.0)
+    ///     .fill(Color::BLACK.alpha(0.35))
+    ///     .system_material(SystemMaterial::Glass);
+    ///
+    /// // 3. Opaque fill (alpha >= 1.0): the fill wins and no material is requested on Windows/Wayland
+    /// //    (use when an opaque theme covers a surface that blurs only in a translucent theme).
+    /// let _opaque_themed: El = el()
+    ///     .w_full().h(48.0)
+    ///     .fill(Color::WHITE)
+    ///     .system_material(SystemMaterial::Sidebar);
     /// ```
-    pub fn system_material(mut self, material: crate::SystemMaterial) -> Self {
+    pub fn system_material(self, material: crate::SystemMaterial) -> Self {
+        self.system_material_with(material, crate::MaterialParams::new())
+    }
+
+    /// Like [`El::system_material`](Self::system_material), with per-element appearance overrides
+    /// ([`MaterialParams`](crate::MaterialParams)).
+    ///
+    /// Leaving a field unset in `params` keeps the platform preset's default. On Windows 11
+    /// (`windows-system-material`), `tint`, `tint_opacity`, `luminosity_opacity`, and `saturation`
+    /// (including `> 1.0` saturation boosts) tune the Acrylic `CompositionEffectBrush` recipe;
+    /// platforms that cannot honour a field ignore it.
+    ///
+    /// ```no_run
+    /// use rune::{El, MaterialParams, SystemMaterial, el};
+    ///
+    /// let _vibrant_glass: El = el()
+    ///     .size(220.0, 48.0).radius(24.0)
+    ///     .system_material_with(
+    ///         SystemMaterial::Glass,
+    ///         MaterialParams::new()
+    ///             .luminosity_opacity(0.65)
+    ///             .tint_opacity(0.08)
+    ///             .saturation(1.6),
+    ///     );
+    /// ```
+    pub fn system_material_with(mut self, material: crate::SystemMaterial, params: crate::MaterialParams) -> Self {
         if material == crate::SystemMaterial::Glass {
             self.vis_flags.set(crate::el::VisualFlags::CONTINUOUS_CORNERS, true);
         }
-        self.cold_mut().material = Some(material);
+        self.cold_mut().material = Some((material, params));
         self
     }
 
@@ -92,7 +139,11 @@ impl El {
     /// `Renderer::draw_range`) draw only their fill. Inside an ancestor drawn as one layer (an
     /// ancestor with opacity below 1 — including one playing a fade transition — `El::group_opacity`,
     /// `El::blur`, `El::cache` or a rotation) the backdrop is what that layer has drawn so far,
-    /// matching CSS's Backdrop Root.
+    /// matching CSS's Backdrop Root. While [`Cx::system_reduced_transparency`](crate::Cx::system_reduced_transparency)
+    /// is true, the blur is skipped and the element draws only its fill, border and children.
+    /// Inspection tools read the presented sigma via
+    /// [`ElementInfo::backdrop_blur`](crate::ElementInfo::backdrop_blur) (and `backdropBlur` in
+    /// `--tree` JSON).
     pub fn backdrop_blur(mut self, sigma: f32) -> Self {
         let s = if sigma.is_finite() { sigma.max(0.0) } else { 0.0 };
         if s != 0.0 || !self.vis.cold.is_empty() {

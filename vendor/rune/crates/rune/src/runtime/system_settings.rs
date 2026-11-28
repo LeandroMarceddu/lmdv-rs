@@ -132,6 +132,21 @@ impl window_requests::HostState {
     }
 
     #[inline]
+    pub(super) fn set_system_reduced_transparency(&mut self, reduced: bool) -> bool {
+        if self.system_reduced_transparency == reduced {
+            return false;
+        }
+        self.system_reduced_transparency = reduced;
+        true
+    }
+
+    /// Host Reduce Transparency preference; false by default in a headless runtime.
+    #[inline]
+    pub(crate) fn system_reduced_transparency(&self) -> bool {
+        self.system_reduced_transparency
+    }
+
+    #[inline]
     pub(super) fn set_system_reduced_motion(&mut self, reduced: bool) -> bool {
         if self.system_reduced_motion == reduced {
             return false;
@@ -144,6 +159,23 @@ impl window_requests::HostState {
     #[inline]
     pub(crate) fn system_reduced_motion(&self) -> bool {
         self.system_reduced_motion
+    }
+
+    #[inline]
+    pub(super) fn set_system_text_scale(&mut self, scale: f32) -> bool {
+        let clean = crate::platform::text_scale::sanitize(scale).unwrap_or(crate::platform::text_scale::DEFAULT);
+        if clean.to_bits() == self.system_text_scale.to_bits() {
+            return false;
+        }
+        self.system_text_scale = clean;
+        self.languages_gen = self.languages_gen.wrapping_add(1);
+        true
+    }
+
+    /// Host system text-size scale factor; `1.0` by default in a headless runtime.
+    #[inline]
+    pub(crate) fn system_text_scale(&self) -> f32 {
+        self.system_text_scale
     }
 
     pub(super) fn set_languages(&mut self, languages: Vec<String>) -> bool {
@@ -168,6 +200,21 @@ impl window_requests::HostState {
         if prev == clean {
             return false;
         }
+        self.languages_gen = self.languages_gen.wrapping_add(1);
+        true
+    }
+
+    #[inline]
+    pub(crate) fn keyboard_inset(&self) -> f32 {
+        self.keyboard_inset
+    }
+
+    pub(super) fn set_keyboard_inset(&mut self, points: f32) -> bool {
+        let clean = if points.is_finite() { points.max(0.0) } else { 0.0 };
+        if self.keyboard_inset == clean {
+            return false;
+        }
+        self.keyboard_inset = clean;
         self.languages_gen = self.languages_gen.wrapping_add(1);
         true
     }
@@ -243,6 +290,16 @@ impl window_requests::HostState {
             return false;
         }
         self.wm_state = state;
+        true
+    }
+
+    #[inline]
+    pub(super) fn set_primary_pointer(&mut self, pointer: cx::PrimaryPointer) -> bool {
+        if pointer == self.primary_pointer {
+            return false;
+        }
+        self.primary_pointer = pointer;
+        self.languages_gen = self.languages_gen.wrapping_add(1);
         true
     }
 }
@@ -378,42 +435,93 @@ impl RuntimeCore {
         self.kbd.tab_visits_controls = on;
     }
     /// What [`Cx::system_contrast`] currently reports.
-    #[cfg_attr(not(all(target_os = "windows", feature = "windows-system-material")), allow(dead_code))]
+    #[cfg_attr(
+        not(any(test, target_os = "linux", all(target_os = "windows", feature = "windows-system-material"))),
+        allow(dead_code)
+    )]
     #[inline]
     pub(crate) fn system_contrast(&self) -> Option<crate::SystemContrast> {
         self.host.system_contrast
     }
 
+    /// What [`Cx::system_increased_contrast`] currently reports.
+    #[cfg(test)]
+    #[inline]
+    pub(crate) fn system_increased_contrast(&self) -> bool {
+        self.host.system_increased_contrast
+    }
+
     /// What [`Cx::system_contrast`] reports. Native Windows windows set it from the system's
     /// contrast theme as they open and when it changes; headless runs keep None.
+    /// Returns whether the stored contrast changed.
     #[inline]
-    pub fn set_system_contrast(&mut self, contrast: Option<crate::SystemContrast>) {
-        if self.host.set_system_contrast(contrast) {
+    pub fn set_system_contrast(&mut self, contrast: Option<crate::SystemContrast>) -> bool {
+        let changed = self.host.set_system_contrast(contrast);
+        if changed {
             self.commit.dirty = true;
         }
+        changed
     }
-    /// What [`Cx::system_increased_contrast`] reports. Native windows set it from the system as
-    /// they open, gain focus, and when its display options change; headless runs keep false.
+    /// What [`Cx::system_increased_contrast`] reports. Native windows and web hosts set it from
+    /// the system as they open, gain focus, and when its contrast setting changes; headless runs
+    /// keep false. Returns whether the stored value changed.
     #[inline]
-    pub fn set_system_increased_contrast(&mut self, on: bool) {
-        if self.host.set_system_increased_contrast(on) {
+    pub fn set_system_increased_contrast(&mut self, on: bool) -> bool {
+        let changed = self.host.set_system_increased_contrast(on);
+        if changed {
             self.commit.dirty = true;
         }
+        changed
     }
+    /// What [`Cx::system_reduced_transparency`] reports. Native windows and the web set it from
+    /// the system as they open, gain focus, and when display options change; headless runs keep
+    /// false. Returns whether the stored preference changed.
     #[inline]
-    pub fn set_system_reduced_motion(&mut self, reduced: bool) {
-        if self.host.set_system_reduced_motion(reduced) {
+    pub fn set_system_reduced_transparency(&mut self, reduced: bool) -> bool {
+        let changed = self.host.set_system_reduced_transparency(reduced);
+        if changed {
             self.commit.dirty = true;
         }
+        changed
+    }
+    /// Returns whether the stored reduced-motion preference changed.
+    #[inline]
+    pub fn set_system_reduced_motion(&mut self, reduced: bool) -> bool {
+        let changed = self.host.set_system_reduced_motion(reduced);
+        if changed {
+            self.commit.dirty = true;
+        }
+        changed
+    }
+
+    /// What [`Cx::system_text_scale`] currently reports (`1.0` by default in a headless runtime).
+    #[inline]
+    pub(crate) fn system_text_scale(&self) -> f32 {
+        self.host.system_text_scale()
+    }
+
+    /// What [`Cx::system_text_scale`] reports. Native and web hosts set it from the OS or
+    /// browser's text-size preference and update it when that setting changes; a change re-runs
+    /// the view and its memos. Non-finite or non-positive values fall back to `1.0`; positive
+    /// values clamp to `0.25..=5.0`. Returns whether the stored scale changed.
+    #[inline]
+    pub fn set_system_text_scale(&mut self, scale: f32) -> bool {
+        let changed = self.host.set_system_text_scale(scale);
+        if changed {
+            self.commit.dirty = true;
+        }
+        changed
     }
 
     /// Sets the preferred language list reported by [`Cx::system_languages`] and [`Cx::locale`],
     /// as BCP 47 tags in preference order. Empty and duplicate tags are dropped. A change re-runs
-    /// the view and its memos.
-    pub fn set_languages(&mut self, languages: Vec<String>) {
-        if self.host.set_languages(languages) {
+    /// the view and its memos. Returns whether the normalized language list changed.
+    pub fn set_languages(&mut self, languages: Vec<String>) -> bool {
+        let changed = self.host.set_languages(languages);
+        if changed {
             self.commit.dirty = true;
         }
+        changed
     }
 
     /// Current safe-area insets `[top, right, bottom, left]` in logical points: the host override
@@ -429,6 +537,25 @@ impl RuntimeCore {
     pub fn set_safe_area(&mut self, insets: [f32; 4]) {
         if self.host.set_safe_area(insets) {
             self.commit.dirty = true;
+        }
+    }
+
+    /// Current on-screen software keyboard bottom overlap in logical points (`0.0` when closed).
+    #[inline]
+    pub(crate) fn keyboard_inset(&self) -> f32 {
+        self.host.keyboard_inset()
+    }
+
+    /// Sets the bottom overlap of an on-screen software keyboard in logical points reported by
+    /// [`Cx::keyboard_inset`]. Kept separate from [`Self::set_safe_area`] so edge-drag bands stay
+    /// unaffected. Negative or non-finite values clamp to `0.0`. A change re-runs the view and
+    /// its memos, and scrolls a focused text field into view above the keyboard when positive.
+    pub fn set_keyboard_inset(&mut self, points: f32) {
+        if self.host.set_keyboard_inset(points) {
+            self.commit.dirty = true;
+            if self.host.keyboard_inset() > 0.0 {
+                self.edit.caret_follow = true;
+            }
         }
     }
 
@@ -503,5 +630,75 @@ impl RuntimeCore {
     #[inline]
     pub fn set_window_manager_state(&mut self, state: crate::WindowManagerState) {
         let _ = self.sync_window_manager_state(state);
+    }
+
+    /// What [`Cx::touch_controls`] reports natively (`false` in headless runs until touch input or
+    /// [`Self::set_touch_controls`] changes it).
+    #[inline]
+    pub(crate) fn touch_controls(&self) -> bool {
+        self.host.primary_pointer.touch_controls()
+    }
+
+    /// Updates the window's native primary pointer mode (`Cx::touch_controls` and `Cx::hover_none`),
+    /// dirtying the view only when it changed and the last committed view read either accessor.
+    /// Returns whether the runtime was dirtied.
+    #[inline]
+    pub(crate) fn sync_primary_pointer(&mut self, pointer: cx::PrimaryPointer) -> bool {
+        if !self.host.set_primary_pointer(pointer) {
+            return false;
+        }
+        if !self.host.primary_pointer_read {
+            return false;
+        }
+        self.commit.dirty = true;
+        true
+    }
+
+    /// Reconciles an OS tablet/slate-mode posture probe (`true` when Windows reports slate mode
+    /// or a ready touchscreen without a mouse). Updates the window's primary pointer on the initial
+    /// sample or when the posture actually transitions, so focus changes on hybrid touchscreen
+    /// laptops preserve live touch vs. mouse mode.
+    #[cfg_attr(not(any(target_os = "windows", test)), allow(dead_code))]
+    #[inline]
+    pub(crate) fn sync_system_tablet_mode(&mut self, tablet: bool) -> bool {
+        let prev = self.host.system_tablet_mode;
+        self.host.system_tablet_mode = Some(tablet);
+        if prev == Some(tablet) {
+            return false;
+        }
+        let target = if tablet { cx::PrimaryPointer::Touch } else { cx::PrimaryPointer::Hover };
+        self.sync_primary_pointer(target)
+    }
+
+    /// Samples Windows tablet/slate posture and records the current `WM_SETTINGCHANGE` generation.
+    #[cfg(target_os = "windows")]
+    #[inline]
+    pub(crate) fn sync_windows_tablet_mode(&mut self) -> bool {
+        self.host.tablet_setting_gen = crate::platform::win32::touch_input::setting_generation();
+        self.sync_system_tablet_mode(crate::platform::win32::touch_input::system_tablet_mode())
+    }
+
+    /// Re-samples Windows tablet/slate posture only when `WM_SETTINGCHANGE` bumped the generation.
+    #[cfg(target_os = "windows")]
+    #[inline]
+    pub(crate) fn sync_windows_tablet_mode_if_changed(&mut self) -> bool {
+        let current_gen = crate::platform::win32::touch_input::setting_generation();
+        if current_gen == self.host.tablet_setting_gen {
+            return false;
+        }
+        self.host.tablet_setting_gen = current_gen;
+        self.sync_system_tablet_mode(crate::platform::win32::touch_input::system_tablet_mode())
+    }
+
+    /// Sets whether [`Cx::touch_controls`] (and [`Cx::hover_none`]) report coarse touch controls
+    /// natively. A change re-runs the view and its memos.
+    #[inline]
+    pub fn set_touch_controls(&mut self, touch: bool) -> bool {
+        let pointer = if touch { cx::PrimaryPointer::Touch } else { cx::PrimaryPointer::Hover };
+        let changed = self.host.set_primary_pointer(pointer);
+        if changed {
+            self.commit.dirty = true;
+        }
+        changed
     }
 }

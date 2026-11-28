@@ -198,19 +198,20 @@ impl paint_state::PaintState {
         surfaces_len: usize,
         node_parent: Option<usize>,
         pinh: &mut Inh,
+        pcold: &mut InhCold,
         layers: &mut Vec<(usize, usize, usize)>,
         s: f32,
     ) {
         // Out of its ancestors' layers: their opacity applies directly instead.
         pinh.paint_opacity = pinh.opacity;
         pinh.paint_clip = pinh.clip;
-        pinh.paint_fade = pinh.fade;
-        pinh.paint_fade_origin = pinh.fade_origin;
-        pinh.in_cache = false;
-        pinh.skip_paint = false;
+        pcold.paint_fade = pcold.fade;
+        pcold.paint_fade_origin = pcold.fade_origin;
+        pinh.set_in_cache(false);
+        pinh.set_skip_paint(false);
         // Rounded clips and turns consumed by an ancestor's layer must be reapplied
         // outside that layer too. Reopen only the masks and turns, not opacity or blur.
-        pinh.rounded = None;
+        pcold.rounded = None;
         let mut chain = Vec::new();
         let mut parent = node_parent;
         while let Some(p) = parent {
@@ -266,6 +267,7 @@ impl RuntimeCore {
         now: f64,
         p: &rune_motion::Presented,
         pinh: &Inh,
+        pcold: &InhCold,
         r: [f32; 4],
         r_exact: [f32; 4],
         radii: [f32; 4],
@@ -300,8 +302,8 @@ impl RuntimeCore {
                 entry.phase = RasterPhase::Live;
             }
         }
-        let mut skip_paint = pinh.skip_paint;
-        let mut in_cache = pinh.in_cache;
+        let mut skip_paint = pinh.skip_paint();
+        let mut in_cache = pinh.in_cache();
         let mut open_cache = false;
         // A scale changed by view commits may accompany arbitrary content edits. Draw
         // live until it rests instead of trusting a partial content hash or allocating a
@@ -397,7 +399,7 @@ impl RuntimeCore {
         if let Some((rect, _)) = own_round {
             hit_clip = intersect(hit_clip, rect);
         }
-        let (mut hit_fade, mut hit_origin) = (pinh.fade, pinh.fade_origin);
+        let (mut hit_fade, mut hit_origin) = (pcold.fade, pcold.fade_origin);
         inherit_fade(&mut hit_fade, &mut hit_origin, *fade_origin, *fade);
         // A rectangle wholly in either central strip misses all four corner squares.
         // Its hard edges already exclude everything the rounded mask would remove.
@@ -407,7 +409,9 @@ impl RuntimeCore {
         }
         // A backdrop blur samples what is drawn before it, so it goes ahead of any layer this
         // element opens (a fade still blurs the window) and of its shadows, which skip it.
+        // Under Reduce Transparency, skip the blur record so the element draws only its fill.
         let blur_hole = (n.vis.backdrop_blur > 0.0
+            && !self.host.system_reduced_transparency
             && !skip_paint
             && visible
             && effective_opacity > 0.001
@@ -423,9 +427,11 @@ impl RuntimeCore {
                     (paint_own * pinh.paint_opacity * n.vis.paint_alpha).clamp(0.0, 1.0),
                 )
             });
+        let paint_visible_alpha = (paint_own * pinh.paint_opacity) > 0.001;
         // The packed ABI carries one clip rectangle. Preserve a rectangular cut through
         // a rounded corner on a separate outer scope, never recenter the rounded mask.
         if !skip_paint
+            && paint_visible_alpha
             && let Some((mask, _)) = rounded.or(own_round)
             && intersect(*clip, mask) != mask
         {
@@ -439,7 +445,7 @@ impl RuntimeCore {
         }
         // Two rounded rectangles cannot generally be represented by one rounded rectangle.
         // Consume the ancestor on an outer composite, retaining both original corner centres.
-        if !skip_paint && rounded.is_some() && own_round.is_some() && *rounded != own_round {
+        if !skip_paint && paint_visible_alpha && rounded.is_some() && own_round.is_some() && *rounded != own_round {
             let (mask, radii) = rounded.take().unwrap();
             let mut marker = Instance::begin_layer([r[0], r[1], w, h], mask, Default::default());
             marker.fade = crate::render::pack_fade(*fade, *fade_origin, mask);
@@ -459,7 +465,7 @@ impl RuntimeCore {
         // `El::cutout_circle` / `El::cutout_circles`: the subtree draws in one layer per hole
         // whose composite cuts it. The outermost hole takes any clips from above; further holes
         // nest inside it with `NO_CLIP`, intersecting their alpha masks.
-        if !skip_paint && !n.vis.cutouts.is_empty() {
+        if !skip_paint && paint_visible_alpha && !n.vis.cutouts.is_empty() {
             let k = sc * s;
             for &c in &n.vis.cutouts {
                 let mut marker = Instance::begin_layer([r[0], r[1], w, h], *clip, Default::default());
@@ -501,6 +507,9 @@ impl RuntimeCore {
             let paints = own_paints(n);
             let parent = next.is_some_and(|j| self.tree.nodes[j].parent == Some(i));
             *isolate = paints >= 2 || (paints == 1 && parent);
+        }
+        if !paint_visible_alpha {
+            *isolate = false;
         }
         let o = if *isolate { 1.0 } else { (paint_own * pinh.paint_opacity).clamp(0.0, 1.0) };
         if !skip_paint && *isolate {

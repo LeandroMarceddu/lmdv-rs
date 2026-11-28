@@ -176,6 +176,7 @@ impl Host {
         {
             self.wayland_drop_ready();
             self.wayland_backdrop_ready();
+            self.wayland_primary_selection_ready();
         }
         #[cfg(not(target_arch = "wasm32"))]
         crate::platform::ready_signal::ready();
@@ -262,6 +263,18 @@ impl Host {
         }
     }
 
+    /// Wayland: lazily binds `zwp_primary_selection_device_manager_v1` on winit's `wl_display`
+    /// once after frame 1 (zero work before frame 1).
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    fn wayland_primary_selection_ready(&mut self) {
+        if !self.wayland {
+            return;
+        }
+        if let Some(w) = &self.win {
+            crate::platform::wayland::primary_selection::wire::ensure_for_window(&w.window);
+        }
+    }
+
     /// Wayland: marks the window ready for lazy `wl_data_device` binding and syncs drop targets.
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     fn wayland_drop_ready(&mut self) {
@@ -272,8 +285,9 @@ impl Host {
         self.sync_wayland_drop();
     }
 
-    /// Wayland: lazily binds or schedules teardown of `wl_data_device` when `(commit_generation,
-    /// active_modal)` changes. Zero work before frame 1 or on steady/animation frames.
+    /// Wayland: lazily binds or schedules teardown of `wl_data_device` (and the unwatched
+    /// press/touch serial listener for `drag_out`) when `(commit_generation, active_modal)` or
+    /// active-drag state changes. Zero work before frame 1 or on steady/animation frames.
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
     pub(in crate::window) fn sync_wayland_drop(&mut self) {
         if !self.wayland {
@@ -281,20 +295,38 @@ impl Host {
         }
         let key = {
             let rt = self.app.rt();
+            let active_drag = rt.has_active_drag_out()
+                || self.win.as_ref().is_some_and(|w| crate::platform::wayland::drop::has_active_drag(&w.window));
             crate::platform::wayland::drop::binding::SyncKey {
                 commit: rt.commit_generation(),
                 modal: rt.active_modal(),
+                active_drag,
             }
         };
         if !self.win.as_ref().is_some_and(|w| w.native.drop_binding.needs_sync(key)) {
             return;
         }
-        let has_targets = self.app.rt().has_drop_targets();
+        let (has_drop, has_drag_out) = {
+            let rt = self.app.rt();
+            (rt.has_drop_targets(), rt.has_drag_out())
+        };
+        let active_drag = key.active_drag;
+        let has_targets = has_drop || has_drag_out || active_drag;
         self.step_wayland_drop_binding(crate::platform::wayland::drop::binding::Event::TreeSynced {
             key,
             has_targets,
             now: crate::time::now(),
         });
+        // Keep the unwatched press/touch serial listener bound only while `drag_out` is mounted
+        // (or an outgoing drag is in flight) and the window's `wl_data_device` is bound.
+        if let Some(w) = &mut self.win {
+            let wants_serial = w.native.drop_target.is_some() && (has_drag_out || active_drag);
+            if wants_serial && w.native.drag_serial.is_none() {
+                w.native.drag_serial = crate::platform::wayland::serial::wire::attach_window(&w.window);
+            } else if !wants_serial && w.native.drag_serial.is_some() {
+                w.native.drag_serial = None;
+            }
+        }
     }
 
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
@@ -333,6 +365,11 @@ impl Host {
                         );
                         if target.is_some() {
                             w.native.drop_target = target;
+                            if w.native.drag_serial.is_none()
+                                && (self.app.rt().has_drag_out() || self.app.rt().has_active_drag_out())
+                            {
+                                w.native.drag_serial = crate::platform::wayland::serial::wire::attach_window(&w.window);
+                            }
                         } else {
                             let _ = binding::step(
                                 &mut w.native.drop_seq,
@@ -351,6 +388,7 @@ impl Host {
                 Effect::WakeAt(_) => {}
                 Effect::Unbind => {
                     if let Some(w) = &mut self.win {
+                        w.native.drag_serial = None;
                         w.native.drop_target = None;
                     }
                 }
@@ -373,6 +411,7 @@ impl Host {
 
     pub(in crate::window) fn place(&mut self, event_loop: &ActiveEventLoop, request: crate::windows::PlaceRequest) {
         self.options.position = None;
+        self.logical_position = None;
         self.placement = Some(request);
         self.reopen.clear_position();
         self.apply_placement(event_loop);
@@ -408,6 +447,7 @@ impl Host {
             }
         }
         self.sync_origin();
+        self.placement_watch.mark_dirty();
     }
 
     /// Applies a size that `Window::request_inner_size` committed immediately (Wayland):
@@ -445,6 +485,7 @@ impl Host {
     /// inside the window's minimum and maximum. A size outlives the window: one created later
     /// opens at it. Returns whether macOS resized the surface immediately.
     pub(in crate::window) fn take_frame_request(&mut self, start: f64, painting: bool) -> bool {
+        self.apply_tx_resize_anchor();
         let rt = self.app.rt_mut();
         rt.host.fit.take_held();
         let Some(mut request) = rt.host.window_frame.take() else { return false };
@@ -467,7 +508,7 @@ impl Host {
         let Some(w) = &self.win else { return false };
         #[cfg(target_os = "macos")]
         {
-            use crate::window::frame::{FrameAnim, snap, target};
+            use crate::window::frame::{FrameAnim, snap_anchored, target};
             let Some((frame, visible, scale)) = crate::platform::macos::window_geometry(&w.window) else {
                 return false;
             };
@@ -477,7 +518,11 @@ impl Host {
                 _ => frame,
             };
             let outer = request.size.and_then(|size| crate::platform::macos::outer_size(&w.window, size));
-            let to = snap(target(base, outer, request.center, visible), scale);
+            let to = snap_anchored(
+                target(base, outer, request.center, visible, self.resize_anchor),
+                scale,
+                self.resize_anchor,
+            );
             // Centring alone carries on with a resize already moving.
             let spring = request.spring.or(match &self.frame_move {
                 Some(FrameMove::Moving { anim, .. }) => anim.spring,
@@ -496,10 +541,32 @@ impl Host {
                 self.frame_move = None;
                 crate::platform::macos::set_window_frame(&w.window, to);
                 self.sync_origin();
+                self.placement_watch.mark_dirty();
                 self.sync_surface_size()
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            let _ = (start, painting);
+            let window = &w.window;
+            let requested = request.size;
+            if let Some(size) = requested {
+                self.frame_move = Some(FrameMove::jumped(size));
+            }
+            if let Some(plan) =
+                crate::platform::win32::apply_window_frame(window, requested, request.center, self.resize_anchor)
+            {
+                if !plan.resized && requested.is_some() {
+                    self.frame_move = None;
+                }
+                if plan.moved {
+                    self.sync_origin();
+                    self.placement_watch.mark_dirty();
+                }
+            }
+            false
+        }
+        #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
         {
             let _ = start;
             let window = &w.window;
@@ -532,10 +599,11 @@ impl Host {
             let current = [position.x as f32, position.y as f32, outer.width as f32, outer.height as f32];
             let (origin, area) = (monitor.position(), monitor.size());
             let visible = [origin.x as f32, origin.y as f32, area.width as f32, area.height as f32];
-            let [x, y, ..] = crate::window::frame::target(current, size, request.center, visible);
+            let [x, y, ..] = crate::window::frame::target(current, size, request.center, visible, self.resize_anchor);
             if [x, y] != [current[0], current[1]] {
                 window.set_outer_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
                 self.sync_origin();
+                self.placement_watch.mark_dirty();
             }
             false
         }
@@ -562,7 +630,7 @@ impl Host {
         self.take_frame_request(now, true);
         #[cfg(target_os = "macos")]
         {
-            use crate::window::frame::snap;
+            use crate::window::frame::snap_anchored;
             // The window server shows a move on the first frame after an idle spell before the
             // frame drawn for it, leaving a stale strip. A request taken then starts here and
             // moves from the next frame.
@@ -581,7 +649,7 @@ impl Host {
             if (frame[0] - x).abs() > 0.5 || (frame[1] - y).abs() > 0.5 {
                 anim.shift(frame[0] - x, frame[1] - y);
             }
-            let rect = snap(anim.sample(now).0, scale);
+            let rect = snap_anchored(anim.sample(now).0, scale, self.resize_anchor);
             crate::platform::macos::set_window_frame(&w.window, rect);
             *origin = [rect[0], rect[1]];
             if anim.done(now) {

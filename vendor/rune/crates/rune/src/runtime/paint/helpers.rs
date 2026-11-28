@@ -321,7 +321,7 @@ pub(in crate::runtime) fn own_paints(n: &Node) -> usize {
                 || v.hover_border.is_some_and(|c| c.a > 0.0)
                 || v.press_border.is_some_and(|c| c.a > 0.0)),
         v.gradient.is_some() || v.radial.is_some() || v.surface.is_some(),
-        v.shape.is_some(),
+        v.has_shape(),
         v.grid.is_some(),
         v.pixels.is_some(),
         !v.shadows.is_empty(),

@@ -2,14 +2,19 @@
 //! chain on the cache worker, with the time each one ends. A paint picks the frame for its
 //! clock (`Motion::at`) and wakes for the next only while the image is drawn, so an animation
 //! off screen or in a hidden window costs nothing.
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 use std::io::Cursor;
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 use image::{AnimationDecoder, ImageDecoder};
 
-use super::{Decoded, ImageError, Mip, icc, mip_chain};
+use super::{Decoded, ImageError, ImageLimits, Mip};
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
+use super::{icc, mip_chain};
 
 /// Decoded pixels the frames of one animation may take, mips included; a larger one shows its
 /// first frame still.
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 const BUDGET: usize = 256 << 20;
 
 /// The frames after the first (which is [`Decoded::mips`]) and when each frame ends.
@@ -42,10 +47,23 @@ impl Motion {
     pub(crate) fn frame<'a>(&'a self, first: &'a [Mip], i: usize) -> &'a [Mip] {
         if i == 0 { first } else { &self.frames[i - 1] }
     }
+
+    /// Checked variant of [`Self::frame`] for out-of-band slot reconstruction.
+    pub(crate) fn frame_checked<'a>(&'a self, first: &'a [Mip], i: usize) -> Option<&'a [Mip]> {
+        if i == 0 { Some(first) } else { self.frames.get(i - 1).map(Vec::as_slice) }
+    }
+}
+
+/// Without the `png` feature on `wasm32`, animated formats decode their first frame in the
+/// browser (`createImageBitmap`).
+#[cfg(all(target_arch = "wasm32", not(feature = "png")))]
+pub(super) fn decode_with_limits(_bytes: &[u8], _limits: ImageLimits) -> Option<Result<Decoded, ImageError>> {
+    None
 }
 
 /// Which animated format `bytes` sniff as. A web build hands GIF and WebP to the browser,
 /// which decodes their first frame.
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 #[derive(Clone, Copy)]
 enum Kind {
     #[cfg(not(target_arch = "wasm32"))]
@@ -55,6 +73,7 @@ enum Kind {
     Png,
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 fn sniff(bytes: &[u8]) -> Option<Kind> {
     #[cfg(not(target_arch = "wasm32"))]
     if bytes.starts_with(b"GIF8") {
@@ -69,7 +88,8 @@ fn sniff(bytes: &[u8]) -> Option<Kind> {
 
 /// An animation of more than one frame, or `None` for a still (or a format that isn't
 /// animated), which decodes as any image does.
-pub(super) fn decode(bytes: &[u8]) -> Option<Result<Decoded, ImageError>> {
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
+pub(super) fn decode_with_limits(bytes: &[u8], limits: ImageLimits) -> Option<Result<Decoded, ImageError>> {
     let kind = sniff(bytes)?;
     let error = |e: image::ImageError| ImageError(e.to_string());
     let cursor = Cursor::new(bytes);
@@ -108,11 +128,12 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Result<Decoded, ImageError>> {
         }
     };
     let (w, h) = size;
-    if w == 0 || h == 0 || w > super::MAX_SIDE || h > super::MAX_SIDE {
+    if !limits.fits(w, h, 4) {
         return Some(Err(ImageError("animation is too large".into())));
     }
     let transform = icc_profile.as_deref().and_then(icc::Transform::to_srgb);
     let per_frame = w as usize * h as usize * 16 / 3;
+    let budget = BUDGET.min(usize::try_from(limits.max_alloc()).unwrap_or(BUDGET));
     let mut chains = Vec::new();
     let mut ends = Vec::new();
     let mut elapsed = 0.0;
@@ -123,7 +144,7 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Result<Decoded, ImageError>> {
             Err(_) if !chains.is_empty() => break,
             Err(e) => return Some(Err(error(e))),
         };
-        if !chains.is_empty() && (chains.len() + 1) * per_frame > BUDGET {
+        if !chains.is_empty() && (chains.len() + 1) * per_frame > budget {
             return Some(still(chains));
         }
         let (numer, denom) = frame.delay().numer_denom_ms();
@@ -154,11 +175,13 @@ pub(super) fn decode(bytes: &[u8]) -> Option<Result<Decoded, ImageError>> {
 }
 
 /// The first frame alone, for an animation too large to hold.
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 fn still(chains: Vec<Vec<Mip>>) -> Result<Decoded, ImageError> {
     let first = chains.into_iter().next().ok_or_else(|| ImageError("animation has no frames".into()))?;
     Ok(Decoded { mips: first, motion: None, intrinsic: None })
 }
 
+#[cfg(any(not(target_arch = "wasm32"), feature = "png"))]
 fn finite(count: image::metadata::LoopCount) -> Option<u32> {
     match count {
         image::metadata::LoopCount::Infinite => None,

@@ -16,9 +16,9 @@ use objc2_foundation::NSString;
 #[cfg(debug_assertions)]
 use objc2_metal::MTLResource;
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLDevice, MTLEvent,
-    MTLLoadAction, MTLOrigin, MTLRegion, MTLRenderPassDescriptor, MTLResourceOptions, MTLSize, MTLStoreAction,
-    MTLTexture,
+    MTLBlitCommandEncoder, MTLBlitOption, MTLBuffer, MTLClearColor, MTLCommandBuffer, MTLCommandEncoder, MTLDevice,
+    MTLEvent, MTLLoadAction, MTLOrigin, MTLRegion, MTLRenderPassDescriptor, MTLResourceOptions, MTLSize,
+    MTLStoreAction, MTLTexture,
 };
 use parking_lot::Mutex;
 use rune_core::machine::Effects;
@@ -239,12 +239,28 @@ fn extent(width: u32, height: u32, depth: u32) -> MTLSize {
 }
 
 /// A buffer layout's row and image strides in bytes, filling in tightly packed defaults.
-fn strides(format: wgpu::TextureFormat, layout: wgpu::TexelCopyBufferLayout, size: wgpu::Extent3d) -> (usize, usize) {
+fn strides(
+    format: wgpu::TextureFormat,
+    aspect: wgpu::TextureAspect,
+    layout: wgpu::TexelCopyBufferLayout,
+    size: wgpu::Extent3d,
+) -> (usize, usize) {
     let (bw, bh) = format.block_dimensions();
-    let block = format.block_copy_size(None).expect("a copyable color format");
+    let block = format.block_copy_size(Some(aspect)).expect("a copyable texture format");
     let row = layout.bytes_per_row.unwrap_or(size.width.div_ceil(bw) * block) as usize;
     let rows = layout.rows_per_image.unwrap_or(size.height).div_ceil(bh) as usize;
     (row, row * rows)
+}
+
+fn blit_option(format: wgpu::TextureFormat, aspect: wgpu::TextureAspect) -> MTLBlitOption {
+    if !format.is_combined_depth_stencil_format() {
+        return MTLBlitOption::None;
+    }
+    match aspect {
+        wgpu::TextureAspect::DepthOnly => MTLBlitOption::DepthFromDepthStencil,
+        wgpu::TextureAspect::StencilOnly => MTLBlitOption::StencilFromDepthStencil,
+        _ => MTLBlitOption::None,
+    }
 }
 
 /// The copies a texture region splits into: one per array layer, or one for a 3D texture.
@@ -279,6 +295,9 @@ impl Zeros {
 
 /// Zeroes every mip and layer of a new texture, which wgpu promises reads as zero until written.
 pub(super) fn zero_texture(blit: &ProtocolObject<dyn MTLBlitCommandEncoder>, zeros: &Zeros, texture: &TextureRaw) {
+    if texture.sample_count > 1 {
+        return;
+    }
     let Some(block) = texture.format.block_copy_size(None) else { return };
     let (bw, bh) = texture.format.block_dimensions();
     let three = texture.dimension == wgpu::TextureDimension::D3;
@@ -349,19 +368,34 @@ pub(super) fn replace_texture_rows(texture: &TextureRaw, y: u32, rows: &[u8]) {
     if count == 0 {
         return;
     }
-    assert!(y as usize + count <= texture.raw.height(), "row write past the end of a texture");
+    replace_texture_rect(texture, 0, y, w as u32, count as u32, &rows[..row * count]);
+}
+
+/// Writes a tightly packed `width × height` rectangle of an idle shared texture at `(x, y)`.
+pub(super) fn replace_texture_rect(texture: &TextureRaw, x: u32, y: u32, width: u32, height: u32, data: &[u8]) {
+    let Some(block) = texture.format.block_copy_size(None) else { return };
+    if width == 0 || height == 0 {
+        return;
+    }
+    let row = width as usize * block as usize;
+    let Some(need) = row.checked_mul(height as usize) else { return };
+    if data.len() < need {
+        return;
+    }
+    assert!(x as usize + width as usize <= texture.raw.width(), "rect write past the width of a texture");
+    assert!(y as usize + height as usize <= texture.raw.height(), "rect write past the height of a texture");
     let region = MTLRegion {
-        origin: MTLOrigin { x: 0, y: y as usize, z: 0 },
-        size: MTLSize { width: w, height: count, depth: 1 },
+        origin: MTLOrigin { x: x as usize, y: y as usize, z: 0 },
+        size: MTLSize { width: width as usize, height: height as usize, depth: 1 },
     };
     let bpr = if texture.dimension == wgpu::TextureDimension::D1 { 0 } else { row };
-    // SAFETY: `rows` holds `count` tightly packed full-width rows within mip 0, checked above.
+    // SAFETY: `data` holds `width * height` tightly packed texels within mip 0, checked above.
     unsafe {
         texture.raw.replaceRegion_mipmapLevel_slice_withBytes_bytesPerRow_bytesPerImage(
             region,
             0,
             0,
-            NonNull::from(&rows[0]).cast(),
+            NonNull::from(&data[0]).cast(),
             bpr,
             0,
         );
@@ -377,7 +411,7 @@ pub(super) fn replace_texture(
     layout: wgpu::TexelCopyBufferLayout,
     size: wgpu::Extent3d,
 ) {
-    let (row, image) = strides(texture.format, layout, size);
+    let (row, image) = strides(texture.format, wgpu::TextureAspect::All, layout, size);
     let one_d = texture.dimension == wgpu::TextureDimension::D1;
     for (slice, z, depth, i) in layers(texture, at, size) {
         let offset = layout.offset as usize + image * i;
@@ -409,18 +443,40 @@ fn copy_range(mip: u32, at: wgpu::Origin3d, size: wgpu::Extent3d) -> Subresource
     SubresourceRange { base_mip: mip, mips: 1, base_layer: at.z, layers: size.depth_or_array_layers }
 }
 
-/// Clears one `(mip, layer)` of a Private color-renderable texture to zero via a clear-only
-/// render pass, opening no blit encoder.
+/// Clears one `(mip, layer)` of a Private render-attachment texture (color, depth, stencil, or
+/// combined depth-stencil; single-sample or multisampled) to zero via a clear-only render pass,
+/// opening no blit encoder.
 pub(super) fn clear_subresource(cb: &ProtocolObject<dyn MTLCommandBuffer>, texture: &TextureRaw, mip: u32, layer: u32) {
     let d = MTLRenderPassDescriptor::new();
-    // SAFETY: color attachment 0 always exists on a newly created render pass descriptor.
-    let color = unsafe { d.colorAttachments().objectAtIndexedSubscript(0) };
-    color.setTexture(Some(&texture.raw));
-    color.setLevel(mip as usize);
-    color.setSlice(layer as usize);
-    color.setLoadAction(MTLLoadAction::Clear);
-    color.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 });
-    color.setStoreAction(MTLStoreAction::Store);
+    if texture.format.is_depth_stencil_format() {
+        if texture.format.has_depth_aspect() {
+            let depth = d.depthAttachment();
+            depth.setTexture(Some(&texture.raw));
+            depth.setLevel(mip as usize);
+            depth.setSlice(layer as usize);
+            depth.setLoadAction(MTLLoadAction::Clear);
+            depth.setClearDepth(0.0);
+            depth.setStoreAction(MTLStoreAction::Store);
+        }
+        if texture.format.has_stencil_aspect() {
+            let stencil = d.stencilAttachment();
+            stencil.setTexture(Some(&texture.raw));
+            stencil.setLevel(mip as usize);
+            stencil.setSlice(layer as usize);
+            stencil.setLoadAction(MTLLoadAction::Clear);
+            stencil.setClearStencil(0);
+            stencil.setStoreAction(MTLStoreAction::Store);
+        }
+    } else {
+        // SAFETY: color attachment 0 always exists on a newly created render pass descriptor.
+        let color = unsafe { d.colorAttachments().objectAtIndexedSubscript(0) };
+        color.setTexture(Some(&texture.raw));
+        color.setLevel(mip as usize);
+        color.setSlice(layer as usize);
+        color.setLoadAction(MTLLoadAction::Clear);
+        color.setClearColor(MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 });
+        color.setStoreAction(MTLStoreAction::Store);
+    }
     let pass = autoreleasepool(|_| cb.renderCommandEncoderWithDescriptor(&d)).expect("a Metal clear render encoder");
     #[cfg(debug_assertions)]
     pass.setLabel(Some(&NSString::from_str("rune metal lazy clear")));
@@ -441,44 +497,49 @@ fn clear_on_encoder(rec: &mut Rec, texture: &Arc<TextureRaw>, effects: Effects<E
     rec.keep.push(texture.clone());
 }
 
+pub(super) struct TextureCopy<'a> {
+    pub(super) texture: &'a TextureRaw,
+    pub(super) aspect: wgpu::TextureAspect,
+    pub(super) mip: u32,
+    pub(super) origin: wgpu::Origin3d,
+}
+
 pub(super) fn buffer_to_texture(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
     buffer: &ProtocolObject<dyn MTLBuffer>,
     layout: wgpu::TexelCopyBufferLayout,
-    texture: &TextureRaw,
-    mip: u32,
-    at: wgpu::Origin3d,
+    dst: TextureCopy<'_>,
     size: wgpu::Extent3d,
 ) {
-    let (row, image) = strides(texture.format, layout, size);
-    for (slice, z, depth, i) in layers(texture, at, size) {
+    let (row, image) = strides(dst.texture.format, dst.aspect, layout, size);
+    let options = blit_option(dst.texture.format, dst.aspect);
+    for (slice, z, depth, i) in layers(dst.texture, dst.origin, size) {
         let per_image = if depth > 1 { image } else { 0 };
         // SAFETY: wgpu validated the regions against both resources.
         unsafe {
-            blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin(
+            blit.copyFromBuffer_sourceOffset_sourceBytesPerRow_sourceBytesPerImage_sourceSize_toTexture_destinationSlice_destinationLevel_destinationOrigin_options(
                 buffer, layout.offset as usize + image * i, row, per_image, extent(size.width, size.height, depth),
-                &texture.raw, slice, mip as usize, origin(at, z))
+                &dst.texture.raw, slice, dst.mip as usize, origin(dst.origin, z), options)
         }
     }
 }
 
 fn texture_to_buffer(
     blit: &ProtocolObject<dyn MTLBlitCommandEncoder>,
-    texture: &TextureRaw,
-    mip: u32,
-    at: wgpu::Origin3d,
+    src: TextureCopy<'_>,
     buffer: &ProtocolObject<dyn MTLBuffer>,
     layout: wgpu::TexelCopyBufferLayout,
     size: wgpu::Extent3d,
 ) {
-    let (row, image) = strides(texture.format, layout, size);
-    for (slice, z, depth, i) in layers(texture, at, size) {
+    let (row, image) = strides(src.texture.format, src.aspect, layout, size);
+    let options = blit_option(src.texture.format, src.aspect);
+    for (slice, z, depth, i) in layers(src.texture, src.origin, size) {
         let per_image = if depth > 1 { image } else { 0 };
         // SAFETY: wgpu validated the regions against both resources.
         unsafe {
-            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage(
-                &texture.raw, slice, mip as usize, origin(at, z), extent(size.width, size.height, depth),
-                buffer, layout.offset as usize + image * i, row, per_image)
+            blit.copyFromTexture_sourceSlice_sourceLevel_sourceOrigin_sourceSize_toBuffer_destinationOffset_destinationBytesPerRow_destinationBytesPerImage_options(
+                &src.texture.raw, slice, src.mip as usize, origin(src.origin, z), extent(size.width, size.height, depth),
+                buffer, layout.offset as usize + image * i, row, per_image, options)
         }
     }
 }
@@ -543,7 +604,18 @@ impl CommandEncoderInterface for MetalEncoder {
             };
             clear_on_encoder(&mut rec, &dst, lazy.step(event));
         }
-        buffer_to_texture(rec.blit(), &src.raw, source.layout, &dst, destination.mip_level, destination.origin, size);
+        buffer_to_texture(
+            rec.blit(),
+            &src.raw,
+            source.layout,
+            TextureCopy {
+                texture: &dst,
+                aspect: destination.aspect,
+                mip: destination.mip_level,
+                origin: destination.origin,
+            },
+            size,
+        );
         rec.drawable |= dst.drawable;
         if let Some(uses) = &dst.uses {
             rec.keep.use_texture(uses);
@@ -570,7 +642,13 @@ impl CommandEncoderInterface for MetalEncoder {
             let effects = lazy.step(Event::Read(copy_range(source.mip_level, source.origin, size)));
             clear_on_encoder(&mut rec, &src, effects);
         }
-        texture_to_buffer(rec.blit(), &src, source.mip_level, source.origin, &dst.raw, destination.layout, size);
+        texture_to_buffer(
+            rec.blit(),
+            TextureCopy { texture: &src, aspect: source.aspect, mip: source.mip_level, origin: source.origin },
+            &dst.raw,
+            destination.layout,
+            size,
+        );
         if let Some(uses) = &src.uses {
             rec.keep.use_texture(uses);
         }

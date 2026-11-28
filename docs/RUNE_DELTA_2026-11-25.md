@@ -7,6 +7,8 @@ Research against the pin in [`RUNE_PIN.md`](RUNE_PIN.md). Supersedes
 > 0001/0003/0004/0005 were re-ported; the estimates below are the pre-port
 > measurements and are kept for the record.
 
+> Superseded by [`RUNE_DELTA_2026-11-28.md`](RUNE_DELTA_2026-11-28.md).
+
 Two independent read-only probes were run: a source survey of the new APIs
 against our open rows, and a measured patch-port probe (`git apply --check`,
 reject counts, moved-file mapping). No build was run for this report; every

@@ -68,6 +68,8 @@ fn pill_chips_keep_room_and_never_overlap_at_wraps() {
                 fg: None,
                 ring: None,
                 radius: None,
+                pad_x: None,
+                margin_x: None,
                 bare: None,
             }
         })
@@ -182,6 +184,8 @@ fn a_pill_wider_than_its_line_wraps_inside_it() {
         fg: None,
         ring: None,
         radius: None,
+        pad_x: None,
+        margin_x: None,
         bare: None,
     }];
     let scale = 2.0;
@@ -545,6 +549,8 @@ fn pill_chips_apply_custom_radius_clamping_ring_and_leading_images() {
             fg: None,
             ring: None,
             radius: None,
+            pad_x: None,
+            margin_x: None,
             bare: None,
         },
         PillChip {
@@ -556,6 +562,8 @@ fn pill_chips_apply_custom_radius_clamping_ring_and_leading_images() {
             fg: None,
             ring: Some((ring_color, 0.0)),
             radius: Some(-3.0),
+            pad_x: None,
+            margin_x: None,
             bare: None,
         },
         PillChip {
@@ -567,6 +575,8 @@ fn pill_chips_apply_custom_radius_clamping_ring_and_leading_images() {
             fg: None,
             ring: Some((ring_color, 1.5)),
             radius: Some(999.0),
+            pad_x: None,
+            margin_x: None,
             bare: None,
         },
         PillChip {
@@ -578,6 +588,8 @@ fn pill_chips_apply_custom_radius_clamping_ring_and_leading_images() {
             fg: None,
             ring: Some((ring_color, 1.0)),
             radius: Some(8.0),
+            pad_x: None,
+            margin_x: None,
             bare: None,
         },
     ];
@@ -621,6 +633,8 @@ fn pill_chips_apply_custom_radius_clamping_ring_and_leading_images() {
         fg: None,
         ring: Some((ring_color, 1.0)),
         radius: Some(999.0),
+        pad_x: None,
+        margin_x: None,
         bare: None,
     }];
     let wlayout =
@@ -657,6 +671,8 @@ fn pill_chips_apply_custom_radius_clamping_ring_and_leading_images() {
         fg: None,
         ring: Some((ring_color, 1.0)),
         radius: Some(999.0),
+        pad_x: None,
+        margin_x: None,
         bare: None,
     }];
     let rlayout = text.layout_blocks(rtl_text, &[], &[], &rpills, style, scale, None, Alignment::Start);
@@ -739,4 +755,398 @@ fn text_flow_line_span_covers_single_wrapped_multiline_and_blank_lines() {
     let blank_at = doc.find("\n\n").unwrap() + 1;
     let blank_span = pflow.line_span(blank_at, blank_at + 1, line_px).unwrap();
     assert!(blank_span.0 > code_span.0 && blank_span.1 < code_span.1);
+}
+
+#[test]
+fn inline_icon_stays_on_url_line_with_prefix_and_never_creates_empty_line() {
+    const ICON: Icon = Icon { name: "globe", view: 16.0, body: "" };
+    let mut ts = TextSystem::default();
+    let style = TextStyle::new(14.0, 400.0).lh(22.4);
+    let cases = [
+        // Exact parenthesised URL + isolated code/URL marks matching Markdown rendering.
+        "Checks green: \u{2066}81/81\u{2069} theme tests pass in \u{2066}packages/ui\u{2069}, and PR #66531 (\u{2066}https://github.com/anomalyco/opencode/pull/66531\u{2069}) is \u{2066}MERGEABLE\u{2069} / \u{2066}CLEAN\u{2069} ok.",
+        // Plain URL after whitespace (no opening parenthesis).
+        "Checks green: 81/81 theme tests pass in packages/ui, see https://github.com/anomalyco/opencode/pull/66531 now.",
+    ];
+    for (ci, content) in cases.iter().enumerate() {
+        let url_at = content.find("https://").unwrap();
+        let pill_start = if content[..url_at].ends_with('\u{2066}') { url_at - '\u{2066}'.len_utf8() } else { url_at };
+        let pill_end = pill_start + content[pill_start..].find(char::is_whitespace).unwrap();
+        let paren_at = content[..pill_start].ends_with('(').then_some(pill_start - 1);
+        let pills = [PillChip {
+            start: pill_start as u32,
+            end: pill_end as u32,
+            icon: Some(&ICON),
+            image: None,
+            bg: None,
+            fg: None,
+            ring: None,
+            radius: None,
+            pad_x: None,
+            margin_x: None,
+            bare: Some(Box::new(crate::layout::span::BareIcon {
+                size: 14.0,
+                gap: 4.0,
+                radius: 0.0,
+                image: None,
+                replace: None,
+                label: None,
+                help: None,
+            })),
+        }];
+        for scale in [1.0f32, 2.0] {
+            for (wrap_anywhere, pretty) in [(false, false), (true, false), (true, true)] {
+                for width in (180..=440).step_by(11) {
+                    let max_w = width as f32 * scale;
+                    let layout = ts.layout_keyed(
+                        None,
+                        content,
+                        &[],
+                        &[],
+                        0.0,
+                        &pills,
+                        &[],
+                        &[],
+                        style,
+                        scale,
+                        Some(max_w),
+                        Alignment::Start,
+                        wrap_anywhere,
+                        pretty,
+                        crate::Keep::Owned,
+                        parley::BaseDirection::Auto,
+                    );
+                    // No line may ever collapse to a zero-height / empty orphan line.
+                    for (li, line) in layout.lines().enumerate() {
+                        let m = line.metrics();
+                        assert!(
+                            m.line_height > 0.0 && !line.text_range().is_empty(),
+                            "case={ci} scale={scale} wrap_anywhere={wrap_anywhere} pretty={pretty} w={width} L{li} was empty/zero-height"
+                        );
+                        if wrap_anywhere {
+                            let used = m.advance - m.hanging_advance;
+                            assert!(
+                                used <= max_w + 1.5 * scale,
+                                "case={ci} scale={scale} pretty={pretty} w={width} L{li} overflowed: used={used} max={max_w}"
+                            );
+                        }
+                    }
+                    let url_line_idx = layout
+                        .lines()
+                        .position(|l| l.text_range().contains(&url_at))
+                        .expect("URL start must lie on a line");
+                    let url_line = layout.get(url_line_idx).unwrap();
+                    let um = url_line.metrics();
+
+                    // Opening '(' stays attached to the icon and URL on the same line.
+                    if let Some(p_at) = paren_at {
+                        let paren_line_idx = layout
+                            .lines()
+                            .position(|l| l.text_range().contains(&p_at))
+                            .expect("paren must lie on a line");
+                        assert_eq!(
+                            paren_line_idx, url_line_idx,
+                            "case={ci} scale={scale} wrap_anywhere={wrap_anywhere} pretty={pretty} w={width}: '(' on L{paren_line_idx}, URL on L{url_line_idx}"
+                        );
+                    }
+
+                    // The icon sits inside the URL line's vertical band and immediately before 'h'.
+                    let mut icons = Vec::new();
+                    bare_icons(&layout, &pills, scale, [0.0, 0.0], &mut icons);
+                    assert_eq!(icons.len(), 1);
+                    let (_, icon_at, icon_size) = icons[0];
+                    assert!(
+                        icon_at[1] >= um.block_min_coord - 1.0 && icon_at[1] + icon_size[1] <= um.block_max_coord + 1.0,
+                        "case={ci} scale={scale} wrap_anywhere={wrap_anywhere} pretty={pretty} w={width}: icon y={}..{} outside URL line {}..{}",
+                        icon_at[1],
+                        icon_at[1] + icon_size[1],
+                        um.block_min_coord,
+                        um.block_max_coord,
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn wide_unbroken_pill_and_rtl_inline_icon_never_orphan_leading_box() {
+    const ICON: Icon = Icon { name: "dot", view: 16.0, body: "" };
+    let mut ts = TextSystem::default();
+    let style = TextStyle::new(14.0, 400.0).lh(22.0);
+
+    // 1. Boxed pill whose label is a single unbroken identifier wider than the column.
+    let pill_body = "check @very_long_unbroken_identifier_name_that_exceeds_the_column_width next";
+    let ps = pill_body.find('@').unwrap() as u32;
+    let pe = (pill_body.find(" next").unwrap()) as u32;
+    let pills = [PillChip {
+        start: ps,
+        end: pe,
+        icon: Some(&ICON),
+        image: None,
+        bg: None,
+        fg: None,
+        ring: None,
+        radius: None,
+        pad_x: None,
+        margin_x: None,
+        bare: None,
+    }];
+    for wrap_anywhere in [false, true] {
+        for width in [140.0f32, 180.0, 220.0] {
+            let layout = ts.layout_blocks_inner(
+                pill_body,
+                &[],
+                &[],
+                &pills,
+                style,
+                1.0,
+                Some(width),
+                Alignment::Start,
+                wrap_anywhere,
+                false,
+            );
+            for (li, line) in layout.lines().enumerate() {
+                assert!(
+                    line.metrics().line_height > 0.0 && !line.text_range().is_empty(),
+                    "pill wrap_anywhere={wrap_anywhere} w={width} L{li} empty/zero-height"
+                );
+            }
+            let (mut chips, mut icons) = (Vec::new(), Vec::new());
+            pill_chips(&layout, &pills, 14.0, 1.0, [0.0, 0.0], Color::BLACK, &mut chips, &mut icons);
+            assert_eq!(icons.len(), 1);
+            let label_line = layout.lines().find(|l| l.text_range().contains(&(ps as usize))).unwrap();
+            let lm = label_line.metrics();
+            let icon_y = icons[0].2[1];
+            assert!(
+                icon_y >= lm.block_min_coord - 1.0 && icon_y <= lm.block_max_coord + 1.0,
+                "pill icon y={icon_y} outside label line {}..{}",
+                lm.block_min_coord,
+                lm.block_max_coord,
+            );
+        }
+    }
+
+    // 2. RTL paragraph containing an isolated LTR URL with a bare inline icon.
+    let rtl = "راجع هذا الرابط (\u{2066}https://github.com/anomalyco/opencode/pull/66531\u{2069}) الآن";
+    let url_at = rtl.find("https://").unwrap();
+    let p_start = url_at - '\u{2066}'.len_utf8();
+    let p_end = rtl.find(')').unwrap() + 1;
+    let rtl_pills = [PillChip {
+        start: p_start as u32,
+        end: p_end as u32,
+        icon: Some(&ICON),
+        image: None,
+        bg: None,
+        fg: None,
+        ring: None,
+        radius: None,
+        pad_x: None,
+        margin_x: None,
+        bare: Some(Box::new(crate::layout::span::BareIcon {
+            size: 14.0,
+            gap: 4.0,
+            radius: 0.0,
+            image: None,
+            replace: None,
+            label: None,
+            help: None,
+        })),
+    }];
+    for wrap_anywhere in [false, true] {
+        for width in [220.0f32, 300.0, 360.0] {
+            let layout = ts.layout_blocks_inner(
+                rtl,
+                &[],
+                &[],
+                &rtl_pills,
+                style,
+                1.0,
+                Some(width),
+                Alignment::Start,
+                wrap_anywhere,
+                false,
+            );
+            for (li, line) in layout.lines().enumerate() {
+                assert!(
+                    line.metrics().line_height > 0.0 && !line.text_range().is_empty(),
+                    "rtl wrap_anywhere={wrap_anywhere} w={width} L{li} empty/zero-height"
+                );
+            }
+            let url_line = layout.lines().find(|l| l.text_range().contains(&url_at)).unwrap();
+            let um = url_line.metrics();
+            let mut icons = Vec::new();
+            bare_icons(&layout, &rtl_pills, 1.0, [0.0, 0.0], &mut icons);
+            assert_eq!(icons.len(), 1);
+            let (_, at, sz) = icons[0];
+            assert!(
+                at[1] >= um.block_min_coord - 1.0 && at[1] + sz[1] <= um.block_max_coord + 1.0,
+                "rtl wrap_anywhere={wrap_anywhere} w={width}: icon y={}..{} outside URL line {}..{}",
+                at[1],
+                at[1] + sz[1],
+                um.block_min_coord,
+                um.block_max_coord,
+            );
+        }
+    }
+}
+
+#[test]
+fn pill_chips_respect_custom_pad_x_and_margin_x_across_layout_paint_and_wrap() {
+    static DOT: Icon = Icon { name: "dot", view: 24.0, body: "<circle cx=\"12\" cy=\"12\" r=\"8\"/>" };
+    let mut ts = TextSystem::default();
+    let style = TextStyle::new(15.0, 400.0);
+    let content = "hi @alex there";
+    let start = content.find("@alex").unwrap() as u32;
+    let end = start + "@alex".len() as u32;
+    let chip = |pad_x, margin_x, icon| PillChip {
+        start,
+        end,
+        icon,
+        image: None,
+        bg: None,
+        fg: None,
+        ring: None,
+        radius: None,
+        pad_x,
+        margin_x,
+        bare: None,
+    };
+    let label_span = |layout: &Layout<Ink>| -> (f32, f32, f32) {
+        let mut x0 = f32::INFINITY;
+        let mut x1 = f32::NEG_INFINITY;
+        let mut next_x = f32::INFINITY;
+        for line in layout.lines() {
+            for item in line.items() {
+                if let PositionedLayoutItem::GlyphRun(gr) = item {
+                    let r = gr.run().text_range();
+                    if r.start < end as usize && (start as usize) < r.end {
+                        x0 = x0.min(gr.offset());
+                        x1 = x1.max(gr.offset() + gr.advance());
+                    } else if r.start >= end as usize {
+                        next_x = next_x.min(gr.offset());
+                    }
+                }
+            }
+        }
+        (x0, x1, next_x)
+    };
+
+    let default_pills = [chip(None, None, None)];
+    let tight_pills = [chip(Some(2.0), Some(0.0), None)];
+    let zero_pills = [chip(Some(0.0), Some(0.0), None)];
+    let frac_margin = [chip(Some(0.0), Some(1.4), None)];
+    let icon_tight = [chip(Some(2.0), Some(0.0), Some(&DOT))];
+    let neg_clamped = [chip(Some(-5.0), Some(f32::NAN), None)];
+
+    assert_ne!(
+        shape_key(content, &[], style, 1.0, false, &default_pills),
+        shape_key(content, &[], style, 1.0, false, &tight_pills),
+        "custom pad_x/margin_x must distinguish shape_key",
+    );
+    assert_eq!(
+        shape_key(content, &[], style, 1.0, false, &zero_pills),
+        shape_key(content, &[], style, 1.0, false, &neg_clamped),
+        "negative/NaN overrides hash identically to 0.0",
+    );
+
+    for scale in [1.0f32, 2.0] {
+        let bare = ts.layout_blocks(content, &[], &[], &[], style, scale, None, Alignment::Start);
+        let l_def = ts.layout_blocks(content, &[], &[], &default_pills, style, scale, None, Alignment::Start);
+        let l_tight = ts.layout_blocks(content, &[], &[], &tight_pills, style, scale, None, Alignment::Start);
+        let l_zero = ts.layout_blocks(content, &[], &[], &zero_pills, style, scale, None, Alignment::Start);
+        let l_frac = ts.layout_blocks(content, &[], &[], &frac_margin, style, scale, None, Alignment::Start);
+        let l_icon = ts.layout_blocks(content, &[], &[], &icon_tight, style, scale, None, Alignment::Start);
+
+        let pm = PillMetrics::new(15.0);
+        let def_room = (pm.lead(false) + pm.trail()) * scale;
+        assert!((l_def.full_width() - bare.full_width() - def_room).abs() <= 1.5);
+        assert!((l_tight.full_width() - bare.full_width() - 4.0 * scale).abs() <= 1.0);
+        assert!((l_zero.full_width() - bare.full_width()).abs() <= 0.5);
+
+        let (mut c_tight, mut ic) = (Vec::new(), Vec::new());
+        pill_chips(&l_tight, &tight_pills, 15.0, scale, [0.0, 0.0], Color::BLACK, &mut c_tight, &mut ic);
+        assert_eq!(c_tight.len(), 1);
+        let (gx0, gx1, next_x) = label_span(&l_tight);
+        let r = c_tight[0].deco.rect;
+        assert!((gx0 - r[0] - 2.0 * scale).abs() <= 1.0, "left pad=2pt: chip={r:?} gx0={gx0}");
+        assert!((r[0] + r[2] - gx1 - 2.0 * scale).abs() <= 1.0, "right pad=2pt: chip={r:?} gx1={gx1}");
+        assert!(
+            (next_x - (r[0] + r[2])).abs() <= 1.0,
+            "margin=0pt puts next run at chip end: next={next_x} chip={r:?}"
+        );
+
+        // Zero-pad with fractional margin never shrinks chip inside glyphs.
+        let (mut c_frac, mut ic2) = (Vec::new(), Vec::new());
+        pill_chips(&l_frac, &frac_margin, 15.0, scale, [0.0, 0.0], Color::BLACK, &mut c_frac, &mut ic2);
+        let (fgx0, fgx1, _) = label_span(&l_frac);
+        let fr = c_frac[0].deco.rect;
+        assert!(
+            fr[0] <= fgx0 + 0.5 && fr[0] + fr[2] >= fgx1 - 0.5,
+            "frac margin chip {fr:?} covers glyphs {fgx0}..{fgx1}"
+        );
+
+        // Leading icon uses custom pad_x instead of default PillMetrics::pad.
+        let (mut c_icon, mut icons) = (Vec::new(), Vec::new());
+        pill_chips(&l_icon, &icon_tight, 15.0, scale, [0.0, 0.0], Color::BLACK, &mut c_icon, &mut icons);
+        assert_eq!(icons.len(), 1);
+        let ir = c_icon[0].deco.rect;
+        assert!(
+            (icons[0].2[0] - (ir[0] + 2.0 * scale)).abs() <= 1.0,
+            "icon inset uses custom pad_x: icon={:?} chip={ir:?}",
+            icons[0].2
+        );
+    }
+
+    // RTL pill with custom pad_x places icon pad_x inside the right (start) edge.
+    let rtl_text = "שלום דוד היום";
+    let rs = rtl_text.find("דוד").unwrap() as u32;
+    let rpills = [PillChip {
+        start: rs,
+        end: rs + "דוד".len() as u32,
+        icon: Some(&DOT),
+        image: None,
+        bg: None,
+        fg: None,
+        ring: None,
+        radius: None,
+        pad_x: Some(2.0),
+        margin_x: Some(0.0),
+        bare: None,
+    }];
+    let rlayout = ts.layout_blocks(rtl_text, &[], &[], &rpills, style, 2.0, None, Alignment::Start);
+    let (mut rchips, mut ricons) = (Vec::new(), Vec::new());
+    pill_chips(&rlayout, &rpills, 15.0, 2.0, [0.0, 0.0], Color::BLACK, &mut rchips, &mut ricons);
+    assert_eq!((rchips.len(), ricons.len()), (1, 1));
+    let rr = rchips[0].deco.rect;
+    let (_, rpx, rat, _) = ricons[0];
+    assert!(
+        ((rr[0] + rr[2]) - (rat[0] + rpx as f32) - 4.0).abs() <= 1.5,
+        "RTL icon inset uses custom pad_x: {rat:?} ({rpx}) in {rr:?}"
+    );
+
+    // Zero-room pill (pad_x=0, margin_x=0) moves whole to the next line without stranding lead.
+    let wrap_text = "hello world @superlongtag end";
+    let ws = wrap_text.find("@superlongtag").unwrap() as u32;
+    let we = ws + "@superlongtag".len() as u32;
+    let wpills = [PillChip {
+        start: ws,
+        end: we,
+        icon: None,
+        image: None,
+        bg: None,
+        fg: None,
+        ring: None,
+        radius: None,
+        pad_x: Some(0.0),
+        margin_x: Some(0.0),
+        bare: None,
+    }];
+    for width in (95..=170).step_by(5) {
+        let layout = ts.layout_blocks(wrap_text, &[], &[], &wpills, style, 1.0, Some(width as f32), Alignment::Start);
+        let (mut chips, mut icons) = (Vec::new(), Vec::new());
+        pill_chips(&layout, &wpills, 15.0, 1.0, [0.0, 0.0], Color::BLACK, &mut chips, &mut icons);
+        assert_eq!(chips.len(), 1, "zero-room pill stays atomic on one line at width {width}");
+        assert!(chips[0].deco.rect[2] > 10.0, "chip covers label width at width {width}: {:?}", chips[0].deco.rect);
+    }
 }

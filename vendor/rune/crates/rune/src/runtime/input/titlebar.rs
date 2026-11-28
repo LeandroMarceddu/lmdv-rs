@@ -153,6 +153,13 @@ pub(in crate::runtime) enum TitlebarPress {
     /// A secondary press began on a bare drag region: its release there opens the window menu.
     /// `Some` is the primary run it didn't end.
     SecondaryOnRegion(Option<Pair>),
+    /// A synchronous titlebar double-click toggle (macOS `NSWindow::zoom:`) is in flight;
+    /// titlebar presses arriving before `ToggleEnd` are dropped.
+    Toggling,
+    /// The last titlebar double-click toggle ended at runtime clock time `until`. Any press whose
+    /// native event timestamp is strictly earlier than `until` was queued while the toggle blocked
+    /// the main thread and is dropped; presses at or after `until` resume normal pairing.
+    Settled { until: f64 },
 }
 
 impl TitlebarPress {
@@ -187,6 +194,12 @@ pub(in crate::runtime) enum Event {
     SecondaryUp { region: bool },
     /// Pointer cancellation or stage replacement ends both halves of any pending press.
     Clear,
+    /// The host is starting a synchronous titlebar double-click toggle.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ToggleStart,
+    /// The host's titlebar double-click toggle finished at runtime clock time `until`.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    ToggleEnd { until: f64 },
 }
 
 /// What a press or deferred drag motion asks the window for: the shell starts a native drag
@@ -212,7 +225,7 @@ fn pair_of(last: Option<Pair>, now: f64, point: (f32, f32), interval: f64) -> (O
 /// The press run `state` holds, whatever it is doing with a secondary press.
 fn pair(state: &TitlebarPress) -> Option<Pair> {
     match *state {
-        TitlebarPress::Rest => None,
+        TitlebarPress::Rest | TitlebarPress::Toggling | TitlebarPress::Settled { .. } => None,
         TitlebarPress::Holding(pair) | TitlebarPress::Armed(pair) => Some(pair),
         TitlebarPress::SecondaryOnRegion(pair) => pair,
     }
@@ -233,6 +246,11 @@ pub(in crate::runtime) fn step(state: &mut TitlebarPress, event: Event) -> Effec
         // `Holding` until motion crosses `DRAG_THRESHOLD` when `defer`; a second press within
         // the double-click interval and slop always triggers the double-click action.
         Event::Region { now, point, interval, defer } => {
+            match *state {
+                TitlebarPress::Toggling => return Effects::none(),
+                TitlebarPress::Settled { until } if now < until => return Effects::none(),
+                _ => {}
+            }
             let (next, double) = pair_of(pair(state), now, point, interval);
             if double {
                 *state = keep_secondary(state, None);
@@ -272,11 +290,19 @@ pub(in crate::runtime) fn step(state: &mut TitlebarPress, event: Event) -> Effec
             Effects::none()
         }
         Event::Resize { edge } => {
+            if matches!(*state, TitlebarPress::Toggling) {
+                return Effects::none();
+            }
             *state = keep_secondary(state, None);
             Effects::one(Request::Resize(edge))
         }
         // AppKit drags the band itself and never sees the double click over the content.
         Event::Empty { now, point, interval, band } => {
+            match *state {
+                TitlebarPress::Toggling => return Effects::none(),
+                TitlebarPress::Settled { until } if !band || now < until => return Effects::none(),
+                _ => {}
+            }
             if !band {
                 if matches!(*state, TitlebarPress::Holding(_)) {
                     *state = TitlebarPress::Rest;
@@ -288,6 +314,9 @@ pub(in crate::runtime) fn step(state: &mut TitlebarPress, event: Event) -> Effec
             if double { Effects::one(Request::Action(TitlebarAction::DoubleClick)) } else { Effects::none() }
         }
         Event::SecondaryDown { trigger } => {
+            if matches!(*state, TitlebarPress::Toggling) {
+                return Effects::none();
+            }
             let kept = match *state {
                 TitlebarPress::Holding(_) => None,
                 _ => pair(state),
@@ -313,8 +342,23 @@ pub(in crate::runtime) fn step(state: &mut TitlebarPress, event: Event) -> Effec
             if region { Effects::one(Request::Menu) } else { Effects::none() }
         }
         Event::Clear => {
-            // differs from dev: a cancelled secondary down cannot open a menu on release.
-            *state = TitlebarPress::Rest;
+            // Preserve an active or settled zoom toggle watermark across focus/modal cancellation
+            // so stale presses queued during the zoom are still dropped.
+            if !matches!(*state, TitlebarPress::Toggling | TitlebarPress::Settled { .. }) {
+                *state = TitlebarPress::Rest;
+            }
+            Effects::none()
+        }
+        Event::ToggleStart => {
+            *state = TitlebarPress::Toggling;
+            Effects::none()
+        }
+        Event::ToggleEnd { until } => {
+            let until = match *state {
+                TitlebarPress::Settled { until: prev } => until.max(prev),
+                _ => until,
+            };
+            *state = TitlebarPress::Settled { until };
             Effects::none()
         }
     }
@@ -411,6 +455,35 @@ impl RuntimeCore {
     /// delivered. The shell must act on it before returning from that input event.
     pub fn take_titlebar_action(&mut self) -> Option<TitlebarAction> {
         self.host.titlebar.action.take()
+    }
+
+    /// Marks a synchronous titlebar double-click toggle as in flight.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn begin_titlebar_toggle(&mut self) {
+        self.host.titlebar.act(Event::ToggleStart);
+    }
+
+    /// Marks the titlebar double-click toggle as completed at runtime clock time `until`; presses
+    /// whose native event timestamp is strictly earlier than `until` are dropped.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn end_titlebar_toggle(&mut self, until: f64) {
+        self.host.titlebar.act(Event::ToggleEnd { until });
+    }
+
+    /// Runs `perform` for a titlebar `action`, bracketing `TitlebarAction::DoubleClick` with
+    /// `begin_titlebar_toggle` / `end_titlebar_toggle` so clicks whose native timestamps precede
+    /// the end of a blocking toggle (macOS `NSWindow::zoom:`) are dropped.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn run_titlebar_action_with(&mut self, action: TitlebarAction, perform: impl FnOnce(TitlebarAction)) {
+        let toggling = action == TitlebarAction::DoubleClick;
+        if toggling {
+            self.begin_titlebar_toggle();
+        }
+        perform(action);
+        if toggling {
+            let until = self.now_clock();
+            self.end_titlebar_toggle(until);
+        }
     }
 
     /// A window resize edge requested by the press just delivered on an
@@ -628,7 +701,10 @@ impl RuntimeCore {
     }
 
     /// Number of committed view/layout passes so far.
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[cfg(any(
+        target_os = "windows",
+        all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))
+    ))]
     #[inline]
     pub(crate) fn commit_generation(&self) -> u64 {
         self.commit.commits
@@ -719,3 +795,6 @@ mod tests;
 #[cfg(test)]
 #[path = "titlebar_window_menu_tests.rs"]
 mod window_menu_tests;
+#[cfg(test)]
+#[path = "titlebar_zoom_tests.rs"]
+mod zoom_tests;

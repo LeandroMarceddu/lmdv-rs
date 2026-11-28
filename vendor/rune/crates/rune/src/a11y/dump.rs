@@ -7,10 +7,11 @@ use serde_json::{Value, json};
 
 use crate::runtime::HashMap;
 
-pub(super) const ACTIONS: [(Action, &str); 16] = [
+pub(super) const ACTIONS: [(Action, &str); 17] = [
     (Action::Click, "click"),
     (Action::Focus, "focus"),
     (Action::ShowContextMenu, "context-menu"),
+    (Action::CustomAction, "custom-action"),
     (Action::Expand, "expand"),
     (Action::Collapse, "collapse"),
     (Action::Increment, "increment"),
@@ -66,6 +67,9 @@ impl Tree<'_> {
             None => origin,
         };
         let mut v = json!({ "role": super::roles::name(n.role()) });
+        if let Some(rd) = n.role_description() {
+            v["roleDescription"] = rd.into();
+        }
         if let Some(key) = n.author_id() {
             v["key"] = key.into();
         }
@@ -94,6 +98,17 @@ impl Tree<'_> {
         }
         if let Some(s) = n.size_of_set() {
             v["setSize"] = s.into();
+        }
+        if let Some(ls) = n.list_style() {
+            v["listStyle"] = match ls {
+                accesskit::ListStyle::Circle => "circle",
+                accesskit::ListStyle::Disc => "disc",
+                accesskit::ListStyle::Image => "image",
+                accesskit::ListStyle::Numeric => "numeric",
+                accesskit::ListStyle::Square => "square",
+                accesskit::ListStyle::Other => "other",
+            }
+            .into();
         }
         if let Some(r) = n.row_count() {
             v["rowCount"] = r.into();
@@ -163,6 +178,20 @@ impl Tree<'_> {
             }
             .into();
         }
+        if let Some(cur) = n.aria_current() {
+            let s = match cur {
+                accesskit::AriaCurrent::Page => Some("page"),
+                accesskit::AriaCurrent::Step => Some("step"),
+                accesskit::AriaCurrent::Location => Some("location"),
+                accesskit::AriaCurrent::Date => Some("date"),
+                accesskit::AriaCurrent::Time => Some("time"),
+                accesskit::AriaCurrent::True => Some("true"),
+                accesskit::AriaCurrent::False => None,
+            };
+            if let Some(s) = s {
+                v["current"] = s.into();
+            }
+        }
         match n.sort_direction() {
             Some(accesskit::SortDirection::Ascending) => v["sort"] = "ascending".into(),
             Some(accesskit::SortDirection::Descending) => v["sort"] = "descending".into(),
@@ -220,6 +249,11 @@ impl Tree<'_> {
         let actions: Vec<&str> = ACTIONS.iter().filter(|(a, _)| n.supports_action(*a)).map(|(_, s)| *s).collect();
         if !actions.is_empty() {
             v["actions"] = json!(actions);
+        }
+        if !n.custom_actions().is_empty() {
+            v["customActions"] = Value::Array(
+                n.custom_actions().iter().map(|a| json!({ "id": a.id, "description": a.description })).collect(),
+            );
         }
         if let Some(b) = n.bounds() {
             v["bounds"] = json!([r1(b.x0 + origin[0]), r1(b.y0 + origin[1]), r1(b.width()), r1(b.height())]);

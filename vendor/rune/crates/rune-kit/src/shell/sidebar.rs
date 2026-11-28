@@ -505,7 +505,7 @@ impl SidebarRow {
         state: &Reorder,
         index: usize,
         count: usize,
-        access: fn(&mut S) -> &mut Reorder,
+        access: impl for<'a> Fn(&'a mut S) -> &'a mut Reorder + 'static,
         drop: impl Fn(&mut S, usize, usize) + 'static,
     ) -> Self {
         self.reorder_tx(state, index, count, access, move |s, from, to, _| drop(s, from, to))
@@ -544,15 +544,17 @@ impl SidebarRow {
         state: &Reorder,
         index: usize,
         count: usize,
-        access: fn(&mut S) -> &mut Reorder,
+        access: impl for<'a> Fn(&'a mut S) -> &'a mut Reorder + 'static,
         drop: impl Fn(&mut S, usize, usize, &mut Tx) + 'static,
     ) -> Self {
         let held = state.held();
+        let access = std::rc::Rc::new(access);
         let bind = Box::new(move |mut e: El| {
             // While a row is held, every row hears where the pointer goes: a move its drag never
             // hears means the release was lost (the row unmounted, or a modal took the pointer).
             if held {
-                e = e.on_pointer_move_local(move |s: &mut S, p, tx: &mut Tx| reorder_pointer(access(s), p, tx));
+                let pointer_access = access.clone();
+                e = e.on_pointer_move_local(move |s: &mut S, p, tx: &mut Tx| reorder_pointer(pointer_access(s), p, tx));
             }
             e.on_drag(move |s: &mut S, d: &mut Drag, tx: &mut Tx| {
                 if let Some((from, to)) = reorder_drag(access(s), index, count, d, tx) {
@@ -568,7 +570,7 @@ impl SidebarRow {
     pub fn renaming<S: 'static>(
         self,
         edit: &TextEdit,
-        access: fn(&mut S) -> &mut TextEdit,
+        access: impl for<'a> Fn(&'a mut S) -> &'a mut TextEdit + 'static,
         commit: impl Fn(&mut S, &mut Tx) + 'static,
         cancel: impl Fn(&mut S, &mut Tx) + 'static,
     ) -> Self {
@@ -613,13 +615,13 @@ impl SidebarRow {
         let focusable = !renaming && !self.select_only;
         // The row's name and description say what its texts, badge and status mark show.
         let status_words = match &self.status {
-            Some(RowStatus::Busy) => Some("Working"),
-            Some(RowStatus::Attention) => Some("Needs attention"),
-            Some(RowStatus::Unread) => Some("Unread"),
+            Some(RowStatus::Busy) => Some(rune::labels::label(rune::Label::Working)),
+            Some(RowStatus::Attention) => Some(rune::labels::label(rune::Label::NeedsAttention)),
+            Some(RowStatus::Unread) => Some(rune::labels::label(rune::Label::Unread)),
             _ => None,
         };
         let said: Vec<&str> =
-            [self.detail.as_deref(), self.badge.as_deref(), status_words].into_iter().flatten().collect();
+            [self.detail.as_deref(), self.badge.as_deref(), status_words.as_deref()].into_iter().flatten().collect();
         let mut r = row()
             .label(name)
             .description(said.join(", "))
@@ -715,7 +717,7 @@ impl SidebarRow {
                 let close = IconButton::new(k.glyph.close)
                     .control_size(ControlSize::Small)
                     .variant(IconButtonVariant::GhostMuted)
-                    .label("Close")
+                    .label(rune::labels::label(rune::Label::Close))
                     .build(k);
                 // Pointer only, like the row's other hover controls: the list's arrows step rows.
                 slot = slot.child(bind(close).key("close").absolute(0.0, 0.0).group_opacity(0.0, 1.0).focusable(false));

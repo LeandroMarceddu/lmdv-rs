@@ -6,7 +6,7 @@
 //! close it, and focus goes back to the trigger, without a ring when the pointer opened it, as
 //! Desktop's menu machine has it (`ui/src/navigation/menu/machine.ts`).
 
-use rune::{El, Icon, TextStyle, Tx, col, el, icon, row, text};
+use rune::{Color, El, Icon, TextStyle, Tx, col, el, icon, row, text};
 
 use super::overlay::{
     Modal, Placement, content_key, dismissal, dismissal_tx, push_anchored_modal, scrim_key, trigger_key,
@@ -14,9 +14,11 @@ use super::overlay::{
 use super::popover::fit_scroll_bar;
 use crate::{Kit, State, over};
 
-/// The listbox's tallest: its 4-point padding, six 30-point rows (28 tall, 2 apart), and most
-/// of the seventh, whose label shows fading under the edge.
-const LISTBOX_MAX_HEIGHT: f32 = 4.0 + 6.0 * 30.0 + 22.0;
+/// The listbox's tallest: its 4-point padding, six rows (2 points apart), and most of the
+/// seventh, whose label shows fading under the edge (206 points at the default 28-point row).
+fn listbox_max_height(row_height: f32) -> f32 {
+    4.0 + 6.0 * (row_height + 2.0) + (row_height - 6.0).max(0.0)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SelectAppearance {
@@ -63,6 +65,8 @@ pub struct Select {
     appearance: SelectAppearance,
     highlighted: Option<String>,
     placement: Placement,
+    backdrop_blur: Option<f32>,
+    surface_fill: Option<Color>,
     choose: Option<Choose>,
     step_key: Option<StepClosed>,
     toggle: Option<Box<dyn FnOnce(El) -> El>>,
@@ -88,6 +92,8 @@ impl Select {
             appearance: SelectAppearance::Inline,
             highlighted: None,
             placement: Placement::BottomEnd,
+            backdrop_blur: None,
+            surface_fill: None,
             choose: None,
             step_key: None,
             toggle: None,
@@ -199,6 +205,19 @@ impl Select {
         self.placement = p;
         self
     }
+    /// Blurs what the window draws behind the open listbox surface ([`El::backdrop_blur`](rune::El::backdrop_blur)),
+    /// overriding [`Kit::metrics`](crate::Kit::metrics)'s `popup_backdrop`. `0.0` turns blur off;
+    /// negative or non-finite values clamp to `0.0`.
+    pub fn backdrop_blur(mut self, sigma: f32) -> Self {
+        self.backdrop_blur = Some(crate::tokens::metrics::non_neg(sigma));
+        self
+    }
+    /// Replaces the open listbox's surface fill colour (for example a translucent tint over
+    /// [`Self::backdrop_blur`]), overriding the theme fill and `Kit::metrics.popup_backdrop`.
+    pub fn surface_fill(mut self, fill: Color) -> Self {
+        self.surface_fill = Some(fill);
+        self
+    }
     pub fn state(mut self, s: State) -> Self {
         self.state = s;
         self
@@ -289,6 +308,7 @@ impl Select {
             return trigger;
         }
         let c = &k.c;
+        let row_m = k.popup_row_metrics();
         let anchor_key = trigger_key(&self.key);
         // About six and three-quarter rows tall at most, so a longer list shows its next row's label
         // fading under the edge and reads as one that scrolls (hex#840); consecutive options
@@ -304,7 +324,7 @@ impl Select {
                     list = list.child(
                         row()
                             .key(format!("group{i}"))
-                            .h(28.0)
+                            .h(row_m.height)
                             .px(12.0)
                             .center_y()
                             .child(text(g).font(k.ty.small_medium).color(c.text_faint)),
@@ -320,12 +340,12 @@ impl Select {
                 .focus_selected(selected)
                 .label(o.clone())
                 .position_in_set(i + 1, count)
-                .h(28.0)
+                .h(row_m.height)
                 .pl(12.0)
                 .pr(6.0)
                 .gap(8.0)
                 .center_y()
-                .radius(4.0)
+                .radius(row_m.radius)
                 .mt(if after_item { 2.0 } else { 0.0 })
                 .child(
                     text(o.clone())
@@ -361,17 +381,16 @@ impl Select {
             .label(name)
             .focus_group()
             .focus_return(&anchor_key)
-            .max_h(LISTBOX_MAX_HEIGHT)
+            .max_h(listbox_max_height(row_m.height))
             .min_h(0.0)
             .shrink();
         let listbox = match self.menu_width {
             Some(w) => listbox.w(w),
             None => listbox.min_w(160.0).max_w(368.0),
         };
-        let content = k.elevate(
-            listbox.radius(6.0).fill(c.layer_01).child(fit_scroll_bar(k, &self.key, list)),
-            &k.elevation.floating,
-        );
+        let surface =
+            k.apply_popup_surface(listbox.radius(k.radius_md()), c.layer_01, self.backdrop_blur, self.surface_fill);
+        let content = k.elevate(surface.child(fit_scroll_bar(k, &self.key, list)), &k.elevation.floating);
         push_anchored_modal(k, layer, self.dismiss, content, &anchor_key, self.placement, 2.0);
         trigger
     }
@@ -386,6 +405,7 @@ impl Select {
             Some(v) => (v.clone(), if red { c.danger.fg } else { c.text_base }),
             None => (self.placeholder.clone(), if red { c.danger.fg } else { c.text_faint }),
         };
+        let sm = k.select_metrics();
         let chevron: &'static Icon = if self.open { k.glyph.chevron_up } else { k.glyph.chevron_down };
         // Named for what it chooses, its value the chosen option; the text and chevron inside
         // show the same.
@@ -420,7 +440,7 @@ impl Select {
                     .gap(4.0)
                     .radius(k.radius.sm)
                     .child(text(label).key("value").font(font).color(ink).truncate().a11y_hidden())
-                    .child(icon(chevron, 16.0).key("chevron").color(c.icon_muted).a11y_hidden());
+                    .child(icon(chevron, sm.chevron).key("chevron").color(c.icon_muted).a11y_hidden());
                 k.overlay_state(t, self.state, hover, !disabled)
             }
             SelectAppearance::Field => {
@@ -441,9 +461,9 @@ impl Select {
                             .a11y_hidden(),
                     )
                     .child(
-                        el().size(20.0, 20.0)
+                        el().size(sm.chevron_box, sm.chevron_box)
                             .center()
-                            .child(icon(chevron, 16.0).key("chevron").color(c.icon_muted))
+                            .child(icon(chevron, sm.chevron).key("chevron").color(c.icon_muted))
                             .a11y_hidden(),
                     );
                 // select.css:34-35, 100-108: a 1 point ring just inside the box, in place of the
@@ -461,7 +481,7 @@ impl Select {
                         t.focus_within_ring(1.0, -1.0, c.border_focus).focus_within_flat()
                     };
                     if self.state == State::Rest && !self.open {
-                        t = t.hover(c.hover);
+                        t = k.apply_hover_motion(t.hover(c.hover));
                     }
                 }
                 t

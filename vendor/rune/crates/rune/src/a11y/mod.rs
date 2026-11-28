@@ -1,10 +1,13 @@
 //! Accessibility on the OS side: each window and overlay gets an AccessKit platform adapter
-//! (UI Automation on Windows, NSAccessibility on macOS, AT-SPI on Linux). The adapter's
-//! handlers run wherever the OS calls them; they only queue what they heard and wake the host,
-//! whose thread then activates the runtime's tree (`a11y/tree.rs`), runs the actions
-//! and sends tree updates. Until a client asks, the runtime builds nothing.
+//! (UI Automation on Windows, NSAccessibility on macOS, AT-SPI on Linux, TalkBack on Android).
+//! The adapter's handlers run wherever the OS calls them; they only queue what they heard and
+//! wake the host, whose thread then activates the runtime's tree (`a11y/tree.rs`), runs the
+//! actions and sends tree updates. Until a client asks, the runtime builds nothing.
 #![cfg_attr(
-    not(all(feature = "accessibility", any(target_os = "windows", target_os = "macos", target_os = "linux"))),
+    not(all(
+        feature = "accessibility",
+        any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "android")
+    )),
     allow(dead_code)
 )]
 
@@ -17,14 +20,23 @@ use crate::runtime::Runtime;
 pub(crate) mod actions;
 #[cfg(test)]
 mod actions_tests;
+pub(crate) mod android;
 #[cfg(test)]
 mod aria_tests;
 #[cfg(test)]
 mod auto_complete_tests;
+#[cfg(test)]
+mod current_tests;
+#[cfg(test)]
+mod custom_actions_tests;
 pub(crate) mod dump;
 #[cfg(test)]
 mod dump_tests;
+#[cfg(test)]
+mod macos_tests;
 pub(crate) mod node;
+#[cfg(test)]
+mod role_description_tests;
 pub(crate) mod roles;
 #[cfg(test)]
 mod tests;
@@ -113,7 +125,7 @@ impl Shared {
     }
 }
 
-struct Activation(Arc<Shared>);
+pub(super) struct Activation(pub(super) Arc<Shared>);
 impl ActivationHandler for Activation {
     fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
         // The host's thread builds the tree on the wake; the adapter answers with a
@@ -123,7 +135,7 @@ impl ActivationHandler for Activation {
     }
 }
 
-struct Actions(Arc<Shared>);
+pub(super) struct Actions(pub(super) Arc<Shared>);
 impl ActionHandler for Actions {
     fn do_action(&mut self, request: ActionRequest) {
         self.0.push(|i| i.actions.push(request));
@@ -145,7 +157,7 @@ impl DeactivationHandler for Deactivation {
 /// its own client asks, and the update then holds the whole tree. Tests drive one in place of
 /// an OS adapter.
 pub struct AccessibilityLink {
-    shared: Arc<Shared>,
+    pub(super) shared: Arc<Shared>,
     adopted: bool,
 }
 
@@ -199,15 +211,18 @@ impl AccessibilityLink {
         self.receive(rt, name)
     }
 
-    fn receive(&mut self, rt: &mut crate::runtime::RuntimeCore, name: &str) -> bool {
+    pub(super) fn receive(&mut self, rt: &mut crate::runtime::RuntimeCore, name: &str) -> bool {
         self.adopt(rt);
         let inbox = self.take();
         let mut queued = false;
         if inbox.settings {
             let was_dirty = rt.commit.dirty;
             rt.set_system_reduced_motion(crate::platform::preferences::reduced_motion());
-            rt.set_system_contrast(crate::platform::preferences::contrast());
-            rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast());
+            let contrast = crate::platform::preferences::contrast();
+            rt.set_system_contrast(contrast);
+            rt.set_system_increased_contrast(crate::platform::preferences::increased_contrast_with(contrast.is_some()));
+            rt.set_system_text_scale(crate::platform::text_scale::current());
+            rt.set_system_reduced_transparency(crate::platform::preferences::reduced_transparency());
             queued |= !was_dirty && rt.commit.dirty;
         }
         match inbox.asked {
@@ -237,7 +252,7 @@ impl AccessibilityLink {
         queued
     }
 
-    fn update(&mut self, rt: &mut crate::runtime::RuntimeCore) -> Option<TreeUpdate> {
+    pub(super) fn update(&mut self, rt: &mut crate::runtime::RuntimeCore) -> Option<TreeUpdate> {
         self.adopt(rt);
         let started = log().then(crate::time::now);
         let update = rt.a11y_update()?;

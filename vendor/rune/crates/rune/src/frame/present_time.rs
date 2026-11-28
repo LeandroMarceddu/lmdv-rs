@@ -422,6 +422,7 @@ pub(crate) mod metal {
                 wake |= buf.watch;
             }
             if at > 0.0 {
+                record_first_on_display(at);
                 self.on_screen.fetch_max(seq, Ordering::AcqRel);
                 wake |= self.watch.load(Ordering::Acquire);
             }
@@ -483,6 +484,15 @@ pub(crate) mod metal {
         fn set_watch(&self, watch: bool) {
             self.callback_presented.lock().unwrap().watch = watch;
         }
+    }
+
+    /// Records the first presented drawable's real display time as `frame.first.on_display`.
+    fn record_first_on_display(media: f64) {
+        crate::marks::on_display(|| {
+            // SAFETY: CACurrentMediaTime has no preconditions.
+            let (now, media_now) = (crate::time::now(), unsafe { CACurrentMediaTime() });
+            instant_at(now, media_now, media)
+        });
     }
 
     /// The instant of host time `media` (CACurrentMediaTime seconds), given both clocks now.

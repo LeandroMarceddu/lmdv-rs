@@ -1,6 +1,6 @@
 //! [`MarkdownStyle`]: how markdown looks, and its builders.
 
-use rune::{Icon, Spring};
+use rune::{Anim, Icon, Spring};
 
 use super::*;
 use crate::tokens::palette::tint;
@@ -47,6 +47,10 @@ pub struct MarkdownStyle {
     pub(super) strong_weight: f32,
     pub(super) table_outline: Option<Color>,
     pub(super) table_rule: Color,
+    pub(super) table_col_rule: Option<Color>,
+    pub(super) table_row_hover: Option<Color>,
+    pub(super) hover_motion: Option<(Anim, Anim)>,
+    pub(super) table_shrink: TableShrink,
     pub(super) table_head_fill: Color,
     pub(super) table_head_text: Color,
     pub(super) table_head_rule: Option<Color>,
@@ -71,6 +75,8 @@ pub struct MarkdownStyle {
     pub(super) table_margin: [f32; 2],
     /// Space above and below a code block, a diff and a diagram (collapsed like `table_margin`).
     pub(super) code_margin: [f32; 2],
+    /// Space above and below a list, a quote and a rule, in that order (see `margin.rs`).
+    pub(super) block_margin: [[f32; 2]; 3],
     /// A wide table's scroll bar thumb, at rest and under the pointer (`None`: no bar).
     pub(super) table_bar: Option<[Color; 2]>,
     /// The text column's width, when the app knows it (see [`MarkdownStyle::text_width`]).
@@ -115,6 +121,7 @@ pub(super) struct TaskPaint {
     pub(super) check: &'static Icon,
     pub(super) radius: f32,
     pub(super) motion: Spring,
+    pub(super) hover_motion: Option<(Anim, Anim)>,
     /// The box's side, its left edge in the list's marker column, and its top below the
     /// item's (`None`: centred on the first line).
     pub(super) size: f32,
@@ -216,6 +223,10 @@ impl MarkdownStyle {
             strong_weight: 670.0,
             table_outline: Some(c.border_muted),
             table_rule: c.border_muted,
+            table_col_rule: None,
+            table_row_hover: None,
+            hover_motion: k.motion.hover,
+            table_shrink: TableShrink::Proportional,
             table_head_fill: c.layer_01,
             table_head_text: c.text_base,
             table_head_rule: None,
@@ -234,6 +245,7 @@ impl MarkdownStyle {
             image_margin: [24.0, 24.0],
             table_margin: [12.0, 16.0],
             code_margin: [12.0, 24.0],
+            block_margin: [[8.0, 12.0], [16.0, 16.0], [32.0, 32.0]],
             table_bar: None,
             text_width: None,
             prose_width: None,
@@ -270,6 +282,7 @@ impl MarkdownStyle {
                 check: k.glyph.check,
                 radius: k.radius.sm,
                 motion: k.motion.control,
+                hover_motion: k.motion.hover,
                 size: 16.0,
                 left: 8.0,
                 top: None,
@@ -730,6 +743,10 @@ impl std::hash::Hash for MarkdownStyle {
             strong_weight,
             table_outline,
             table_rule,
+            table_col_rule,
+            table_row_hover,
+            hover_motion,
+            table_shrink,
             table_head_fill,
             table_head_text,
             table_head_rule,
@@ -748,6 +765,7 @@ impl std::hash::Hash for MarkdownStyle {
             image_margin,
             table_margin,
             code_margin,
+            block_margin,
             table_bar,
             text_width,
             prose_width,
@@ -804,6 +822,9 @@ impl std::hash::Hash for MarkdownStyle {
         (
             table_outline,
             table_rule,
+            table_col_rule,
+            table_row_hover,
+            table_shrink,
             table_head_fill,
             table_head_text,
             table_head_rule,
@@ -822,6 +843,7 @@ impl std::hash::Hash for MarkdownStyle {
             image_margin.map(f32_bits),
             table_margin.map(f32_bits),
             code_margin.map(f32_bits),
+            block_margin.map(|m| m.map(f32_bits)),
         )
             .hash(state);
         table_frame.map(|TableFrame { fill, ring, pad }| (fill, ring, f32_bits(pad))).hash(state);
@@ -855,6 +877,7 @@ impl std::hash::Hash for MarkdownStyle {
             highlight_current_ring.map(|(c, w)| (c, f32_bits(w))),
         )
             .hash(state);
+        crate::tokens::kit::hash_anim_pair(hover_motion, state);
         let TaskPaint {
             fill_on,
             border_on,
@@ -866,6 +889,7 @@ impl std::hash::Hash for MarkdownStyle {
             check,
             radius,
             motion,
+            hover_motion: task_hover_motion,
             size,
             left,
             top,
@@ -884,6 +908,7 @@ impl std::hash::Hash for MarkdownStyle {
             f32_bits(motion.bounce),
         )
             .hash(state);
+        crate::tokens::kit::hash_anim_pair(task_hover_motion, state);
         (f32_bits(size), f32_bits(left), top.map(f32_bits)).hash(state);
         let DiagramPaint {
             text,

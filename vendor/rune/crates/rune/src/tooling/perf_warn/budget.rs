@@ -17,6 +17,9 @@ fn budget() -> Option<f64> {
 
 #[inline(always)]
 pub(crate) fn on() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    return false;
+    #[cfg(not(target_arch = "wasm32"))]
     budget().is_some()
 }
 

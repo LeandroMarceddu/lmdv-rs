@@ -9,4 +9,5 @@ pub(crate) mod present_time;
 pub(crate) mod present_worker;
 pub(crate) mod presented;
 pub(crate) mod profile;
+pub(crate) mod stage;
 pub(crate) mod surface_stats;

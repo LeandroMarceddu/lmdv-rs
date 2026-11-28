@@ -12,7 +12,7 @@
 //! - Per-element rounded clipping via `Compositor::CreateRectangleClipWithSidesAndRadius` (default)
 //!   or `CompositionGeometricClip` + `CompositionRoundedRectangleGeometry` (`RUNE_WIN_MATERIAL_CLIP=geo`)
 
-use super::{MAX_NATIVE_MATERIALS_CAP, MaterialDraw, Mode, SystemMaterial, assign};
+use super::{MAX_NATIVE_MATERIALS_CAP, MaterialDraw, MaterialParams, Mode, SystemMaterial, assign};
 use crate::machine::Effects;
 use rune_motion::NodeId;
 
@@ -212,36 +212,32 @@ impl ClipKind {
     }
 }
 
-/// Optional subtle tint visual placed over `CreateHostBackdropBrush` (`RUNE_WIN_MATERIAL_TINT`).
+/// Windows 11 backdrop brush / tint mode (`RUNE_WIN_MATERIAL_TINT`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum TintMode {
-    /// Raw `CreateHostBackdropBrush()` with no extra tint layer.
+    /// Microsoft's Windows 11 Acrylic Luminosity + Color `CompositionEffectBrush` (default).
+    /// Degrades gracefully to [`Self::Flat`] if `CreateEffectFactory` fails at runtime.
     #[default]
-    None,
-    /// Subtle light/dark neutral tint child visual for readability comparison.
-    Subtle,
+    Acrylic,
+    /// WCAG >=4.5:1 flat-tint `CompositionColorBrush` child visual over `HostBackdropBrush`
+    /// (diagnostic comparison and graceful fallback when `CreateEffectFactory` fails).
+    Flat,
+    /// Raw `CreateHostBackdropBrush()` with no Acrylic effect or tint layer (diagnostics).
+    Raw,
 }
 
 impl TintMode {
     pub(crate) fn parse(value: Option<&str>) -> Self {
         match value.map(str::trim) {
-            Some("subtle") => Self::Subtle,
-            _ => Self::None,
+            Some("flat" | "subtle") => Self::Flat,
+            Some("raw" | "none") => Self::Raw,
+            _ => Self::Acrylic,
         }
     }
 
     #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
     pub(crate) fn from_env() -> Self {
         Self::parse(rune_core::env::var("RUNE_WIN_MATERIAL_TINT").as_deref())
-    }
-}
-
-/// ARGB tint color for `TintMode::Subtle`, or `None` for `TintMode::None`.
-pub(crate) const fn tint_color(mode: TintMode, dark: bool) -> Option<[u8; 4]> {
-    match (mode, dark) {
-        (TintMode::None, _) => None,
-        (TintMode::Subtle, true) => Some([0x38, 0x20, 0x20, 0x22]),
-        (TintMode::Subtle, false) => Some([0x48, 0xFC, 0xFC, 0xFC]),
     }
 }
 
@@ -271,19 +267,35 @@ pub(crate) struct VisualSpec {
     pub opacity: f32,
     /// Active clip implementation (`Rectangle` or `Geometric`).
     pub clip: ClipKind,
-    /// Optional `[a, r, g, b]` tint visual color.
-    pub tint: Option<[u8; 4]>,
+    /// Element's requested `SystemMaterial` (selects the Windows 11 Acrylic recipe).
+    pub material: SystemMaterial,
+    /// Per-element appearance overrides (`El::system_material_with`).
+    pub params: MaterialParams,
+    /// Active dark theme flag (selects dark vs light Acrylic / flat-tint recipe).
+    pub dark: bool,
+    /// Active brush/tint mode (`Acrylic`, `Flat`, or `Raw`).
+    pub tint_mode: TintMode,
 }
 
 impl VisualSpec {
     /// Converts one `MaterialDraw` (already in physical pixels) into a `VisualSpec`.
-    pub(crate) fn from_draw(draw: MaterialDraw, clip: ClipKind, tint: Option<[u8; 4]>) -> Self {
+    pub(crate) fn from_draw(draw: MaterialDraw, clip: ClipKind, tint_mode: TintMode, dark: bool) -> Self {
         let w = draw.rect[2].max(0.0);
         let h = draw.rect[3].max(0.0);
         let max_r = w.min(h) * 0.5;
         let radius = if draw.radius.is_finite() { draw.radius.clamp(0.0, max_r) } else { 0.0 };
         let opacity = if draw.opacity.is_finite() { draw.opacity.clamp(0.0, 1.0) } else { 0.0 };
-        Self { offset: [draw.rect[0], draw.rect[1]], size: [w, h], radius, opacity, clip, tint }
+        Self {
+            offset: [draw.rect[0], draw.rect[1]],
+            size: [w, h],
+            radius,
+            opacity,
+            clip,
+            material: draw.material,
+            params: draw.params,
+            dark,
+            tint_mode,
+        }
     }
 }
 
@@ -300,6 +312,10 @@ pub(crate) enum State {
     /// A DWM or COM call failed on `hwnd`: rolled back to idle resources and latched failed for
     /// this HWND so later frames draw fallback fills with zero seam calls.
     Failed { hwnd: isize },
+    /// The single host-availability probe declared this host unable to run Windows 11
+    /// `HostBackdropBrush` materials (e.g. Windows 10 or Session 0 / headless runner): remembered
+    /// permanently so later frames draw fallback fills with zero probes or seam calls.
+    HostUnavailable,
 }
 
 /// Lifecycle events for the Windows system-material host state machine.
@@ -312,6 +328,9 @@ pub(crate) enum Event {
     PolicyChanged { policy: EffectsPolicy, had_materials: bool },
     /// Activation failed on `hwnd`: latch failed for this HWND and rebuild fallback if mounted.
     ActivationFailed { hwnd: isize, found: bool },
+    /// The single host-availability probe returned `Unavailable`: latch permanently for this
+    /// controller so later frames never retry the probe or touch `Handover`.
+    HostProbeUnavailable { found: bool },
     /// GPU device loss: tear down active visuals and clear any failure latch.
     DeviceLoss,
     /// Window or overlay teardown on close.
@@ -335,6 +354,7 @@ pub(crate) enum Effect {
 /// Pure state transition function for the Windows system-material lifecycle.
 pub(crate) fn step(state: &mut State, event: Event) -> Effects<Effect> {
     match (*state, event) {
+        (State::HostUnavailable, _) => Effects::none(),
         (State::Idle, Event::Frame { hwnd: Some(hwnd), inputs, found: true }) if eligible(inputs) => {
             *state = State::Active { hwnd };
             Effects::two(Effect::Activate { hwnd }, Effect::RebuildFrame)
@@ -371,6 +391,10 @@ pub(crate) fn step(state: &mut State, event: Event) -> Effects<Effect> {
             Effects::one(Effect::RequestRedraw)
         }
         (_, Event::PolicyChanged { .. }) => Effects::none(),
+        (_, Event::HostProbeUnavailable { found }) => {
+            *state = State::HostUnavailable;
+            if found { Effects::one(Effect::RebuildFrame) } else { Effects::none() }
+        }
         (_, Event::ActivationFailed { hwnd, found }) => {
             *state = State::Failed { hwnd };
             if found { Effects::one(Effect::RebuildFrame) } else { Effects::none() }
@@ -390,6 +414,11 @@ pub(crate) fn step(state: &mut State, event: Event) -> Effects<Effect> {
 /// Narrow seam isolating all Win32 DWM, DirectComposition target-slot switching, and
 /// `Windows.UI.Composition` operations for off-screen unit testing on every platform.
 pub(crate) trait WindowsMaterialSeam {
+    /// Runs the single host-availability probe before touching `Handover` or DWM.
+    /// Production overrides this with the cached OS probe; test mocks default to `Available`.
+    fn probe_host(&mut self) -> probe::HostAvailability {
+        probe::HostAvailability::Available { build: MIN_HOST_BACKDROP_BUILD }
+    }
     /// Moves Rune's DirectComposition swap-chain target (`Handover`) to `topmost` (`true` = above
     /// child/non-topmost targets, `false` = default slot).
     fn set_handover_topmost(&mut self, hwnd: isize, topmost: bool) -> Result<(), String>;
@@ -419,7 +448,7 @@ pub(crate) trait WindowsMaterialSeam {
     /// Removes and closes a spare pooled visual from the root visual.
     fn remove_visual(&mut self, slot_id: usize);
 
-    /// Initiates a composition commit (`Compositor::RequestCommitAsync`) right before
+    /// Initiates a composition commit (`Compositor::RequestCommitAsync`) right after
     /// `gpu.queue.present(frame)`.
     fn commit(&mut self) -> Result<(), String>;
 }
@@ -438,6 +467,7 @@ pub(crate) struct Controller {
     clip: ClipKind,
     tint: TintMode,
     pub(super) state: State,
+    host_availability: Option<probe::HostAvailability>,
     had_materials: bool,
     next_slot_id: usize,
     slots: Vec<PooledSlot>,
@@ -445,7 +475,16 @@ pub(crate) struct Controller {
 
 impl Controller {
     pub(crate) fn new(mode: Mode, clip: ClipKind, tint: TintMode) -> Self {
-        Self { mode, clip, tint, state: State::Idle, had_materials: false, next_slot_id: 0, slots: Vec::new() }
+        Self {
+            mode,
+            clip,
+            tint,
+            state: State::Idle,
+            host_availability: None,
+            had_materials: false,
+            next_slot_id: 0,
+            slots: Vec::new(),
+        }
     }
 
     pub(crate) fn mode(&self) -> Mode {
@@ -460,6 +499,11 @@ impl Controller {
     #[cfg(test)]
     pub(crate) fn state(&self) -> State {
         self.state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn host_availability(&self) -> Option<&probe::HostAvailability> {
+        self.host_availability.as_ref()
     }
 
     /// Called after layout/paint (before render) to activate or tear down native backdrop visuals.
@@ -481,6 +525,18 @@ impl Controller {
         for effect in effects {
             match effect {
                 Effect::Activate { hwnd } => {
+                    if self.host_availability.is_none() {
+                        self.host_availability = Some(seam.probe_host());
+                    }
+                    if let Some(avail @ probe::HostAvailability::Unavailable { .. }) = self.host_availability.as_ref() {
+                        eprintln!(
+                            "rune: Windows system material unavailable ({}); using fallback fill",
+                            avail.summary()
+                        );
+                        let fail_effects =
+                            step(&mut self.state, Event::HostProbeUnavailable { found: was_active && found });
+                        return fail_effects.into_iter().any(|e| e == Effect::RebuildFrame);
+                    }
                     if let Err(err) = self.activate(hwnd, seam) {
                         eprintln!("rune: Windows system material activation failed: {err}");
                         // Only request a fallback rebuild when we were previously active (switching
@@ -516,17 +572,24 @@ impl Controller {
         redraw
     }
 
-    /// Syncs pooled visuals to `draws` (physical pixels) right before `gpu.queue.present(frame)`.
+    /// Presents the swap chain first, then syncs pooled visuals to `draws` (physical pixels) and
+    /// requests a composition commit (`Compositor::RequestCommitAsync`).
+    ///
+    /// Queuing `IDXGISwapChain::Present` before updating `SpriteVisual`s and calling
+    /// `RequestCommitAsync` prevents DWM from committing frame N's backdrop ahead of frame N's
+    /// swap-chain flip (which caused the blur to lean ~1 frame ahead during fast springs).
     ///
     /// Returns `true` if native materials remain active (or were already idle), or `false` if a
     /// COM/DWM error forced a rollback to fallback fills (caller should clear `native_materials`
     /// and schedule a redraw).
-    pub(crate) fn sync_before_present(
+    pub(crate) fn present(
         &mut self,
         draws: &[MaterialDraw],
         dark: bool,
         seam: &mut impl WindowsMaterialSeam,
+        present: impl FnOnce(),
     ) -> bool {
+        present();
         let State::Active { hwnd } = self.state else {
             return true;
         };
@@ -540,7 +603,6 @@ impl Controller {
         let assigned = assign(&views, &wanted);
         let mut taken = vec![false; self.slots.len()];
         let mut changed = false;
-        let tint = tint_color(self.tint, dark);
 
         for (draw, (at, &(material, id))) in draws.iter().zip(assigned.into_iter().zip(&wanted)) {
             let k = match at {
@@ -560,7 +622,7 @@ impl Controller {
             taken[k] = true;
             let slot = &mut self.slots[k];
             slot.owner = Some(id);
-            let spec = VisualSpec::from_draw(*draw, self.clip, tint);
+            let spec = VisualSpec::from_draw(*draw, self.clip, self.tint, dark);
             if slot.last_spec != Some(spec) {
                 if let Err(err) = seam.update_visual(slot.id, spec) {
                     self.rollback_and_latch(hwnd, &err, seam);
@@ -670,15 +732,21 @@ impl Controller {
     }
 }
 
+pub(crate) mod acrylic;
 #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
 mod policy;
+pub(crate) mod probe;
 #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
 mod real;
 
 #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
-pub(crate) use policy::{current_policy, notify_wm_setting_change, set_policy_waker};
+pub(crate) use policy::{advanced_effects_if_started, current_policy, notify_wm_setting_change, set_policy_waker};
 #[cfg(all(target_os = "windows", feature = "windows-system-material"))]
 pub(crate) use real::Materials;
 
+#[cfg(test)]
+mod acrylic_tests;
+#[cfg(test)]
+mod probe_tests;
 #[cfg(test)]
 mod tests;

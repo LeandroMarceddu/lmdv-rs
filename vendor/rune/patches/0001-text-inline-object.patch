@@ -1,7 +1,7 @@
 --- a/crates/rune/Cargo.toml
 +++ b/crates/rune/Cargo.toml
-@@ -296,6 +296,12 @@
- name = "measure_scope"
+@@ -340,6 +340,12 @@
+ name = "setup_measure"
  
  [[test]]
 +name = "inline_image_layout"
@@ -15,7 +15,7 @@
  [[test]]
 --- a/crates/rune/src/runtime/paint/content.rs
 +++ b/crates/rune/src/runtime/paint/content.rs
-@@ -680,6 +680,7 @@
+@@ -740,6 +740,7 @@
              let mut pill_icons = Vec::new();
              let mut pill_images = Vec::new();
              let mut bare_all = Vec::new();
@@ -23,7 +23,7 @@
              let pill_bg = spec.cold.pill_colors.map_or(spec.rich_style().link.alpha(0.2), |(bg, _)| bg);
              for piece in flow.pieces_in(rows.start, rows.end) {
                  let layout = piece.layout;
-@@ -731,6 +732,16 @@
+@@ -791,6 +792,16 @@
                      crate::text::bare_icons(layout, &pills, s, d_origin, &mut bare);
                      bare_all.extend(bare.into_iter().map(|(k, at, px)| (pills[k].clone(), at, px)));
                  }
@@ -40,7 +40,7 @@
              }
              if !spec.cold.highlights.is_empty() {
                  let drawn = n.elided.map(|e| e.highlights(&spec.cold.highlights));
-@@ -886,6 +897,38 @@
+@@ -946,6 +957,38 @@
                  let visible = shown_x[1] > shown_x[0]
                      && shown[1] > shown[0]
                      && rect[2] > 0.0
@@ -372,7 +372,7 @@
 +}
 --- a/crates/rune-kit/src/markdown/memo.rs
 +++ b/crates/rune-kit/src/markdown/memo.rs
-@@ -473,7 +473,7 @@
+@@ -471,7 +471,7 @@
  
  /// Compiler-checked destructuring of every [`Span`] field.
  fn hash_span(sp: &Span, h: &mut impl Hasher) {
@@ -381,7 +381,7 @@
      (
          start,
          end,
-@@ -487,6 +487,10 @@
+@@ -485,6 +485,10 @@
          italic,
      )
          .hash(h);
@@ -414,27 +414,35 @@
      }
  
      /// What [`Self::affects_layout`] depends on, hashed into a layout's key.
-@@ -84,8 +90,19 @@
+@@ -78,7 +84,17 @@
+     }
+
+     /// Non-range fields that affect shaping, line metrics, or decorations.
+-    pub(crate) fn layout_attr_key(&self) -> (bool, Option<u32>, Option<u32>, bool, bool, Option<u32>, bool) {
++    ///
++    /// Paragraph-key reuse compares this directly (`paragraphs/keying.rs`), so the image's
++    /// pixels and geometry and the rise's bits are part of it: a changed formula must never
++    /// reuse a layout shaped for another picture or baseline.
++    #[allow(clippy::type_complexity)]
++    pub(crate) fn layout_attr_key(
++        &self,
++    ) -> (bool, Option<u32>, Option<u32>, bool, bool, Option<u32>, bool, u32, Option<((u64, u64), [u32; 4])>) {
++        let image = self.image.as_deref().map(|i| {
++            (i.pixels.signature(), [i.width.to_bits(), i.height.to_bits(), i.ascent.to_bits(), i.descent.to_bits()])
++        });
+         (
+             self.mono,
+             self.weight.map(f32::to_bits),
+@@ -87,6 +103,8 @@
              self.bg.is_some(),
              self.bg.map(|_| self.bg_pad.to_bits()),
              self.underline.is_some(),
 +            self.rise.to_bits(),
++            image,
          )
-             .hash(h);
-+        if let Some(image) = &self.image {
-+            (
-+                image.pixels.signature(),
-+                image.width.to_bits(),
-+                image.height.to_bits(),
-+                image.ascent.to_bits(),
-+                image.descent.to_bits(),
-+            )
-+                .hash(h);
-+        }
      }
  
-     /// A rounded `color` background padded by `pad` points, as inline code draws.
-@@ -99,6 +116,108 @@
+@@ -101,6 +119,108 @@
          self.underline = Some(color);
          self
      }
@@ -543,22 +551,23 @@
  }
  
  /// Non-empty spans in `spans` that change shaping, line metrics or painted decorations.
-@@ -213,6 +332,11 @@
+@@ -236,6 +356,12 @@
  /// shifted left once, with the low bit set on the trailing spacer.
  pub(crate) const SPAN_BOX: u64 = 1 << 61;
  
 +/// Tags an inline image's box: the rest of the id is the image span's index in the layout's
-+/// spans (see [`Span::image`]). A bit of its own: `SPAN_BOX` and `INLINE_BOX` already sit at
-+/// `1 << 61` and `1 << 60`, and `cursor.rs`, `line_break.rs` and `pill_chips.rs` read those.
-+pub(crate) const IMAGE_BOX: u64 = 1 << 59;
++/// spans (see [`Span::image`]). Its own bit: `PILL_BOX`, `PILL_BARE`, `SPAN_BOX` and
++/// `INLINE_BOX` already sit at `1 << 62`, `1 << 59`, `1 << 61` and `1 << 60`, and
++/// `cursor.rs`, `line_break.rs` and `pill_chips.rs` read those. `1 << 58` is free.
++pub(crate) const IMAGE_BOX: u64 = 1 << 58;
 +
  /// Tags in-flow element [`InlineBox`] slots: the lower bits carry the index into the slice of
  /// [`InlineBoxRun`]s passed to shaping.
  #[doc(hidden)]
-@@ -522,6 +646,14 @@
-             if s.underline.is_some() {
+@@ -546,6 +672,14 @@
                  m.underline = s.underline;
              }
+             m.italic |= s.italic;
 +            // An image draws at its span's first byte: the interval starting there keeps it,
 +            // and the rest of a split span keeps its look but no second copy of the image.
 +            if s.image.is_some() && a == s.start {
@@ -567,10 +576,10 @@
 +            if s.rise != 0.0 {
 +                m.rise = s.rise;
 +            }
-             m.italic |= s.italic;
          }
          if let Some(m) = merged {
-@@ -535,6 +667,8 @@
+             if let Some(last) = out.last_mut()
+@@ -558,6 +692,8 @@
                  && last.bg_pad == m.bg_pad
                  && last.underline == m.underline
                  && last.italic == m.italic
@@ -585,15 +594,15 @@
  use crate::fonts::{language, system_weight};
  use crate::raster::synthetic_bold;
  use crate::{
--    Entry, HIDDEN_SIZE, INLINE_BOX, Ink, InlineAlign, InlineBoxRun, Keep, PILL_BOX, PillChip, PillMetrics, SPAN_BOX,
--    Span, SpanBoxRun, TextSystem, Trak, family_list, font_trak, mono_tab_stops, named_list, shape_key,
-+    Entry, HIDDEN_SIZE, IMAGE_BOX, INLINE_BOX, Ink, InlineAlign, InlineBoxRun, Keep, OBJECT_REPLACEMENT, PILL_BOX,
-+    PillChip, PillMetrics, SPAN_BOX, Span, SpanBoxRun, TextSystem, Trak, family_list, font_trak, mono_tab_stops,
-+    named_list, shape_key,
+-    Entry, HIDDEN_SIZE, INLINE_BOX, Ink, InlineAlign, InlineBoxRun, Keep, PILL_BARE, PILL_BOX, PillChip, PillMetrics,
+-    SPAN_BOX, Span, SpanBoxRun, TextSystem, Trak, family_list, font_trak, mono_tab_stops, named_list, shape_key,
++    Entry, HIDDEN_SIZE, IMAGE_BOX, INLINE_BOX, Ink, InlineAlign, InlineBoxRun, Keep, OBJECT_REPLACEMENT, PILL_BARE,
++    PILL_BOX, PillChip, PillMetrics, SPAN_BOX, Span, SpanBoxRun, TextSystem, Trak, family_list, font_trak,
++    mono_tab_stops, named_list, shape_key,
  };
  use rune_core::tok::{Family, OpticalSize, TextStyle};
  
-@@ -133,6 +134,21 @@
+@@ -152,6 +153,21 @@
                      .then_some((i, r, lead, trail))
              })
              .collect();
@@ -614,8 +623,8 @@
 +        let image_ranges = image_ranges(text, spans);
          let indented = has_indented_blocks || !pills.is_empty() || !padded_boxes.is_empty();
          let break_lines = |layout: &mut Layout<Ink>| {
-             line_break::break_new(layout, text, blocks, text_indent, indented, style.size, scale, max_width, pretty)
-@@ -168,10 +184,12 @@
+             line_break::break_new(
+@@ -198,10 +214,12 @@
          let widen = if tabs.is_empty() { Vec::new() } else { self.mono_tab_widening(&tabs, spans, style, scale) };
          // Parley has no tab stops and fonts draw a tab as a missing glyph (or nothing): shape it
          // as a space, one byte like the tab, so every byte range still holds. Monospace tabs
@@ -631,7 +640,7 @@
              spaced.as_str()
          } else {
              text
-@@ -467,6 +485,9 @@
+@@ -497,6 +515,9 @@
                  if let Some(v) = span_spacing[i] {
                      b.push(StyleProperty::LetterSpacing(v), r.clone());
                  }
@@ -641,9 +650,9 @@
              }
              for (range, w) in weights {
                  b.push(StyleProperty::FontWeight(FontWeight::new(*w)), range.clone());
-@@ -522,6 +543,20 @@
-                     });
-                 }
+@@ -583,6 +604,20 @@
+                     vertical_align,
+                 });
              }
 +            // An image's room: its box carries the picture's width and the room it asks above
 +            // and below the baseline, so the picture sits on the text's baseline at its own
@@ -659,10 +668,10 @@
 +                    vertical_align: parley::VerticalAlign::length(*rise),
 +                });
 +            }
-             // Horizontal spacers for padded `SpanBox` ranges reserve room in the line
-             // without changing UTF-8 byte offsets.
-             for (i, r, lead, trail) in &padded_boxes {
-@@ -631,3 +666,50 @@
+             let mut layout: Layout<Ink> = b.build(text);
+             break_lines(&mut layout);
+             layout
+@@ -662,3 +697,50 @@
          l
      }
  }
@@ -752,7 +761,7 @@
  /// word after it; an image replacing its label fills its box on the baseline.
 --- a/crates/rune-text/src/lib.rs
 +++ b/crates/rune-text/src/lib.rs
-@@ -147,6 +147,8 @@
+@@ -151,6 +151,8 @@
  #[doc(hidden)]
  pub use layout::pill_chips::bare_icons;
  #[doc(hidden)]
@@ -761,7 +770,7 @@
  pub use layout::pill_chips::pill_chips;
  #[doc(hidden)]
  pub use layout::pill_chips::pill_chips_with_images;
-@@ -167,8 +169,10 @@
+@@ -171,8 +173,10 @@
  pub use layout::span::InlineBox;
  #[doc(hidden)]
  pub use layout::span::InlineBoxRun;
@@ -772,12 +781,12 @@
  #[doc(hidden)]
  pub use layout::span::PillChip;
  #[doc(hidden)]
-@@ -268,7 +272,7 @@
+@@ -277,7 +281,7 @@
  use layout::decorations::Decoration;
  use layout::id::LayoutIds;
  use layout::rich::mono_tab_stops;
--use layout::span::{HIDDEN_SIZE, PILL_BOX, SPAN_BOX, is_hidden_size};
-+use layout::span::{HIDDEN_SIZE, IMAGE_BOX, PILL_BOX, SPAN_BOX, is_hidden_size};
+-use layout::span::{HIDDEN_SIZE, PILL_BARE, PILL_BOX, SPAN_BOX, is_hidden_size, pill_index};
++use layout::span::{HIDDEN_SIZE, IMAGE_BOX, PILL_BARE, PILL_BOX, SPAN_BOX, is_hidden_size, pill_index};
  use layout::{cursor, hash, line_break, line_metrics, span};
  use raster::{macos, support, windfoil, windows};
  

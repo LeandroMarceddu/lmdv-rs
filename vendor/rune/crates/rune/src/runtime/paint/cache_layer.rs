@@ -68,6 +68,7 @@ pub(in crate::runtime) enum RasterPass {
 pub(in crate::runtime) struct CachedMaterial {
     pub(in crate::runtime) id: NodeId,
     pub(in crate::runtime) material: crate::SystemMaterial,
+    pub(in crate::runtime) params: crate::MaterialParams,
     /// `[x - origin_x, y - origin_y, width, height]` at `raster_scale`.
     pub(in crate::runtime) rel_rect: [f32; 4],
     /// Clamped corner radius at `raster_scale`.
@@ -75,6 +76,9 @@ pub(in crate::runtime) struct CachedMaterial {
     pub(in crate::runtime) continuous: bool,
     /// Opacity relative to the cached layer's outer `effective_opacity`.
     pub(in crate::runtime) rel_opacity: f32,
+    /// Whether this material had a non-opaque authored fill eligible for Windows Acrylic visuals.
+    #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+    pub(in crate::runtime) windows_backdrop: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -187,7 +191,13 @@ impl RuntimeCore {
                 let c = ring.color;
                 [ring.width, ring.offset, c.r, c.g, c.b, c.a].map(f32::to_bits).hash(&mut h);
             }
-            (self.paint.srgb_blend, self.text.smoothing, self.text.families(), crate::text::icon::swap_id())
+            (
+                self.paint.srgb_blend,
+                self.text.smoothing,
+                self.text.families(),
+                crate::text::icon::swap_id(),
+                self.host.system_reduced_transparency,
+            )
                 .hash(&mut h);
             h.write_u32(s.to_bits());
             sel_ranges.hash(&mut h);
@@ -262,6 +272,7 @@ impl RuntimeCore {
                     // A publication or animation frame can replace texels without moving the
                     // atlas slot, so identical image primitives do not imply identical raster contents.
                     || n.vis.pixels.is_some()
+                    || n.vis.web_image.is_some()
                     || n.text.as_ref().is_some_and(|t| t.cold.pills.iter().any(crate::text::PillChip::has_image))
                     || n.vis.surface.is_some()
                     // Native material views (macOS, opt-in Windows) and Wayland compositor blur
@@ -354,7 +365,7 @@ impl state::PaintState {
                         continue;
                     }
                     if self.materials.len() < self.max_native_materials {
-                        self.materials.push(crate::system_material::MaterialDraw {
+                        let replayed = crate::system_material::MaterialDraw {
                             id: m.id,
                             material: m.material,
                             rect: [
@@ -366,7 +377,13 @@ impl state::PaintState {
                             radius: m.radius * k,
                             continuous: m.continuous,
                             opacity,
-                        });
+                            params: m.params,
+                        };
+                        self.materials.push(replayed);
+                        #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+                        if m.windows_backdrop {
+                            self.windows_material_draws.push(replayed);
+                        }
                     } else {
                         self.material_fallbacks.push(m.id);
                     }
@@ -530,10 +547,13 @@ impl state::PaintState {
             cached_materials.push(CachedMaterial {
                 id: draw.id,
                 material: draw.material,
+                params: draw.params,
                 rel_rect: [draw.rect[0] - ac.origin[0], draw.rect[1] - ac.origin[1], draw.rect[2], draw.rect[3]],
                 radius: draw.radius,
                 continuous: draw.continuous,
                 rel_opacity: (draw.opacity * inv_opacity).clamp(0.0, 1.0),
+                #[cfg(any(test, all(target_os = "windows", feature = "windows-system-material")))]
+                windows_backdrop: self.windows_material_draws.iter().any(|w| w.id == draw.id),
             });
         }
         cached_fallbacks.extend_from_slice(&self.material_fallbacks[ac.fallback_start..]);

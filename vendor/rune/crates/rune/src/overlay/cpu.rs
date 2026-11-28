@@ -409,13 +409,14 @@ impl super::OverlayCore {
         if let Some(p) = super::placement::position(event_loop, self.at, &self.options) {
             attrs = attrs.with_position(p);
         }
-        let window = match event_loop.create_window(attrs) {
-            Ok(window) => std::sync::Arc::new(window),
-            Err(error) => {
-                self.fail(app, format!("could not create its window: {error}"));
-                return false;
-            }
-        };
+        let window =
+            match crate::platform::win32::dark_mode::with_system_theme_query(|| event_loop.create_window(attrs)) {
+                Ok(window) => std::sync::Arc::new(window),
+                Err(error) => {
+                    self.fail(app, format!("could not create its window: {error}"));
+                    return false;
+                }
+            };
         crate::window::displays::track(&window);
         self.dark = window.theme().map_or_else(
             || crate::platform::preferences::desktop_dark(&window).unwrap_or(true),
@@ -464,7 +465,7 @@ impl super::OverlayCore {
             rt.set_viewport(self.at.size, scale);
             rt.set_renderer_kind(RendererKind::Cpu);
             #[cfg(feature = "windows-system-material")]
-            rt.paint.set_native_materials(false);
+            rt.paint.set_windows_acrylic_materials(false);
         }
         *self.shared.surface.lock().unwrap() = Some(format_surface_description(None));
         self.place_window(app.rt_mut(), event_loop, &window);
@@ -513,7 +514,9 @@ impl super::OverlayCore {
         eprintln!("rune: overlay {} CPU layered setup failed ({error}); falling back to GPU", self.name);
         self.cpu_layered_failed = true;
         self.release_cpu();
-        app.rt_mut().set_renderer_kind(RendererKind::Gpu);
+        let rt = app.rt_mut();
+        rt.set_renderer_kind(RendererKind::Gpu);
+        rt.images.set_backing(crate::pixels::Backing::Gpu);
         self.prepare(app, event_loop, showing);
     }
 
@@ -585,6 +588,7 @@ impl super::OverlayCore {
         super::frame::record_presented(false);
         let effects = self.presence.step(super::presence::Event::Show, self.release);
         self.carry_out(app, effects);
+        self.after_hidden_shown(app);
         self.publish_screen_transform(app.rt());
         self.hidden_pace.reset();
         self.backoff_step(crate::window::BackoffEvent::Revealed);

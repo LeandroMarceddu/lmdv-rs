@@ -1,6 +1,7 @@
 //! Leaf content painting inside a box: vector shapes, images, icons and rich text.
 use super::*;
 
+#[derive(Clone, Copy)]
 pub(in crate::runtime) struct LeafBox {
     pub r: [f32; 4],
     pub r_exact: [f32; 4],
@@ -8,6 +9,15 @@ pub(in crate::runtime) struct LeafBox {
     /// containment's rounding in: Blink's text lays out from the exact place.
     pub exact_off: [f32; 2],
     pub raw_size: [f32; 2],
+    /// Exact window-point top-left of this element (with scroll/transforms applied), for snapping
+    /// `Shape::rect` / `Shape::rounded_rect` edges identically to child boxes.
+    pub origin_pt: [f32; 2],
+    /// Laid-out `[width, height]` in points (with growth-row height), passed to `El::shape_with`.
+    pub shape_size: [f32; 2],
+    /// Inherited rigid translation in device px (scrolls, sticky shifts, growth rows, containment).
+    pub rigid: [f32; 2],
+    /// Whether pixel snapping is active for this node.
+    pub snaps: bool,
     /// The paint containment's origin above (`El::paint_contained`), device px: what draws
     /// from its exact box's origin rounds against it, as Blink rounds inside it.
     pub contain: [f32; 2],
@@ -51,7 +61,7 @@ impl RuntimeCore {
         sel_ranges: &[(usize, usize, usize)],
         mark_ranges: &[(usize, usize, usize)],
         glyph_count: &mut usize,
-    ) {
+    ) -> Option<usize> {
         let s = self.env.scale;
         let srgb = self.paint.srgb_blend;
         let now = self.t;
@@ -60,6 +70,10 @@ impl RuntimeCore {
             r_exact,
             exact_off,
             raw_size,
+            origin_pt,
+            shape_size,
+            rigid,
+            snaps,
             contain,
             radii,
             sc,
@@ -112,16 +126,20 @@ impl RuntimeCore {
         let n = &self.tree.nodes[i];
         let group = group_lit(&self.scene, n, group);
         let text_tint = |c: Color| paint_tracks::press_tint(paint_tracks::group_tint(n, c, group), press_to, pressed);
-        if let Some(shape) = &n.vis.shape {
-            // At rest a shape draws from its exact box's origin rounded to the device grid, at its
-            // exact scale, as Chromium draws a canvas or an inline SVG: what it holds keeps its
-            // geometry against the grid, so a sheet's 1 px header line covers the same device rows
-            // (one whole and half the next at 1.5x) wherever the sheet sits. Moving or scaled, it
-            // stays centred in its snapped box, sharing the centre fills, borders and icons use, so
-            // a glide or a swap to an icon doesn't wobble. A view-boxed shape stretches to the box.
+        if let Some(shape) = n.vis.resolve_shape(shape_size, s) {
+            // At rest a shape draws from its exact box's origin rounded to the device grid against
+            // its rigid translation (paint containment and scroll), at its exact scale, as Chromium
+            // draws a canvas or an inline SVG: what it holds keeps its geometry against the grid,
+            // so a sheet's 1 px header line covers the same device rows (one whole and half the
+            // next at 1.5x) wherever the sheet sits, and scrolled shapes move with their box's
+            // rounded scroll shift. Moving or scaled, it stays centred in its snapped box, sharing
+            // the centre fills, borders and icons use, so a glide or a swap to an icon doesn't
+            // wobble. A view-boxed shape stretches to the box. `Shape::rect` / `rounded_rect` ops
+            // snap all four edges independently in window space like box fills when at rest and
+            // unscaled with pixel snapping enabled.
             let still = cover.is_none() && scale_motion == ScaleMotion::Still && !gliding && (sc - 1.0).abs() < 1e-5;
             let at = if still {
-                [on_grid(r_exact[0], contain[0]), on_grid(r_exact[1], contain[1])]
+                [on_grid(r_exact[0], rigid[0]), on_grid(r_exact[1], rigid[1])]
             } else {
                 [r[0] + (w - w_exact) * 0.5, r[1] + (h - h_exact) * 0.5]
             };
@@ -129,14 +147,35 @@ impl RuntimeCore {
                 Some([vw, vh]) => ([r[0], r[1]], [w / vw, h / vh]),
                 None => (at, [k_px, k_px]),
             };
+            let rect_snap = if snaps && still {
+                paint::shape::RectSnap::Window { origin_pt: shape.view_box.is_none().then_some(origin_pt), s, rigid }
+            } else {
+                let exact_origin = match shape.view_box {
+                    Some(_) => [r[0], r[1]],
+                    None if still => [r_exact[0], r_exact[1]],
+                    None => at,
+                };
+                paint::shape::RectSnap::Exact { origin: exact_origin }
+            };
             if let Some(t) = self.scene.get(node_id, P_TRIM) {
                 // A presence draw traces the trimmed span on from its start.
                 let end = t.x + (t.y - t.x) * draw;
-                push_shape(&mut self.instances, &shape.trimmed(t.x, end), origin, k, k_px, o, srgb, clip, fade);
+                push_shape(
+                    &mut self.instances,
+                    &shape.trimmed(t.x, end),
+                    origin,
+                    k,
+                    k_px,
+                    rect_snap,
+                    o,
+                    srgb,
+                    clip,
+                    fade,
+                );
             } else if draw < 1.0 {
-                push_shape(&mut self.instances, &shape.drawn(draw), origin, k, k_px, o, srgb, clip, fade);
+                push_shape(&mut self.instances, &shape.drawn(draw), origin, k, k_px, rect_snap, o, srgb, clip, fade);
             } else {
-                push_shape(&mut self.instances, shape, origin, k, k_px, o, srgb, clip, fade);
+                push_shape(&mut self.instances, &shape, origin, k, k_px, rect_snap, o, srgb, clip, fade);
             }
         }
         if w > 0.0
@@ -335,7 +374,12 @@ impl RuntimeCore {
             {
                 self.push_icon(icon_inst(&q, pos, drawn, turn, premul(color, o, srgb), clip, fade));
             }
+        } else if n.text.as_deref().is_some_and(|t| t.positioned().is_some()) {
+            let text_start = self.instances.len();
+            self.paint_positioned_text(i, &b, text_color, sel_ranges, mark_ranges);
+            return Some(text_start);
         } else if let (Some(spec), Some(laid)) = (&n.text, &n.text_layout) {
+            let text_start = self.instances.len();
             let flow = laid.view();
             let link_fx = link_fx.unwrap();
             let color = text_tint(text_color.unwrap());
@@ -406,6 +450,9 @@ impl RuntimeCore {
                 ([0.0; 2], [0.0; 2])
             };
             let mut clip = clip;
+            let mut shown = shown;
+            let mut shown_x = shown_x;
+            let mut text_fades = false;
             if let Some(inp) = n.input.as_ref().filter(|i| i.single_line)
                 && let Some(layout) = laid.single()
             {
@@ -421,13 +468,27 @@ impl RuntimeCore {
                 origin[0] -= scroll;
                 if layout.full_width() * tk > x1 - x0 {
                     clip = [clip[0].max(x0), clip[1], clip[2].min(x1), clip[3]];
+                    if clip[2] <= clip[0] || clip[3] <= clip[1] {
+                        self.text.set_emit(crate::text::outline::Emit::Atlas);
+                        return None;
+                    }
                 }
             } else if let Some(tc) = self.truncate_clip(i, (r, r_exact), sc, clip) {
                 if tc[2] <= tc[0] || tc[3] <= tc[1] {
                     self.text.set_emit(crate::text::outline::Emit::Atlas);
-                    return;
+                    return None;
                 }
                 clip = tc;
+                shown_x = [shown_x[0].max(tc[0]), shown_x[1].min(tc[2])];
+            } else if let Some((tc, _, overflows)) = self.text_clip(i, (r, r_exact), sc, clip) {
+                if tc[2] <= tc[0] || tc[3] <= tc[1] {
+                    self.text.set_emit(crate::text::outline::Emit::Atlas);
+                    return None;
+                }
+                clip = tc;
+                shown = [shown[0].max(tc[1]), shown[1].min(tc[3])];
+                shown_x = [shown_x[0].max(tc[0]), shown_x[1].min(tc[2])];
+                text_fades = spec.truncate_fade && overflows;
             }
             let rest_origin = [origin[0] - off[0], origin[1] - off[1]];
             // Paragraph block backgrounds, quote bars and list markers.
@@ -616,8 +677,7 @@ impl RuntimeCore {
                     let (from, to) = (shown_a.min(e.text.len()), shown_b.min(e.text.len()));
                     let found = if cfg!(any(
                         target_os = "windows",
-                        target_arch = "wasm32",
-                        all(target_os = "linux", feature = "hunspell")
+                        all(any(target_os = "linux", target_arch = "wasm32"), feature = "hunspell")
                     )) && (from > 0 || to < e.text.len())
                         && e.text.is_char_boundary(from)
                         && e.text.is_char_boundary(to)
@@ -1058,6 +1118,7 @@ impl RuntimeCore {
                         s,
                         clip,
                         fade,
+                        if text_fades { text_start } else { 0 },
                     );
                     if let Some(c) = ink {
                         selected_ink = Some((a, b, premul(c, o, srgb)));
@@ -1299,7 +1360,14 @@ impl RuntimeCore {
                     self.paint.text_quads.insert(node, piece_index, layout_id, d);
                 }
             }
-            if let Some(c) = caret {
+            if let Some(c) = caret
+                && c[2] > 0.0
+                && c[3] > 0.0
+                && c[0] + c[2] > clip[0]
+                && c[0] < clip[2]
+                && c[1] + c[3] > clip[1]
+                && c[1] < clip[3]
+            {
                 let caret_color = match &n.input {
                     Some(inp) => {
                         if inp.caret_inked {
@@ -1324,7 +1392,9 @@ impl RuntimeCore {
                 );
             }
             self.text.set_emit(crate::text::outline::Emit::Atlas);
+            return Some(text_start);
         }
+        None
     }
 
     fn push_icon(&mut self, inst: Instance) {
@@ -1400,8 +1470,9 @@ impl RuntimeCore {
         // isn't clipped by either.
         let exact = r_exact[2] - r_exact[0] - ins[0] - ins[2];
         let laid_out = (n.local.w - n.inset[0] - n.inset[2]).max(0.0) * s;
-        let overflows = layout.full_width() > laid_out + 0.5
-            && layout.full_width() * sc > (bounds[2] - bounds[0]).max(exact) + 0.5 * sc;
+        let overflows = (laid_out <= 0.0 && layout.full_width() > 0.0)
+            || (layout.full_width() > laid_out + 0.5
+                && layout.full_width() * sc > (bounds[2] - bounds[0]).max(exact) + 0.5 * sc);
         // A right-to-left paragraph runs out past its left edge.
         match (overflows, crate::el::Flow::of_layout(layout)) {
             (true, _) => {}
@@ -1411,17 +1482,20 @@ impl RuntimeCore {
         Some((intersect(clip, bounds), bounds, overflows))
     }
 
-    /// Text-only clipping leaves the box's fill/border and descendants untouched.
+    /// Text-only clipping leaves the box's fill/border and descendants untouched, while clipping
+    /// and fading every primitive emitted by the text leaf itself (glyphs, selection highlights,
+    /// marks, decorations, inline images/icons, and carets).
     pub(in crate::runtime) fn clip_text_instances(
         &mut self,
         i: usize,
-        first_instance: usize,
+        text_start: Option<usize>,
         (r, r_exact): ([f32; 4], [f32; 4]),
         sc: f32,
         clip: [f32; 4],
         fade: [f32; 4],
         fade_origin: [f32; 4],
     ) {
+        let Some(text_start) = text_start else { return };
         let s = self.env.scale;
         if let Some((text_clip, bounds, overflows)) = self.text_clip(i, (r, r_exact), sc, clip)
             && let Some(spec) = &self.tree.nodes[i].text
@@ -1448,11 +1522,10 @@ impl RuntimeCore {
                 };
                 inherit_fade(&mut widths, &mut origins, bounds, own);
             }
-            for instance in &mut self.instances[first_instance..] {
-                if instance.params[1] == KIND_GLYPH {
-                    instance.clip = text_clip;
-                    instance.fade = crate::render::pack_fade(widths, origins, text_clip);
-                }
+            let packed = crate::render::pack_fade(widths, origins, text_clip);
+            for instance in &mut self.instances[text_start..] {
+                instance.clip = text_clip;
+                instance.fade = packed;
             }
         }
     }
