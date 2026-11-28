@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use lmdv_core::{DocStatus, DocumentId, EditLease, TabId, WindowId};
+use lmdv_core::{DocumentId, EditLease, TabId, WindowId};
 use lmdv_io::Launch;
 use rune::PointerPress;
 
@@ -250,19 +250,23 @@ impl WindowState {
 
     /// Whether this tab may leave the window right now.
     ///
-    /// A loading document has a load job owned by this window's worker; moving
-    /// it would strand the document if this window closes first. A save in
-    /// flight, an open decision dialog or a running close/quit also keep the
-    /// tab in place.
+    /// OI-120: both loading documents and start pages can move. A load job
+    /// keeps reporting into this window's worker, but the document and its
+    /// in-flight generation live in the shared registry, so the target drives
+    /// its parse from the same completion; a start page has no job at all. A
+    /// save in flight, an open decision dialog or a running close/quit still
+    /// keep the tab in place.
     pub fn can_move_tab(&self, tab: TabId) -> bool {
         let Some(tab) = self.tab(tab) else { return false };
-        let Some(document) = tab.document() else { return false };
-        if !matches!(*document.status.borrow(), DocStatus::Ready) {
-            return false;
-        }
         if self.ui.close_requested || self.shared.is_quitting() || self.prompt().is_some() {
             return false;
         }
+        if self.shared.windows().get(self.id()).is_some_and(|entry| entry.closing) {
+            return false;
+        }
+        let Some(document) = tab.document() else {
+            return true; // a start page has no buffer, lease or job
+        };
         if self.editor.save_texts.contains_key(&document.id) {
             return false;
         }
@@ -270,20 +274,24 @@ impl WindowState {
         if self.export_pins(document.id) {
             return false;
         }
-        if self.transfer.pending.values().any(|pending| pending.doc == document.id) {
-            return false;
-        }
-        !self.shared.windows().get(self.id()).is_some_and(|entry| entry.closing)
+        !self.transfer.pending.values().any(|pending| pending.doc == document.id)
     }
 
     /// “Move to a new window”: opens a window through the installed opener and
     /// offers the tab to it (P4-02c's menu fallback for tear-out).
     pub(crate) fn move_tab_to_new_window(&mut self, tab: TabId) {
+        self.move_tab_to_new_window_kinded(tab, WindowKind::Normal);
+    }
+
+    /// [`Self::move_tab_to_new_window`] with an explicit reason for the new
+    /// window: tearing out a start page makes a `TornOffStart` window that
+    /// launch routing may not reuse (OI-120).
+    pub(crate) fn move_tab_to_new_window_kinded(&mut self, tab: TabId, kind: WindowKind) {
         if !self.can_move_tab(tab) {
             return;
         }
         let position = self.shared.cascade_position(self.id());
-        let request = WindowOpenRequest { launch: Launch::default(), kind: WindowKind::Normal, position };
+        let request = WindowOpenRequest { launch: Launch::default(), kind, position };
         match Rc::clone(&self.shared).request_new_window(request) {
             Ok(opened) => {
                 if let Err(error) = self.move_tab_to_window(tab, opened.id) {
@@ -354,13 +362,10 @@ impl WindowState {
         insert_at: Option<usize>,
     ) -> Result<Outgoing, String> {
         let index = self.tabs.iter().position(|tab| tab.id == tab_id).ok_or_else(|| lmdv_i18n::t!("transfer.noTab"))?;
-        let Some(document) = self.tabs[index].document().cloned() else {
-            return Err(lmdv_i18n::t!("transfer.startPage").to_owned());
-        };
-        if !matches!(*document.status.borrow(), DocStatus::Ready) {
-            return Err(lmdv_i18n::t!("transfer.loading").to_owned());
-        }
-        if self.editor.save_texts.contains_key(&document.id) {
+        let document = self.tabs[index].document().cloned();
+        if let Some(document) = &document
+            && self.editor.save_texts.contains_key(&document.id)
+        {
             return Err(lmdv_i18n::t!("transfer.saving").to_owned());
         }
 
@@ -393,7 +398,9 @@ impl WindowState {
         if let Some(path) = tab.source.document().and_then(|doc| doc.key.borrow().path().map(PathBuf::from)) {
             self.shared.unwatch_path(&path);
         }
-        self.parse_inflight.remove(&document.id);
+        if let Some(document) = &document {
+            self.parse_inflight.remove(&document.id);
+        }
         self.sync_editor_panes();
         if was_active {
             let anchor = self.active_tab().map(|tab| tab.view.anchor.clone()).unwrap_or_default();
@@ -456,6 +463,42 @@ impl WindowState {
         if self.is_closing_target() {
             return self.return_tab(origin, token, tab, ReturnReason::TargetClosing);
         }
+        // OI-120: a start page has no document, lease or watch. It still moves
+        // through the same protocol and replaces the target's idle start page.
+        if tab.is_start() {
+            let (index, replacing_start) = adopt_index(
+                insert_at,
+                drop_slot,
+                self.active,
+                self.tabs.len(),
+                self.tabs.get(self.active).is_some_and(Tab::is_start),
+            );
+            if !replacing_start {
+                self.capture_active_position();
+                self.save_outline_filter();
+                self.stash_active_notice();
+            }
+            if replacing_start {
+                self.tabs[index] = tab;
+            } else {
+                self.tabs.insert(index, tab);
+            }
+            self.active = index;
+            self.load_active_notice();
+            self.editor.goto_line = None;
+            self.ui.block_menu = None;
+            self.share.menu_open = false;
+            self.reset_scroll_sync();
+            self.suppress_scroll_sync();
+            self.sync_editor_panes();
+            self.load_outline_filter();
+            self.sync_outline();
+            self.sync_editor_titles();
+            self.sync_registry();
+            self.reply_adopted(origin, token, false);
+            return true;
+        }
+
         let Some(document) = tab.document().cloned() else {
             return self.return_tab(origin, token, tab, ReturnReason::WrongWindow);
         };
@@ -580,7 +623,27 @@ impl WindowState {
     fn receive_returned(&mut self, token: TransferToken, mut tab: Tab, _reason: ReturnReason) -> bool {
         let Some(pending) = self.transfer.pending.remove(&token) else { return false };
         self.clear_incoming();
-        let Some(document) = tab.document().cloned() else { return false };
+        let Some(document) = tab.document().cloned() else {
+            // OI-120: a refused start page goes home without any document
+            // bookkeeping.
+            let replace_start = self.tabs.len() == 1 && self.tabs[0].is_start();
+            if replace_start {
+                self.tabs[0] = tab;
+                self.active = 0;
+            } else {
+                let index = pending.origin_index.min(self.tabs.len());
+                self.tabs.insert(index, tab);
+                if index <= self.active {
+                    self.active = self.active.saturating_add(1);
+                }
+            }
+            self.active = self.active.min(self.tabs.len().saturating_sub(1));
+            self.sync_editor_panes();
+            self.load_outline_filter();
+            self.sync_outline();
+            self.sync_registry();
+            return true;
+        };
 
         // The user may have reopened the document here while the tab was away.
         // One tab per document wins; the shared buffer keeps the text. The
@@ -734,7 +797,9 @@ impl WindowState {
         self.transfer.menu = None;
         // A torn tab leaving with this window must not leave a gap open in
         // another strip; the next move would clear it, but there is no next
-        // move once this window is gone.
+        // move once this window is gone. A live-follow window (OI-125) goes
+        // with the gesture as well.
         self.clear_tear_hover();
+        self.close_live_tear_window();
     }
 }

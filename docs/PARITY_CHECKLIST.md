@@ -44,20 +44,20 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Tabs and windows | 35 | 25 | 8 | 2 | 0 | 0 |
 | Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
-| Full-window preview | 18 | 17 | 0 | 1 | 0 | 0 |
+| Full-window preview | 18 | 18 | 0 | 0 | 0 | 0 |
 | Share, print and export | 16 | 14 | 2 | 0 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
 | Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
-| Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
-| Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
+| Command palette | 13 | 11 | 2 | 0 | 0 | 0 |
+| Links and media | 15 | 13 | 0 | 1 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
 | Window chrome | 10 | 3 | 3 | 0 | 0 | 4 |
-| Drag and drop | 8 | 4 | 2 | 2 | 0 | 0 |
+| Drag and drop | 8 | 5 | 2 | 1 | 0 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
-| Accessibility | 15 | 13 | 0 | 2 | 0 | 0 |
+| Accessibility | 15 | 14 | 1 | 0 | 0 | 0 |
 | Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **257** | **54** | **13** | **0** | **18** |
+| **All** | **342** | **262** | **55** | **7** | **0** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -213,7 +213,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 ## V — Full-window preview (18)
 
 - [x] **V-01** Opening the preview (P0 · F-PREVIEW) — done
-- [~] **V-02** Hover affordance (P2 · F-PREVIEW) — partial
+- [x] **V-02** Hover affordance (P2 · F-PREVIEW) — done
 - [x] **V-03** Zoom keys (P0 · F-PREVIEW) — done
 - [x] **V-04** Wheel zoom (P1 · F-PREVIEW) — done
 - [x] **V-05** Drag pan (P1 · F-PREVIEW) — done
@@ -295,7 +295,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 ## C — Command palette (13)
 
-- [~] **C-01** Open keys (P0 · F-PALETTE) — partial
+- [x] **C-01** Open keys (P0 · F-PALETTE) — done
 - [x] **C-02** What is listed (P0 · F-PALETTE) — done
 - [x] **C-03** Fuzzy matching (P0 · F-PALETTE) — done
 - [x] **C-04** Prefix modes (P1 · F-PALETTE) — done
@@ -322,7 +322,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **L-09** Pasted text links (P0 · F-PASTE) — done
 - [x] **L-10** Network links/media (P0 · F-SECURITY) — done
 - [~] **L-11** Link click placement (P0 · F-LINKS) — partial
-- [~] **L-12** Image maps and SVG links (P2 · F-HTML) — partial
+- [x] **L-12** Image maps and SVG links (P2 · F-HTML) — done
 - [x] **L-13** Old anchors (P1 · F-HEADINGS) — done
 - [x] **L-14** URL safety (P0 · F-SECURITY) — n/a
 - [x] **L-15** URL decoding (P1 · F-LINKS) — done
@@ -379,7 +379,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **D-05** Cross-window ghost (P1 · Ghost follows pointer over other window.) — substitute
 - [x] **D-06** Drag-to-scroll (P1 · Middle-drag scrolls.) — done
 - [x] **D-07** Window drag by sole tab (P2 · Sole tab drag moves window.) — substitute
-- [~] **D-08** Drag cancel (P1 · Esc mid-drag restores order.) — partial
+- [x] **D-08** Drag cancel (P1 · Esc mid-drag restores order.) — done
 
 ## H — Help, start page, notices, rating (13)
 
@@ -403,8 +403,8 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **A-02** Visible focus (P0 · Tab through UI: every stop visible.) — done
 - [x] **A-03** Names from tooltips (P0 · Screen reader says “Save, Control+S”.) — done
 - [x] **A-04** Toolbar and dialogs (P1 · Every control has accessible name.) — done
-- [~] **A-05** Tabs (P1 · Screen reader reads tab name + reading time.) — partial
-- [~] **A-06** File tree (P1 · Screen reader announces “Level 2, 3 of 7, collapsed”.) — partial
+- [x] **A-05** Tabs (P1 · Screen reader reads tab name + reading time.) — done
+- [x] **A-06** File tree (P1 · Screen reader announces “Level 2, 3 of 7, collapsed”.) — substitute
 - [x] **A-07** Outline (P1 · Active entry announced/visible.) — done
 - [x] **A-08** Menus (P0 · Arrow keys traverse all menus.) — done
 - [x] **A-09** Dialogs (P1 · Focus trapped and restored.) — done

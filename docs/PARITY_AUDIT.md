@@ -18,7 +18,7 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 257 done, 54 substitute, 13 partial, 0 missing, 18 n/a.
+**342 rows:** 262 done, 55 substitute, 7 partial, 0 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
@@ -26,22 +26,22 @@ matches this audit.
 | Tabs and windows | 35 | 25 | 8 | 2 | 0 | 0 |
 | Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
-| Full-window preview | 18 | 17 | 0 | 1 | 0 | 0 |
+| Full-window preview | 18 | 18 | 0 | 0 | 0 | 0 |
 | Share, print and export | 16 | 14 | 2 | 0 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
 | Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
-| Command palette | 13 | 10 | 2 | 1 | 0 | 0 |
-| Links and media | 15 | 12 | 0 | 2 | 0 | 1 |
+| Command palette | 13 | 11 | 2 | 0 | 0 | 0 |
+| Links and media | 15 | 13 | 0 | 1 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
 | Window chrome | 10 | 3 | 3 | 0 | 0 | 4 |
-| Drag and drop | 8 | 4 | 2 | 2 | 0 | 0 |
+| Drag and drop | 8 | 5 | 2 | 1 | 0 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
-| Accessibility | 15 | 13 | 0 | 2 | 0 | 0 |
+| Accessibility | 15 | 14 | 1 | 0 | 0 | 0 |
 | Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **257** | **54** | **13** | **0** | **18** |
+| **All** | **342** | **262** | **55** | **7** | **0** | **18** |
 
-## P0 gaps (7)
+## P0 gaps (6)
 
 Priority-0 rows that are not yet done. The full evidence and the precise missing
 clause are in the area files.
@@ -53,11 +53,7 @@ clause are in the area files.
 
 ### O — Outline, section line and history (1)
 
-- **O-14** (partial) — Alt+←/→, mouse side buttons, tab menu and palette work: `crate::nav_tests::alt_left_and_right_dispatch_the_navigation_commands`, `the_mouse_side_buttons_navigate`,…
-
-### C — Command palette (1)
-
-- **C-01** (partial) — `palette_tests::ctrl_k_opens_and_closes_the_palette_while_reading`, `the_editor_keeps_ctrl_k_for_its_link_command`, `ctrl_shift_p_opens_it_anywhere`, `a_held_opening_key_does_not_close_it`,…
+- **O-14** (partial) — Alt+←/→ now dispatch from a window-root `on_key_preview` before a focused field can word-move; side buttons, tab menu and palette work with script evidence. **Gap:** pinned Rune still has no…
 
 ### L — Links and media (1)
 

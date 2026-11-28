@@ -8,7 +8,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
-use lmdv_core::{Document, DocumentId, DocumentKey, EditLease, ScrollAnchor, SourceBuffer, TabId};
+use lmdv_core::{DocStatus, Document, DocumentId, DocumentKey, EditLease, ScrollAnchor, SourceBuffer, TabId};
 use rune::{PointerPress, Tx};
 use tempfile::TempDir;
 
@@ -513,8 +513,8 @@ fn the_window_chooser_lists_other_open_non_closing_windows() {
 fn the_transfer_commands_enable_only_when_a_move_is_possible() {
     let temp = TempDir::new().unwrap();
     let (shared, mut source, target) = two_windows(&temp);
-    assert!(!enabled(&source, "tab.move-new-window"), "a start page cannot move");
-    assert!(!enabled(&source, "tab.move-to-window"));
+    assert!(enabled(&source, "tab.move-new-window"), "OI-120: a start page can tear out");
+    assert!(enabled(&source, "tab.move-to-window"), "OI-120: a start page can move to another window");
 
     let tab = source.open_synthetic("Source", "# Source\n");
     source.sync_registry();
@@ -538,7 +538,7 @@ fn the_transfer_commands_enable_only_when_a_move_is_possible() {
     let loading =
         shared.docs_mut().insert_loading(DocumentKey::File(temp.path().join("loading.md")), "loading.md".to_owned());
     source.attach_document(loading);
-    assert!(!enabled(&source, "tab.move-new-window"), "a loading tab stays until its load lands");
+    assert!(enabled(&source, "tab.move-new-window"), "OI-120: a loading tab can move; its load stays shared");
 }
 
 #[test]
@@ -546,11 +546,41 @@ fn a_single_window_has_no_move_target_but_can_tear_out() {
     let temp = TempDir::new().unwrap();
     let shared = shared(&temp);
     let mut alone = WindowState::new(Rc::clone(&shared));
-    assert!(!enabled(&alone, "tab.move-new-window"), "the start page cannot move");
+    assert!(enabled(&alone, "tab.move-new-window"), "OI-120: even the sole start page can tear out");
     alone.open_synthetic("Alone", "# Alone\n");
     assert!(alone.window_targets().is_empty(), "the current window is never a target");
     assert!(!enabled(&alone, "tab.move-to-window"));
     assert!(enabled(&alone, "tab.move-new-window"), "a new window is always a target");
+}
+
+#[test]
+fn a_start_page_moves_through_the_same_protocol() {
+    let temp = TempDir::new().unwrap();
+    let (_shared, mut source, mut target) = two_windows(&temp);
+    let tab = source.active_tab().expect("a start page").id;
+    source.move_tab_to_window(tab, target.id()).expect("OI-120: a start page can move");
+    poll_both(&mut source, &mut target);
+    assert_eq!(target.tabs().len(), 1);
+    assert!(target.active_tab().is_some_and(Tab::is_start));
+    assert!(source.active_tab().is_some_and(Tab::is_start), "the source keeps an idle start page");
+    assert_eq!(source.transfer.pending_len(), 0);
+}
+
+#[test]
+fn a_loading_document_moves_without_finishing_its_load() {
+    let temp = TempDir::new().unwrap();
+    let (shared, mut source, mut target) = two_windows(&temp);
+    let path = temp.path().join("loading.md");
+    let loading = shared.docs_mut().insert_loading(DocumentKey::File(path), "loading.md".to_owned());
+    let tab = source.attach_document(loading.clone());
+    source.sync_registry();
+    assert!(matches!(*loading.status.borrow(), DocStatus::Loading));
+
+    source.move_tab_to_window(tab, target.id()).expect("OI-120: a loading tab can move");
+    poll_both(&mut source, &mut target);
+    assert_eq!(target.active_document_id(), Some(loading.id));
+    assert!(matches!(*loading.status.borrow(), DocStatus::Loading), "the shared load is not restarted");
+    assert!(target.tabs().iter().any(|tab| tab.id != 0));
 }
 
 #[test]

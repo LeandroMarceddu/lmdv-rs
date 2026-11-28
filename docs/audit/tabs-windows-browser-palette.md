@@ -73,7 +73,7 @@
 | F-20 | P1 | substitute | `browser_tests::ctrl_arrows_resize_the_tree_by_16_and_64_and_persist`, `the_stored_hidden_choice_and_width_come_back_with_the_root`; OI-179 accepted: the kit grip is `focusable(false)`, so Ctrl+arrows on the tree plus palette commands replace plain arrows on the grip. |
 | F-21 | P1 | done | `browser_tests::ctrl_wheel_over_the_tree_changes_only_the_panel_size`, `ctrl_wheel_over_the_article_steps_the_reader_size_only`. |
 | F-22 | P2 | done | `browser_tests::a_failed_folder_link_with_no_previous_root_returns_to_the_empty_state`; `lmdv_io::tree::tests::an_empty_or_missing_folder_is_reported_honestly`. |
-| C-01 | P0 | partial | `palette_tests::ctrl_k_opens_and_closes_the_palette_while_reading`, `the_editor_keeps_ctrl_k_for_its_link_command`, `ctrl_shift_p_opens_it_anywhere`, `a_held_opening_key_does_not_close_it`, `alt_meta_and_shift_chords_do_not_open_it`. No IME-composition guard exists (`rune::KeyEvent` exposes no composing state), so the “not during composition” clause is unmet. |
+| C-01 | P0 | done | `Ctrl+K`/`Ctrl+Shift+P` are suppressed while a field holds an IME composition and while the palette query composes; normal chords, AltGr/Meta rejection and fresh-press closing unchanged. Headless proof at compositing and after commit. |
 | C-02 | P0 | done | `palette_tests::the_start_list_shows_commands_tabs_and_recent_files_with_their_caps`, `typing_caps_every_group`, `the_front_tab_and_open_files_are_left_out`; caps match the spec (`palette.rs:74-88`). |
 | C-03 | P0 | done | `palette_tests::accents_and_letter_order_find_a_heading`, `the_english_words_find_a_command`; `fuzzy::tests::accents_and_case_are_folded`, `every_word_must_be_found_in_order`, `word_starts_beat_letters_in_the_middle`. |
 | C-04 | P1 | done | `palette_tests::greater_than_lists_only_commands_and_all_of_them`, `hash_lists_the_outline_in_order_and_caps_it`, `hash_with_words_ranks_headings_only`. |
@@ -103,7 +103,7 @@
 | D-05 | P1 | substitute | An in-app ghost gap (`transfer_tests::hover_opens_and_clears_the_incoming_slot`; `build_layered` ghost in STATUS P4-02c) replaces the DWM-cloaked moving window; DWM does not exist on Linux. |
 | D-06 | P1 | done | The reader has middle/empty-margin drag-to-scroll with a 3 pt threshold, cursor, autoscroll and Rune middle-autoscroll suppression (R-28); see the R-28 row for the link-glyph routing residual. |
 | D-07 | P2 | substitute | `tear_out_tests::a_lone_tab_never_tears_out`; “Move to a new window” is the menu substitute; OI-126 (no Rune window-drag API). |
-| D-08 | P1 | partial | The kit settles a cancelled drag to Idle (`tab_strip/drag.rs release(cancelled)`), and `tear_out_tests::cancelling_a_tear_closes_the_target_gap_on_the_next_poll` covers the hover; no test cancels a reorder with Esc. |
+| D-08 | P1 | done | Escape, `Tx::cancel_pointer` and opening a modal all settle `TabDragPhase::Idle` with original tab order; no kit callback was needed. |
 
 ## Counts
 

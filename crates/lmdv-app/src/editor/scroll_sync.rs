@@ -803,13 +803,24 @@ impl WindowState {
         *self.editor.preview.borrow_mut() = PreviewGeometry::default();
     }
 
-    /// Remembers the virtual rows the source is showing (block mode).
+    /// Remembers the virtual rows the source is showing (block mode) (OI-102).
+    ///
+    /// The range itself is only bookkeeping: the spell checker reads it and the
+    /// editor top picks its first row. Rune already remounts the virtual window
+    /// itself, so asking for another view pass on every reported range is the
+    /// expensive part. A rebuild is needed only when the *first* row moved and
+    /// E-07 is actually measuring that row against a preview; a tail-only
+    /// change (resize, overscan) or a source-only pane needs no rebuild.
     pub(crate) fn note_visible_blocks(&mut self, range: Range<usize>) -> bool {
-        if self.editor.visible_blocks.as_ref() == Some(&range) {
-            return false;
-        }
+        let first_changed = self.editor.visible_blocks.as_ref().is_none_or(|old| old.start != range.start);
+        let sync_active = self.active_tab().is_some_and(|tab| {
+            tab.view.mode == Mode::Editor
+                && !self.editor.preview_narrow
+                && self.editor.preview_visible
+                && tab.view.reader.is_some()
+        });
         self.editor.visible_blocks = Some(range);
-        true
+        first_changed && sync_active
     }
 
     /// Watches the source viewport and the caret for changes to sync (E-07).

@@ -6,6 +6,8 @@
 //! and its drawn text, and the app places the source caret. Clicks land on the
 //! first word of a drawn text element, whose rect starts where the text starts.
 
+use std::ops::Range;
+
 use lmdv_core::LargeFileMode;
 use rune::{ElementInfo, Env, Key, KeyEvent, Mods, Runtime, Tx};
 use tempfile::TempDir;
@@ -328,7 +330,11 @@ fn the_viewer_block_menu_finds_in_document_and_the_editor_menu_does_not() {
         elements.iter().any(|element| element.text.as_deref() == Some(lmdv_i18n::t!("ctx.findInDoc"))),
         "R-17: the reading menu offers Find in document"
     );
-    let (x, y) = runtime.find("block-menu-item1").expect("the Find in document row");
+    assert!(
+        elements.iter().any(|element| element.text.as_deref() == Some(lmdv_i18n::t!("share.copy"))),
+        "OI-096: the reading menu offers rich copy"
+    );
+    let (x, y) = runtime.find("block-menu-item2").expect("the Find in document row");
     click(&mut runtime, x, y);
     let tab = runtime.state.active_tab().expect("the tab");
     assert!(tab.view.reader_find.open, "the reading find bar opened");
@@ -416,4 +422,158 @@ fn shift_f10_opens_the_focused_blocks_menu() {
     runtime.frame(1.0 / 60.0);
     assert!(runtime.state.block_menu().is_none(), "Escape closes it");
     assert_eq!(focused_key(&runtime), Some("b1".to_owned()), "focus returns to the block");
+}
+
+#[test]
+fn identical_nested_task_labels_have_distinct_hit_keys() {
+    use crate::tasks::task_hit_key;
+    use lmdv_render::TaskRef;
+
+    let task = |source: Range<usize>| TaskRef {
+        block: "b0".to_owned(),
+        item: 0,
+        checked: false,
+        label: "same label".to_owned(),
+        source,
+    };
+    let first = task_hit_key(&task(4..7));
+    let second = task_hit_key(&task(24..27));
+    assert_ne!(first, second, "OI-112: the source range keeps identical nested items apart");
+    assert!(first.contains("4-7") && second.contains("24-27"), "{first} / {second}");
+}
+
+#[test]
+fn a_viewer_tree_gives_identical_nested_task_labels_distinct_checkbox_keys() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Nested tasks", "- [ ] same label\n  - [ ] same label\n    - [ ] same label\n");
+    let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(false, 2.0));
+    runtime.frame(0.0);
+
+    let keys: Vec<String> = runtime
+        .elements()
+        .into_iter()
+        .filter(|element| element.role == "checkbox")
+        .filter_map(|element| element.key)
+        .collect();
+    assert_eq!(keys.len(), 3, "one real checkbox per nested item");
+    for (i, key) in keys.iter().enumerate() {
+        assert!(key.starts_with("task-hit-"), "the app's control wire keys the box: {key}");
+        assert!(!keys[..i].contains(key), "OI-112: {key} is unique across identical labels");
+    }
+}
+
+#[test]
+fn the_renderer_keys_identical_nested_task_controls_by_source_range() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use lmdv_render::{DocTheme, NoImages, NoMath, RenderOptions, RenderWires, TaskRef, render};
+    use rune_kit::markdown::MarkdownStyle;
+
+    struct Wired {
+        doc: lmdv_md::MdDoc,
+        theme: DocTheme,
+        style: MarkdownStyle,
+        wire: lmdv_render::TaskControlWire,
+    }
+
+    let source = "- [ ] same label\n  - [ ] same label\n";
+    let seen: Rc<RefCell<Vec<TaskRef>>> = Rc::new(RefCell::new(Vec::new()));
+    let sink = seen.clone();
+    let wire: lmdv_render::TaskControlWire = Rc::new(move |element, task: &TaskRef| {
+        sink.borrow_mut().push(task.clone());
+        element
+    });
+    let scene = Wired {
+        doc: lmdv_md::parse(source),
+        theme: DocTheme::neutral(false),
+        style: MarkdownStyle::neutral(false),
+        wire: wire.clone(),
+    };
+    let mut runtime = rune::Runtime::new(
+        scene,
+        |scene: &Wired, _: &mut rune::Cx<Wired>| {
+            let mut opts = RenderOptions::new(760.0, &scene.style, &NoMath, &NoImages);
+            opts.wires = RenderWires { task_control: Some(scene.wire.clone()), ..RenderWires::default() };
+            render(&scene.doc, &scene.theme, &opts)
+        },
+        (760.0, 1200.0),
+        Env::new(true, 1.0),
+    );
+    runtime.frame(0.0);
+
+    let tasks = seen.borrow();
+    assert_eq!(tasks.len(), 2, "two nested items with the same label");
+    assert_eq!(tasks[0].item, tasks[1].item, "both are the first item of their list");
+    assert_eq!(tasks[0].label, tasks[1].label);
+    let boxes: Vec<String> = runtime
+        .elements()
+        .into_iter()
+        .filter(|element| element.role == "checkbox")
+        .filter_map(|element| element.key)
+        .collect();
+    assert_eq!(boxes.len(), 2);
+    let expected: Vec<String> =
+        tasks.iter().map(|task| format!("task-{}-{}-{}", task.item, task.source.start, task.source.end)).collect();
+    let mut boxes = boxes;
+    boxes.sort();
+    let mut expected = expected;
+    expected.sort();
+    assert_eq!(boxes, expected, "the renderer's keys carry each marker's source range");
+    assert_ne!(boxes[0], boxes[1], "OI-112: identical nested labels have distinct keys");
+}
+
+#[test]
+fn the_wire_head_rebuilds_the_renderers_drawn_text_and_segments() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use lmdv_md::MdDoc;
+    use lmdv_render::{BlockRef, BlockWire, DocTheme, NoImages, NoMath, RenderOptions, RenderWires, render};
+    use rune_kit::markdown::MarkdownStyle;
+
+    struct Wired {
+        doc: std::sync::Arc<MdDoc>,
+        theme: DocTheme,
+        style: MarkdownStyle,
+        wire: BlockWire,
+        blocks: Rc<RefCell<Vec<BlockRef>>>,
+    }
+
+    let source = "budget one\n\n- budget alpha\n- budget beta\n  - nested budget\n\n# A heading\n\n```\nsome code\n```\n\n> quoted budget\n\n| left | right |\n| --- | --- |\n| cell budget | cell two |\n";
+    let doc = std::sync::Arc::new(lmdv_md::parse(source));
+    let sink: Rc<RefCell<Vec<BlockRef>>> = Rc::new(RefCell::new(Vec::new()));
+    let capture = sink.clone();
+    let wire: BlockWire = Rc::new(move |element, block: &BlockRef| {
+        capture.borrow_mut().push(block.clone());
+        element
+    });
+    let scene = Wired {
+        doc: doc.clone(),
+        theme: DocTheme::neutral(false),
+        style: MarkdownStyle::neutral(false),
+        wire: wire.clone(),
+        blocks: sink,
+    };
+    let mut runtime = rune::Runtime::new(
+        scene,
+        |scene: &Wired, _: &mut rune::Cx<Wired>| {
+            let mut opts = RenderOptions::new(760.0, &scene.style, &NoMath, &NoImages);
+            opts.wires = RenderWires { block: Some(scene.wire.clone()), ..RenderWires::default() };
+            render(&scene.doc, &scene.theme, &opts)
+        },
+        (760.0, 1200.0),
+        Env::new(true, 1.0),
+    );
+    runtime.frame(0.0);
+
+    let blocks = runtime.state.blocks.borrow();
+    assert!(!blocks.is_empty(), "the block wire saw the article");
+    for block in blocks.iter() {
+        let head = crate::preview_nav::BlockHead::of(block);
+        let rebuilt = crate::preview_nav::drawn_block(&doc, &head).expect("every drawn block is in the model");
+        assert_eq!(rebuilt.text, block.text, "the rebuilt text maps a click to the same occurrence");
+        assert_eq!(rebuilt.texts, block.texts, "the rebuilt segments carry the same keys, ranges and paths");
+    }
 }

@@ -878,6 +878,7 @@ mod tests {
             line: Some(4),
             new_window: true,
             cwd: PathBuf::from("/tmp"),
+            ..Launch::default()
         });
         let mut bytes = Vec::new();
         write_message(&mut bytes, &request).unwrap();
@@ -936,6 +937,7 @@ mod tests {
             line: Some(7),
             new_window: true,
             cwd: PathBuf::from("/tmp"),
+            ..Launch::default()
         };
         let ack = forward(&paths, &LaunchRequest::new(launch.clone())).unwrap();
         assert!(ack.ok);

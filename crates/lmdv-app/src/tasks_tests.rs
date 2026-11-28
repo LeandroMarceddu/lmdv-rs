@@ -555,7 +555,18 @@ fn a_dirty_document_keeps_the_tick_in_the_buffer_without_writing() {
     wait_for_task_save(&mut state);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), before, "a dirty editor owns the write");
     assert!(doc.text().text().contains("- [x] first"));
-    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.action.is_none()));
+    let Some(NoticeAction::TaskUndo(undo)) = state.ui.notice.as_ref().and_then(|notice| notice.action.clone()) else {
+        panic!("a buffer-only tick still offers Undo (OI-093)");
+    };
+    assert!(undo.buffer_only, "the inverse does not write the dirty buffer to disk");
+    assert_eq!(undo.expected_meta, Some(doc.saved.borrow().meta));
+    assert_eq!(undo.path, path);
+
+    state.run_notice_action();
+    assert!(doc.text().text().contains("- [ ] first"), "the byte is back in the buffer");
+    assert!(doc.text().text().contains("<!-- draft -->"), "the user's own edits survive");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("buffer") && notice.action.is_none()));
 }
 
 #[test]
@@ -652,4 +663,153 @@ fn the_tick_notice_is_localized_and_actionable() {
     assert_eq!(notice.action.as_ref().map(NoticeAction::label), Some("Undo"));
     assert!(notice.deadline > state.ui.last_now);
     assert!((notice.deadline - state.ui.last_now - TASK_UNDO_SECONDS).abs() < 0.001);
+}
+
+#[test]
+fn a_pasted_tick_offers_an_undo_that_stays_in_the_buffer() {
+    let temp = TempDir::new().unwrap();
+    let state = window(&temp);
+    let board = rune::clipboard::memory();
+    let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(true, 2.0));
+    runtime.use_clipboard(&board);
+    board.set_text("- [ ] pasted item\n");
+    runtime.update(|state, tx| {
+        assert!(state.run_command("file.paste", tx), "paste is available from the start page");
+    });
+    runtime.frame(0.0);
+    poll_until(&mut runtime.state, "the pasted parse", |state| {
+        state.active_tab().is_some_and(|tab| tab.view.reader.is_some())
+    });
+    let block = task_list_key(&runtime.state);
+    let pasted = task(&runtime.state, &block, "pasted item");
+    let doc = runtime.state.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    runtime.state.toggle_task(&pasted);
+    assert_eq!(doc.text().text(), "- [x] pasted item\n");
+    assert_eq!(runtime.state.tasks.pending(), 0, "pasted text has no file to write");
+    let Some(NoticeAction::TaskUndo(undo)) = runtime.state.ui.notice.as_ref().and_then(|notice| notice.action.clone())
+    else {
+        panic!("the pasted tick offers Undo (OI-093)");
+    };
+    assert!(undo.buffer_only, "the inverse never starts a save for untitled text");
+    assert!(undo.expected_meta.is_none(), "there is no file metadata to guard");
+    assert!(undo.path.as_os_str().is_empty());
+
+    runtime.state.run_notice_action();
+    assert_eq!(doc.text().text(), "- [ ] pasted item\n");
+    assert!(runtime.state.ui.notice.as_ref().is_some_and(|notice| notice.action.is_none()));
+}
+
+#[test]
+fn a_buffer_undo_refuses_a_changed_saved_base() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("stale-base.md");
+    std::fs::write(&path, "- [ ] one\n").unwrap();
+    let mut state = window(&temp);
+    let block = open_loaded(&mut state, &path);
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+    let len = doc.text().text().len();
+    doc.apply(len..len, "<!-- draft -->\n");
+    state.sync_tab_dirty(&doc);
+    state.toggle_task(&task(&state, &block, "one"));
+    let Some(NoticeAction::TaskUndo(undo)) = state.ui.notice.as_ref().and_then(|notice| notice.action.clone()) else {
+        panic!("a buffer-only Undo");
+    };
+
+    // Another window saved in the meantime: the base the Undo was offered
+    // against is gone, so the byte must stay as the reader shows it.
+    let mut meta = doc.saved.borrow().meta;
+    meta.len += 7;
+    doc.set_saved(meta, doc.hash(), path.clone());
+    state.undo_task(undo);
+    assert!(doc.text().text().contains("- [x] one"), "the stale undo was refused");
+    assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("Undo failed")));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [ ] one\n");
+}
+
+#[test]
+fn a_second_tick_while_saving_is_queued_and_both_ticks_land() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("queued.md");
+    let original = "- [ ] first\n- [ ] second\n";
+    std::fs::write(&path, original).unwrap();
+    let mut state = window(&temp);
+    let block = open_loaded(&mut state, &path);
+    let first = task(&state, &block, "first");
+    let second = task(&state, &block, "second");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    state.toggle_task(&first);
+    assert_eq!(state.tasks.pending(), 1);
+    assert_eq!(state.tasks.queued(doc.id), 0);
+    state.toggle_task(&second);
+    assert_eq!(state.tasks.pending(), 1, "the second tick did not start a competing job");
+    assert_eq!(state.tasks.queued(doc.id), 1, "the second tick was queued instead of refused");
+    assert!(doc.text().text().contains("- [x] first"));
+    assert!(doc.text().text().contains("- [x] second"));
+
+    wait_for_task_save(&mut state);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] first\n- [x] second\n");
+    assert_eq!(state.tasks.queued(doc.id), 0);
+    let Some(NoticeAction::TaskUndo(undo)) = state.ui.notice.as_ref().and_then(|notice| notice.action.clone()) else {
+        panic!("the queued tick's save offers Undo");
+    };
+    assert_eq!(undo.range, second.source, "the notice names the last tick");
+    assert!(!undo.buffer_only);
+    assert_eq!(undo.expected_meta, Some(doc.saved.borrow().meta));
+
+    state.run_notice_action();
+    wait_for_task_save(&mut state);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] first\n- [ ] second\n");
+}
+
+#[test]
+fn two_ticks_on_one_item_while_saving_leave_the_disk_untouched() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("same-item.md");
+    let original = "- [ ] one\n";
+    std::fs::write(&path, original).unwrap();
+    let mut state = window(&temp);
+    let block = open_loaded(&mut state, &path);
+    let one = task(&state, &block, "one");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    state.toggle_task(&one);
+    assert_eq!(state.tasks.pending(), 1);
+    state.toggle_task(&one);
+    assert_eq!(state.tasks.queued(doc.id), 1);
+    assert_eq!(doc.text().text(), original, "the second click put the byte back");
+
+    wait_for_task_save(&mut state);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "the follow-up rewrote the original bytes");
+    assert!(!doc.is_dirty());
+    let Some(NoticeAction::TaskUndo(undo)) = state.ui.notice.as_ref().and_then(|notice| notice.action.clone()) else {
+        panic!("the second click has its own Undo");
+    };
+    assert_eq!(undo.range, one.source);
+    assert_eq!((undo.before, undo.after), (b'x', b' '));
+    state.run_notice_action();
+    wait_for_task_save(&mut state);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [x] one\n", "Undo restores the first tick");
+}
+
+#[test]
+fn a_conflict_with_a_queued_tick_reverts_every_optimistic_byte() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("queued-conflict.md");
+    let original = "- [ ] first\n- [ ] second\n";
+    std::fs::write(&path, original).unwrap();
+    let mut state = window(&temp);
+    let block = open_loaded(&mut state, &path);
+    let first = task(&state, &block, "first");
+    let second = task(&state, &block, "second");
+    let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
+
+    state.toggle_task(&first);
+    state.toggle_task(&second);
+    std::fs::write(&path, "- [ ] theirs\n").unwrap();
+    poll_until(&mut state, "the task conflict", |state| matches!(state.prompt(), Some(Prompt::TaskConflict { .. })));
+    assert_eq!(doc.text().text(), original, "neither optimistic byte is left behind");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [ ] theirs\n", "the disk version wins");
+    assert_eq!(state.tasks.queued(doc.id), 0, "the pending follow-up was dropped");
 }

@@ -35,6 +35,12 @@ pub const JOURNAL_MAX_ENTRIES: usize = 128;
 /// Approximate bytes of before/after block text kept by the block journal.
 pub const JOURNAL_MAX_BYTES: usize = 1024 * 1024;
 
+/// Max bytes of one before/after field kept in the journal (OI-058). A larger
+/// field keeps a char-boundary prefix plus a bounded splice; when the splice
+/// itself does not fit, the entry is flagged and becomes an undo barrier
+/// instead of silently losing text.
+pub const JOURNAL_FIELD_MAX_BYTES: usize = 256 * 1024;
+
 /// One blank-line-separated block: its range in the LF source and the field
 /// the app binds.
 #[derive(Clone, Debug)]
@@ -80,8 +86,9 @@ enum JournalOp {
     Text {
         block: usize,
         delta: EditDelta,
-        before: String,
-        after: String,
+        before: Snapshot,
+        after: Snapshot,
+        patch: TextPatch,
         before_sel: (usize, usize),
         after_sel: (usize, usize),
         kind: BlockEditKind,
@@ -93,8 +100,9 @@ enum JournalOp {
     Relayout {
         block: usize,
         delta: EditDelta,
-        before: String,
-        after: String,
+        before: Snapshot,
+        after: Snapshot,
+        patch: TextPatch,
         before_ends: Vec<usize>,
         after_ends: Vec<usize>,
         before_sel: (usize, usize),
@@ -114,26 +122,162 @@ enum JournalOp {
     },
     /// A change spanning blocks, or a replace-all: the whole source is reset.
     Whole {
-        before: String,
-        after: String,
+        before: Snapshot,
+        after: Snapshot,
+        patch: TextPatch,
     },
+}
+
+impl JournalOp {
+    /// Bytes actually retained, used by the journal's total cap.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Text { before, after, patch, .. }
+            | Self::Relayout { before, after, patch, .. }
+            | Self::Whole { before, after, patch } => {
+                before.stored_bytes() + after.stored_bytes() + patch.removed.len() + patch.inserted.len()
+            }
+            Self::Split { .. } | Self::Merge { .. } => 16,
+        }
+    }
+
+    /// Whether the retained data can restore exact text in both directions.
+    fn exact(&self) -> bool {
+        match self {
+            Self::Text { patch, .. } | Self::Relayout { patch, .. } | Self::Whole { patch, .. } => patch.exact,
+            Self::Split { .. } | Self::Merge { .. } => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 struct JournalEntry {
     op: JournalOp,
     bytes: usize,
+    /// False when both the field and its splice were too large to keep: undo
+    /// stops at the entry rather than silently dropping text (OI-058).
+    exact: bool,
 }
 
 impl JournalEntry {
     fn new(op: JournalOp) -> Self {
-        let bytes = match &op {
-            JournalOp::Text { before, after, .. }
-            | JournalOp::Relayout { before, after, .. }
-            | JournalOp::Whole { before, after } => before.len() + after.len(),
-            JournalOp::Split { .. } | JournalOp::Merge { .. } => 16,
-        };
-        Self { op, bytes }
+        let bytes = op.bytes();
+        let exact = op.exact();
+        Self { op, bytes, exact }
+    }
+}
+
+/// One bounded side of a journaled text change.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Snapshot {
+    /// Exact text, at or below [`JOURNAL_FIELD_MAX_BYTES`].
+    Full(String),
+    /// Only a char-boundary prefix is kept; `len` is the original byte length.
+    Limited { prefix: String, len: usize },
+}
+
+impl Snapshot {
+    fn new(text: String) -> Self {
+        if text.len() <= JOURNAL_FIELD_MAX_BYTES {
+            Self::Full(text)
+        } else {
+            Self::Limited { prefix: cut(&text), len: text.len() }
+        }
+    }
+
+    fn full(&self) -> Option<&str> {
+        match self {
+            Self::Full(text) => Some(text),
+            Self::Limited { .. } => None,
+        }
+    }
+
+    fn stored_bytes(&self) -> usize {
+        match self {
+            Self::Full(text) => text.len(),
+            Self::Limited { prefix, .. } => prefix.len(),
+        }
+    }
+}
+
+/// A bounded splice that converts one side of a journal entry into the other.
+/// Both strings are capped at [`JOURNAL_FIELD_MAX_BYTES`]; `exact` says whether
+/// they were kept whole, which is what makes undo and redo text-exact.
+#[derive(Clone, Debug)]
+struct TextPatch {
+    /// Byte offset inside the affected span where the splice starts.
+    at: usize,
+    /// Text removed by the splice (empty when nothing was removed).
+    removed: String,
+    /// Text inserted by the splice (empty when nothing was inserted).
+    inserted: String,
+    /// Whether `removed` and `inserted` were kept in full.
+    exact: bool,
+}
+
+impl TextPatch {
+    fn new(before: &str, at: usize, removed: usize, inserted: usize, after: &str) -> Self {
+        let at = before.floor_char_boundary(at.min(before.len()));
+        let removed_end = before.floor_char_boundary(at.saturating_add(removed).min(before.len()));
+        let removed_text = cut(&before[at..removed_end]);
+        let after_at = after.floor_char_boundary(at.min(after.len()));
+        let inserted_end = after.floor_char_boundary(after_at.saturating_add(inserted).min(after.len()));
+        let inserted_text = cut(&after[after_at..inserted_end]);
+        let exact = removed_text.len() == removed && inserted_text.len() == inserted;
+        Self { at, removed: removed_text, inserted: inserted_text, exact }
+    }
+
+    /// Rebuild the before text from the current (after) text.
+    fn undo(&self, current: &str) -> Option<String> {
+        if !self.exact {
+            return None;
+        }
+        let at = current.floor_char_boundary(self.at);
+        let end = at.checked_add(self.inserted.len())?;
+        let tail = current.get(end..)?;
+        let mut out = String::with_capacity(at + self.removed.len() + tail.len());
+        out.push_str(&current[..at]);
+        out.push_str(&self.removed);
+        out.push_str(tail);
+        Some(out)
+    }
+
+    /// Rebuild the after text from the current (before) text.
+    fn redo(&self, current: &str) -> Option<String> {
+        if !self.exact {
+            return None;
+        }
+        let at = current.floor_char_boundary(self.at);
+        let end = at.checked_add(self.removed.len())?;
+        let tail = current.get(end..)?;
+        let mut out = String::with_capacity(at + self.inserted.len() + tail.len());
+        out.push_str(&current[..at]);
+        out.push_str(&self.inserted);
+        out.push_str(tail);
+        Some(out)
+    }
+}
+
+fn cut(text: &str) -> String {
+    if text.len() <= JOURNAL_FIELD_MAX_BYTES {
+        return text.to_owned();
+    }
+    let mut end = JOURNAL_FIELD_MAX_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_owned()
+}
+
+/// Restore one side of an entry: the exact snapshot when it was kept, else
+/// splice the current text backwards (`forward = false`) or forwards.
+fn restored(snapshot: &Snapshot, patch: &TextPatch, current: &str, forward: bool) -> Option<String> {
+    if let Some(text) = snapshot.full() {
+        Some(text.to_owned())
+    } else if forward {
+        patch.redo(current)
+    } else {
+        patch.undo(current)
     }
 }
 
@@ -417,6 +561,18 @@ impl BlockEditor {
         self.redo.len()
     }
 
+    /// Whether the next undo step can restore exact text. False when the step
+    /// touched a field too large to keep and its splice was too large too;
+    /// [`Self::undo`] stops at such a step instead of losing text (OI-058).
+    pub fn undo_is_exact(&self) -> bool {
+        self.journal.last().is_some_and(|entry| entry.exact)
+    }
+
+    /// Whether the next redo step can restore exact text.
+    pub fn redo_is_exact(&self) -> bool {
+        self.redo.last().is_some_and(|entry| entry.exact)
+    }
+
     /// The delta of the most recent text edit, for the app's line index and
     /// preview invalidation.
     pub fn last_delta(&self) -> Option<EditDelta> {
@@ -431,6 +587,9 @@ impl BlockEditor {
     /// [`Self::caret_block`].
     pub fn undo(&mut self) -> bool {
         self.commit_pending();
+        if !self.undo_is_exact() {
+            return false;
+        }
         let Some(entry) = self.journal.pop() else {
             return false;
         };
@@ -438,8 +597,11 @@ impl BlockEditor {
         self.typing_open = false;
         self.caret_block = None;
         match &entry.op {
-            JournalOp::Text { block, before, before_sel, .. } => {
-                if self.set_block_text(*block, before) {
+            JournalOp::Text { block, before, patch, before_sel, .. } => {
+                let current = self.blocks.get(*block).map(|block| block.edit.text.clone()).unwrap_or_default();
+                if let Some(text) = restored(before, patch, &current, false)
+                    && self.set_block_text(*block, &text)
+                {
                     let selection = *before_sel;
                     if let Some(block) = self.blocks.get_mut(*block) {
                         set_local_selection(block, selection);
@@ -447,8 +609,12 @@ impl BlockEditor {
                     self.caret_block = Some(*block);
                 }
             }
-            JournalOp::Relayout { block, before, before_ends, after_ends, before_sel, before_block, .. } => {
-                self.restore_layout(*block, after_ends, before, before_ends, *before_sel, *before_block);
+            JournalOp::Relayout { block, before, patch, before_ends, after_ends, before_sel, before_block, .. } => {
+                if let Some(current) = self.span_text(*block, after_ends)
+                    && let Some(text) = restored(before, patch, &current, false)
+                {
+                    self.restore_layout(*block, after_ends, &text, before_ends, *before_sel, *before_block);
+                }
             }
             JournalOp::Split { block, at } => {
                 if self.merge_structural(*block) {
@@ -463,8 +629,10 @@ impl BlockEditor {
                     self.caret_block = Some(*block + 1);
                 }
             }
-            JournalOp::Whole { before, .. } => {
-                self.reset_source(before);
+            JournalOp::Whole { before, patch, .. } => {
+                if let Some(text) = restored(before, patch, &self.source, false) {
+                    self.reset_source(&text);
+                }
             }
         }
         self.redo.push(entry);
@@ -475,14 +643,20 @@ impl BlockEditor {
     /// caret preference as [`Self::undo`].
     pub fn redo(&mut self) -> bool {
         self.commit_pending();
+        if !self.redo_is_exact() {
+            return false;
+        }
         let Some(entry) = self.redo.pop() else {
             return false;
         };
         self.typing_open = false;
         self.caret_block = None;
         match &entry.op {
-            JournalOp::Text { block, after, after_sel, .. } => {
-                if self.set_block_text(*block, after) {
+            JournalOp::Text { block, after, patch, after_sel, .. } => {
+                let current = self.blocks.get(*block).map(|block| block.edit.text.clone()).unwrap_or_default();
+                if let Some(text) = restored(after, patch, &current, true)
+                    && self.set_block_text(*block, &text)
+                {
                     let selection = *after_sel;
                     if let Some(block) = self.blocks.get_mut(*block) {
                         set_local_selection(block, selection);
@@ -490,8 +664,12 @@ impl BlockEditor {
                     self.caret_block = Some(*block);
                 }
             }
-            JournalOp::Relayout { block, after, before_ends, after_ends, after_sel, after_block, .. } => {
-                self.restore_layout(*block, before_ends, after, after_ends, *after_sel, *after_block);
+            JournalOp::Relayout { block, after, patch, before_ends, after_ends, after_sel, after_block, .. } => {
+                if let Some(current) = self.span_text(*block, before_ends)
+                    && let Some(text) = restored(after, patch, &current, true)
+                {
+                    self.restore_layout(*block, before_ends, &text, after_ends, *after_sel, *after_block);
+                }
             }
             JournalOp::Split { block, at } => {
                 if self.split_structural(*block, *at) {
@@ -506,8 +684,10 @@ impl BlockEditor {
                     self.caret_block = Some(*block);
                 }
             }
-            JournalOp::Whole { after, .. } => {
-                self.reset_source(after);
+            JournalOp::Whole { after, patch, .. } => {
+                if let Some(text) = restored(after, patch, &self.source, true) {
+                    self.reset_source(&text);
+                }
             }
         }
         self.journal_bytes = self.journal_bytes.saturating_add(entry.bytes);
@@ -539,11 +719,22 @@ impl BlockEditor {
                 _ => false,
             });
 
-        let delta = if joins {
+        // On a joined typing run the entry already holds the *first* before
+        // text. When that field was too large to keep, rebuild it from the
+        // current field text through the entry's bounded splice.
+        let first_before = if joins {
             match self.journal.last().map(|entry| &entry.op) {
-                Some(JournalOp::Text { before: first, .. }) => compute_delta(&self.source, start, first, &after),
-                _ => compute_delta(&self.source, start, &before, &after),
+                Some(JournalOp::Text { before: first, patch, .. }) => {
+                    restored(first, patch, &before, false).unwrap_or_else(|| before.clone())
+                }
+                _ => before.clone(),
             }
+        } else {
+            before.clone()
+        };
+
+        let delta = if joins {
+            compute_delta(&self.source, start, &first_before, &after)
         } else {
             compute_delta(&self.source, start, &before, &after)
         };
@@ -552,17 +743,31 @@ impl BlockEditor {
         self.blocks[index].range.end = start + after.len();
         shift_later_ranges(&mut self.blocks, index, after.len() as isize - old_len as isize);
 
+        let at = delta.start.saturating_sub(start);
+        let patch = TextPatch::new(&first_before, at, delta.removed, delta.inserted, &after);
+        let before_snapshot = Snapshot::new(first_before);
+        let after_snapshot = Snapshot::new(after.clone());
+
         // OI-089: a commit that creates or removes a blank-line boundary must
         // re-partition the nearby fields in memory instead of waiting for a
         // reload. The text change and the layout change stay one journal entry.
         if let Some(layout) = self.layout_change(index, &before, before_sel, after_sel) {
             self.apply_layout(&layout);
             let after_block = self.caret_block.unwrap_or(layout.first);
+            let region_delta = compute_delta(&layout.before, 0, &layout.before, &layout.after);
+            let region_patch = TextPatch::new(
+                &layout.before,
+                region_delta.start,
+                region_delta.removed,
+                region_delta.inserted,
+                &layout.after,
+            );
             let entry = JournalEntry::new(JournalOp::Relayout {
                 block: layout.first,
                 delta,
-                before: layout.before,
-                after: layout.after,
+                before: Snapshot::new(layout.before),
+                after: Snapshot::new(layout.after),
+                patch: region_patch,
                 before_ends: layout.before_ends,
                 after_ends: layout.after_ends,
                 before_sel: layout.before_sel,
@@ -582,28 +787,38 @@ impl BlockEditor {
         if joins {
             if let Some(entry) = self.journal.last_mut() {
                 let previous_bytes = entry.bytes;
-                let (first_before, first_selection) = match &entry.op {
-                    JournalOp::Text { before, before_sel, .. } => (before.clone(), *before_sel),
-                    _ => (before.clone(), before_sel),
+                let first_selection = match &entry.op {
+                    JournalOp::Text { before_sel, .. } => *before_sel,
+                    _ => before_sel,
                 };
-                entry.op = JournalOp::Text {
+                let op = JournalOp::Text {
                     block: index,
                     delta,
-                    before: first_before,
-                    after: after.clone(),
+                    before: before_snapshot,
+                    after: after_snapshot,
+                    patch,
                     before_sel: first_selection,
                     after_sel,
                     kind,
                 };
-                entry.bytes = match &entry.op {
-                    JournalOp::Text { before, after, .. } => before.len() + after.len(),
-                    _ => previous_bytes,
-                };
-                self.journal_bytes = self.journal_bytes.saturating_sub(previous_bytes) + entry.bytes;
+                let bytes = op.bytes();
+                let exact = op.exact();
+                entry.op = op;
+                entry.bytes = bytes;
+                entry.exact = exact;
+                self.journal_bytes = self.journal_bytes.saturating_sub(previous_bytes) + bytes;
             }
         } else {
-            let entry =
-                JournalEntry::new(JournalOp::Text { block: index, delta, before, after, before_sel, after_sel, kind });
+            let entry = JournalEntry::new(JournalOp::Text {
+                block: index,
+                delta,
+                before: before_snapshot,
+                after: after_snapshot,
+                patch,
+                before_sel,
+                after_sel,
+                kind,
+            });
             self.journal_bytes = self.journal_bytes.saturating_add(entry.bytes);
             self.journal.push(entry);
         }
@@ -613,10 +828,11 @@ impl BlockEditor {
     }
 
     /// The layout re-partition a committed edit needs, when the nearby fields
-    /// no longer follow the blank-line rule. The affected span is the edited
-    /// block plus one neighbour on each side, so a split inside a fence and a
-    /// merge across a removed separator are both covered without scanning a
-    /// large document per keystroke.
+    /// no longer follow the blank-line rule. The affected span starts at the
+    /// edited block plus one neighbour and grows while an opening fence in it
+    /// is still unclosed (OI-111), so a fence typed across several fields
+    /// normalizes on the first commit. A field whose blank-line/fence shape is
+    /// unchanged skips the scan altogether (OI-058).
     fn layout_change(
         &self,
         index: usize,
@@ -624,10 +840,33 @@ impl BlockEditor {
         before_sel: (usize, usize),
         after_sel: (usize, usize),
     ) -> Option<LayoutChange> {
-        let first = index.saturating_sub(1);
-        let last = (index + 1).min(self.blocks.len().checked_sub(1)?);
-        if first > last {
+        let after_block = self.blocks.get(index)?.edit.text.as_str();
+        if block_shape(before_block) == block_shape(after_block) {
             return None;
+        }
+        let len = self.blocks.len();
+        if len == 0 {
+            return None;
+        }
+        let mut first = index.saturating_sub(1);
+        // The edited field can also sit inside a fence opened further back;
+        // include those fields before growing forwards.
+        while first > 0 {
+            let prefix = self.source.get(self.blocks[first - 1].range.start..self.blocks[first].range.start)?;
+            if fence_open_at_end(prefix) {
+                first -= 1;
+            } else {
+                break;
+            }
+        }
+        let mut last = (index + 1).min(len - 1);
+        loop {
+            let region = self.source.get(self.blocks[first].range.start..self.blocks[last].range.end)?;
+            if last + 1 < len && fence_open_at_end(region) {
+                last += 1;
+            } else {
+                break;
+            }
         }
         let region_start = self.blocks[first].range.start;
         let region_end = self.blocks[last].range.end;
@@ -675,6 +914,14 @@ impl BlockEditor {
         }
         self.blocks.splice(first..first + old_count, new_blocks);
         self.place_caret(first, new_count, region_start, change.after_sel, None);
+    }
+
+    /// The current text of the span `first..first + ends.len()`.
+    fn span_text(&self, first: usize, ends: &[usize]) -> Option<String> {
+        let start = self.blocks.get(first)?.range.start;
+        let last = first.checked_add(ends.len())?;
+        let end = self.blocks.get(last.checked_sub(1)?)?.range.end;
+        self.source.get(start..end).map(str::to_owned)
     }
 
     /// Restores one affected span's text and field partition, then puts the
@@ -736,7 +983,10 @@ impl BlockEditor {
 
     fn record_whole(&mut self, before: String, after: String) {
         self.caret_block = None;
-        let entry = JournalEntry::new(JournalOp::Whole { before, after });
+        let delta = compute_delta(&before, 0, &before, &after);
+        let patch = TextPatch::new(&before, delta.start, delta.removed, delta.inserted, &after);
+        let entry =
+            JournalEntry::new(JournalOp::Whole { before: Snapshot::new(before), after: Snapshot::new(after), patch });
         self.journal_bytes = self.journal_bytes.saturating_add(entry.bytes);
         self.journal.push(entry);
         self.typing_open = false;
@@ -856,6 +1106,52 @@ pub(crate) fn fence_open(trimmed: &str) -> Option<(char, usize, &str)> {
 pub(crate) fn is_fence_close(trimmed: &str, marker: char, run: usize) -> bool {
     let closing = trimmed.chars().take_while(|&ch| ch == marker).count();
     closing >= run && trimmed[closing..].trim().is_empty()
+}
+
+/// Whether a fence opened inside `text` is still unclosed at its end. Used to
+/// grow a canonical re-partition span past every field the fence covers
+/// (OI-111).
+fn fence_open_at_end(text: &str) -> bool {
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if let Some((marker, run)) = fence {
+            if is_fence_close(trimmed, marker, run) {
+                fence = None;
+            }
+        } else if let Some((marker, run, _)) = fence_open(trimmed) {
+            fence = Some((marker, run));
+        }
+    }
+    fence.is_some()
+}
+
+/// A cheap per-line signature of a field's blank-line and fence structure.
+/// Only a change here can move a blank-line boundary, so equal signatures let
+/// `layout_change` skip the region scan on an ordinary keystroke (OI-058).
+/// Codes: 0 content, 1 blank line, 2 fence opener/closer, 3 inside a fence.
+fn block_shape(text: &str) -> Vec<u8> {
+    let mut shape = Vec::new();
+    let mut fence: Option<(char, usize)> = None;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if let Some((marker, run)) = fence {
+            if is_fence_close(trimmed, marker, run) {
+                fence = None;
+                shape.push(2);
+            } else {
+                shape.push(3);
+            }
+            continue;
+        }
+        if let Some((marker, run, _)) = fence_open(trimmed) {
+            fence = Some((marker, run));
+            shape.push(2);
+            continue;
+        }
+        shape.push(if line.trim().is_empty() { 1 } else { 0 });
+    }
+    shape
 }
 
 /// One affected span's pre- and post-edit partition, for [`BlockEditor::apply_layout`].
@@ -1244,15 +1540,109 @@ mod tests {
     }
 
     #[test]
-    fn a_single_oversized_whole_edit_stays_undoable() {
+    fn a_single_oversized_whole_edit_keeps_a_bounded_barrier_entry() {
         let text = "a".repeat(600 * 1024);
         let replacement = "b".repeat(600 * 1024);
         let mut editor = BlockEditor::new(&text);
         assert!(editor.replace_all_source(&replacement));
-        assert!(editor.undo());
-        assert_eq!(editor.text(), text);
-        assert!(editor.redo());
+        assert_eq!(editor.journal.len(), 1, "the newest entry is never trimmed");
+        let entry = &editor.journal[0];
+        match &entry.op {
+            JournalOp::Whole { before, after, .. } => {
+                assert!(before.stored_bytes() <= JOURNAL_FIELD_MAX_BYTES);
+                assert!(after.stored_bytes() <= JOURNAL_FIELD_MAX_BYTES);
+                assert!(matches!(before, Snapshot::Limited { len: 614_400, .. }), "the original length is kept");
+            }
+            other => panic!("expected a whole-source entry, got {other:?}"),
+        }
+        assert!(!entry.exact, "a whole-field replacement cannot be undone by exact text");
+        assert!(!editor.undo_is_exact());
+        assert!(!editor.undo(), "undo stops at the barrier instead of losing text");
         assert_eq!(editor.text(), replacement);
+    }
+
+    #[test]
+    fn a_small_edit_in_a_huge_field_is_undone_exactly_from_its_patch() {
+        let big = "a".repeat(JOURNAL_FIELD_MAX_BYTES + 2048);
+        let mut editor = BlockEditor::new(&big);
+        assert_eq!(editor.blocks().len(), 1);
+        editor.apply(0, BlockEditKind::Discrete, |edit| {
+            edit.set_caret(1);
+            edit.insert("b");
+        });
+        let entry = &editor.journal[0];
+        match &entry.op {
+            JournalOp::Text { before, after, patch, .. } => {
+                assert!(before.stored_bytes() <= JOURNAL_FIELD_MAX_BYTES);
+                assert!(after.stored_bytes() <= JOURNAL_FIELD_MAX_BYTES);
+                assert!(patch.exact, "a one-byte splice stays exact");
+            }
+            other => panic!("expected a text entry, got {other:?}"),
+        }
+        assert!(editor.undo_is_exact());
+        assert!(editor.undo());
+        assert_eq!(editor.text(), big);
+        assert!(editor.redo_is_exact());
+        assert!(editor.redo());
+        assert_eq!(&editor.text()[..2], "ab");
+        assert_eq!(editor.text().len(), big.len() + 1);
+    }
+
+    #[test]
+    fn coalesced_typing_in_a_huge_field_restores_the_first_before_text() {
+        let big = "a".repeat(JOURNAL_FIELD_MAX_BYTES + 2048);
+        let mut editor = BlockEditor::new(&big);
+        editor.apply(0, BlockEditKind::Typing, |edit| {
+            edit.set_caret(1);
+            edit.insert("b");
+        });
+        editor.apply(0, BlockEditKind::Typing, |edit| edit.insert("c"));
+        assert_eq!(editor.journal.len(), 1, "the two keystrokes coalesce");
+        assert!(editor.undo());
+        assert_eq!(editor.text(), big, "both keystrokes undo from the bounded patch");
+    }
+
+    #[test]
+    fn an_ordinary_edit_does_not_run_a_relayout() {
+        let mut editor = BlockEditor::new("one two\n\nthree\n");
+        editor.apply(0, BlockEditKind::Discrete, |edit| {
+            edit.set_caret(3);
+            edit.insert("X");
+        });
+        assert!(matches!(&editor.journal[0].op, JournalOp::Text { .. }), "no relayout for a plain edit");
+        assert_eq!(editor.blocks().len(), 2);
+    }
+
+    #[test]
+    fn removing_a_fence_closer_pulls_earlier_fields_into_the_repartition() {
+        let mut editor = BlockEditor::new("```\na\n```\n\nb\n\nc\n");
+        assert_eq!(texts(&editor), ["```\na\n```\n\n", "b\n\n", "c\n"]);
+        editor.apply(0, BlockEditKind::Discrete, |edit| {
+            edit.set_selection(5, 9);
+            edit.insert("");
+        });
+        assert_eq!(texts(&editor), ["```\na\n\nb\n\nc\n"], "the fence now covers the whole document");
+        assert!(editor.undo());
+        assert_eq!(texts(&editor), ["```\na\n```\n\n", "b\n\n", "c\n"]);
+    }
+
+    #[test]
+    fn an_open_fence_normalizes_every_following_block_in_one_commit() {
+        let mut editor = BlockEditor::new("intro\n\nB\n\nC\n\nD\n");
+        assert_eq!(editor.blocks().len(), 4);
+        editor.block_mut(1).expect("block").set_caret(3);
+        editor.apply(1, BlockEditKind::Typing, |edit| edit.insert("```\n"));
+        assert_eq!(
+            texts(&editor),
+            ["intro\n\n", "B\n\n", "```\nC\n\nD\n"],
+            "the open fence absorbed all following fields"
+        );
+        assert_eq!(editor.blocks().len(), 3);
+        assert!(matches!(&editor.journal[0].op, JournalOp::Relayout { .. }));
+        assert!(editor.undo());
+        assert_eq!(texts(&editor), ["intro\n\n", "B\n\n", "C\n\n", "D\n"], "undo restores every field");
+        assert!(editor.redo());
+        assert_eq!(texts(&editor), ["intro\n\n", "B\n\n", "```\nC\n\nD\n"]);
     }
 
     #[test]

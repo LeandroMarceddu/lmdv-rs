@@ -22,12 +22,13 @@ use std::time::Duration;
 
 use lmdv_core::{DocStatus, Document, DocumentKey, Draft, PasteId, SourceBuffer, TabId, WindowId};
 use lmdv_io::store::{
-    SessionSnapshot, SessionWindowKind, TabMode, TabSession, TabSource as SessionTabSource,
-    WindowPlacement as StoredPlacement, WindowSession,
+    ClosedTabSession, PaneSession, ReaderFindSession, SessionSnapshot, SessionWindowKind, TabMode, TabSession,
+    TabSource as SessionTabSource, WindowPlacement as StoredPlacement, WindowSession,
 };
 use lmdv_io::{AppDirs, Launch};
-use rune::{Tx, WindowPlacement as RunePlacement};
+use rune::{Display, Tx, WindowPlacement as RunePlacement};
 
+use crate::actions::ClosedTab;
 use crate::shared::AppShared;
 use crate::window::{Mode, Tab, WindowState};
 use crate::windows::WindowKind;
@@ -47,6 +48,9 @@ pub struct RestoreConditions {
     pub has_path: bool,
     /// `--new-window` asks for a fresh window, never a restored one.
     pub new_window: bool,
+    /// `--restore-session` (OI-124): a file argument no longer suppresses the
+    /// stored windows; the file still wins for the first one.
+    pub force: bool,
 }
 
 impl RestoreConditions {
@@ -56,7 +60,7 @@ impl RestoreConditions {
     /// `--tree`/`--snap` run must not open the user's windows, and its own
     /// scene must be the only state a gate sees.
     pub fn allows(self) -> bool {
-        self.restore_session && !self.headless && !self.has_path && !self.new_window
+        self.restore_session && !self.headless && !self.new_window && (self.force || !self.has_path)
     }
 }
 
@@ -67,10 +71,11 @@ impl RestoreConditions {
 /// writes stay disabled headless either way.
 pub(crate) fn should_restore(shared: &AppShared, launch: &Launch) -> bool {
     RestoreConditions {
-        restore_session: shared.prefs().restore_session,
+        restore_session: shared.prefs().restore_session || launch.restore_session,
         headless: (shared.is_headless() || rune::is_headless()) && !test_restore_seam(),
         has_path: launch.path.is_some(),
         new_window: launch.new_window,
+        force: launch.restore_session,
     }
     .allows()
 }
@@ -84,7 +89,7 @@ pub(crate) fn should_restore(shared: &AppShared, launch: &Launch) -> bool {
 /// user's session.
 pub const TEST_RESTORE_ENV: &str = "LMDV_TEST_RESTORE";
 
-fn test_restore_seam() -> bool {
+pub(crate) fn test_restore_seam() -> bool {
     cfg!(debug_assertions) && std::env::var_os(TEST_RESTORE_ENV).is_some_and(|value| value == "1")
 }
 
@@ -96,7 +101,7 @@ pub(crate) fn restored_window_key(index: usize) -> String {
 }
 
 /// Where a stored window opens, and whether it opens maximized.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PlacementPlan {
     /// `WindowOptions::position`, physical frame coordinates.
     pub position: Option<(i32, i32)>,
@@ -104,22 +109,67 @@ pub struct PlacementPlan {
     pub physical_size: Option<(u32, u32)>,
     /// `WindowSpec::maximized`.
     pub maximized: bool,
+    /// The display scale the restored frame was planned against (OI-122).
+    /// The registry's first placement carries it so a cascade or a tear-out
+    /// near the restored window uses physical pixels of the right size.
+    pub scale: f64,
 }
 
 /// Plans a restored frame. Positions and sizes exist only where the platform
 /// reports them (X11); Wayland keeps the maximized flag and lets the
 /// compositor place the window.
+///
+/// OI-122: a frame stored on another display layout must not come back off
+/// screen. The factory's displays are available through [`rune::displays`] at
+/// this point, so the plan is clamped to one of them before it is returned.
 pub fn placement_plan(window: &WindowSession, positions_supported: bool) -> PlacementPlan {
     let maximized = window.maximized || window.placement.is_some_and(|placement| placement.maximized);
-    match (window.placement, positions_supported) {
+    let mut plan = match (window.placement, positions_supported) {
         (Some(placement), true) => PlacementPlan {
             position: Some((placement.x, placement.y)),
             physical_size: (placement.width > 0 && placement.height > 0)
                 .then_some((placement.width as u32, placement.height as u32)),
             maximized,
+            scale: 1.0,
         },
-        _ => PlacementPlan { position: None, physical_size: None, maximized },
+        _ => PlacementPlan { position: None, physical_size: None, maximized, scale: 1.0 },
+    };
+    clamp_plan(&mut plan, &rune::displays());
+    plan
+}
+
+/// Clamps a plan's frame into a connected display and seeds its scale (OI-122).
+///
+/// The display containing the stored top-left wins; when none does, the
+/// primary display does. A frame larger than that display is pinned to its
+/// top-left rather than hanging off the visible area. Headless runs and a
+/// session without a frame keep the plan untouched.
+pub fn clamp_plan(plan: &mut PlacementPlan, displays: &[Display]) {
+    let Some(display) = displays
+        .iter()
+        .find(|display| {
+            plan.position.is_some_and(|(x, y)| {
+                x >= display.position.0
+                    && y >= display.position.1
+                    && x < display.position.0.saturating_add(display.size.0 as i32)
+                    && y < display.position.1.saturating_add(display.size.1 as i32)
+            })
+        })
+        .or_else(|| displays.iter().find(|display| display.primary))
+        .or_else(|| displays.first())
+    else {
+        return;
+    };
+    if display.scale.is_finite() && display.scale > 0.0 {
+        plan.scale = display.scale;
     }
+    let Some((x, y)) = plan.position else { return };
+    let Some((width, height)) = plan.physical_size else { return };
+    let display_right = display.position.0.saturating_add(display.size.0 as i32);
+    let display_bottom = display.position.1.saturating_add(display.size.1 as i32);
+    let max_x = display_right.saturating_sub(width as i32).max(display.position.0);
+    let max_y = display_bottom.saturating_sub(height as i32).max(display.position.1);
+    plan.position = Some((x.clamp(display.position.0, max_x), y.clamp(display.position.1, max_y)));
 }
 
 /// Whether this process's window system exposes global window positions.
@@ -145,7 +195,7 @@ pub(crate) fn seed_placement(shared: &AppShared, id: WindowId, plan: PlacementPl
             position,
             content_position: position,
             content_size: plan.physical_size.unwrap_or_default(),
-            scale: 1.0,
+            scale: if plan.scale.is_finite() && plan.scale > 0.0 { plan.scale } else { 1.0 },
             maximized: plan.maximized,
             ..RunePlacement::default()
         },
@@ -183,14 +233,56 @@ pub(crate) fn capture_window(state: &WindowState) -> WindowSession {
         kind,
         tabs: state.tabs().iter().map(capture_tab).collect(),
         active: state.active_index(),
-        closed: Vec::new(),
+        closed: stored_closed_tabs(state),
+        panes: Some(stored_panes(state)),
     }
+}
+
+/// The window's side panes, as the store records them (OI-121).
+fn stored_panes(state: &WindowState) -> PaneSession {
+    PaneSession {
+        left_open: state.left.is_open(),
+        right_open: state.right.is_open(),
+        left_width: state.left.width(),
+        right_width: state.right.width(),
+    }
+}
+
+/// The window's Ctrl+Shift+T stack, newest last, in the store's schema
+/// (OI-121). Pasted tabs carry no text here: their drafts own it and a closed
+/// pasted tab without a draft cannot be reopened after a restart either.
+fn stored_closed_tabs(state: &WindowState) -> Vec<ClosedTabSession> {
+    state
+        .closed_tabs()
+        .iter()
+        .map(|closed| match closed {
+            ClosedTab::File { path, index, anchor } => ClosedTabSession {
+                source: SessionTabSource::File { path: path.clone() },
+                index: *index,
+                anchor: Some(anchor.clone()),
+            },
+            ClosedTab::Pasted { id, title, index, anchor, .. } => ClosedTabSession {
+                source: SessionTabSource::Pasted { id: *id, title: title.clone() },
+                index: *index,
+                anchor: Some(anchor.clone()),
+            },
+        })
+        .collect()
 }
 
 /// Whether a stored tab still describes `tab` (OI-151).
 ///
 /// Comparing the restorable facts is a read; [`capture_tab`] clones each
 /// Back/Forward list, so an idle frame must not build a fragment at all.
+/// The find bar without its source-range hits: those are recomputed from the
+/// buffer and must never make an idle frame look changed (OI-121).
+fn stored_find(tab: &Tab) -> Option<lmdv_core::FindState> {
+    tab.view.find.clone().map(|mut find| {
+        find.matches.clear();
+        find
+    })
+}
+
 fn same_tab(stored: &TabSession, tab: &Tab) -> bool {
     let source = match (&tab.source, &stored.source) {
         (crate::window::TabSource::Start, SessionTabSource::Start) => true,
@@ -206,9 +298,18 @@ fn same_tab(stored: &TabSession, tab: &Tab) -> bool {
     source
         && stored.anchor.as_ref() == Some(&tab.view.anchor)
         && stored.line == tab.view.line
-        && stored.anchor_id.is_none()
+        && stored.anchor_id == tab.view.fragment
         && stored.nav == tab.view.nav
         && stored.mode == session_mode(tab.view.mode)
+        && stored.find == stored_find(tab)
+        && stored.reader_find
+            == tab.view.reader_find.open.then(|| ReaderFindSession {
+                query: tab.view.reader_find.query.text.clone(),
+                current: tab.view.reader_find.current,
+            })
+        && stored.toc_filter == tab.view.toc_filter
+        && stored.details_open == tab.view.details_open
+        && stored.outline_hidden == tab.view.outline_hidden
 }
 
 fn session_mode(mode: Mode) -> TabMode {
@@ -247,8 +348,9 @@ impl PublishedSession {
         last.placement == placement
             && last.maximized == maximized
             && last.kind == kind
+            && last.panes == Some(stored_panes(state))
             && last.active == state.active_index()
-            && last.closed.is_empty()
+            && last.closed == stored_closed_tabs(state)
             && last.tabs.len() == state.tabs().len()
             && last.tabs.iter().zip(state.tabs()).all(|(stored, tab)| same_tab(stored, tab))
     }
@@ -267,9 +369,17 @@ fn capture_tab(tab: &Tab) -> TabSession {
         source,
         anchor: Some(tab.view.anchor.clone()),
         line: tab.view.line,
-        anchor_id: None,
+        anchor_id: tab.view.fragment.clone(),
         nav: tab.view.nav.clone(),
         mode: session_mode(tab.view.mode),
+        find: stored_find(tab),
+        reader_find: tab.view.reader_find.open.then(|| ReaderFindSession {
+            query: tab.view.reader_find.query.text.clone(),
+            current: tab.view.reader_find.current,
+        }),
+        toc_filter: tab.view.toc_filter.clone(),
+        details_open: tab.view.details_open.clone(),
+        outline_hidden: tab.view.outline_hidden,
     }
 }
 
@@ -335,8 +445,15 @@ pub(crate) fn read_restore_drafts(dirs: &AppDirs, session: &SessionSnapshot) -> 
                     if let Some(issue) = loaded.issue {
                         drafts.issues.push(issue);
                     }
-                    if loaded.value.is_some() {
-                        drafts.files_with_drafts.insert(path.clone());
+                    if let Some(draft) = loaded.value {
+                        // OI-123: an equal-to-disk draft is dropped silently at
+                        // open; waiting here for a prompt that will not come
+                        // would leave a restored editor tab in viewer mode.
+                        let silent =
+                            lmdv_io::read_document(path).is_ok_and(|on_disk| on_disk.buffer.text() == draft.text);
+                        if !silent {
+                            drafts.files_with_drafts.insert(path.clone());
+                        }
                     }
                 }
                 _ => {}
@@ -387,7 +504,17 @@ pub(crate) fn restore_tabs(
     for tab in &window.tabs {
         let restored: Option<(TabId, bool)> = match &tab.source {
             SessionTabSource::Start => Some((state.push_start_tab(), false)),
-            SessionTabSource::File { path } => Some((state.open_path(path.clone()), false)),
+            SessionTabSource::File { path } => {
+                // OI-123: two windows restoring the same file must not start
+                // two load jobs. The first window owns the job; later windows
+                // attach the already-registered document instead.
+                let absolute = lmdv_io::absolute_lexical(path);
+                let existing = state.shared().docs().find_path(&absolute);
+                Some(match existing {
+                    Some(document) => (state.attach_document(document), false),
+                    None => (state.open_path(path.clone()), false),
+                })
+            }
             SessionTabSource::Pasted { id, title } => match drafts.pasted.get(id) {
                 Some(draft) => {
                     let document = match pasted_docs.get(id) {
@@ -427,9 +554,29 @@ pub(crate) fn restore_tabs(
             if let Some(anchor) = &tab.anchor {
                 restored.view.anchor = anchor.clone();
             }
+            if let Some(id) = &tab.anchor_id
+                && !id.is_empty()
+            {
+                restored.view.anchor.id = id.clone();
+                restored.view.fragment = Some(id.clone());
+            }
             restored.view.line = tab.line;
             restored.view.nav = tab.nav.clone();
             restored.view.nav.sanitize();
+            // OI-121: the restorable per-tab surfaces come back with the tab;
+            // matches are recomputed by the find refresh on the next frame.
+            if let Some(find) = &tab.find {
+                restored.view.find = Some(find.clone());
+            }
+            if let Some(reader_find) = &tab.reader_find {
+                restored.view.reader_find.open = true;
+                restored.view.reader_find.query.replace_text(reader_find.query.clone());
+                restored.view.reader_find.current = reader_find.current;
+                crate::reader_find::refresh_tab(restored);
+            }
+            restored.view.toc_filter = tab.toc_filter.clone();
+            restored.view.details_open = tab.details_open.clone();
+            restored.view.outline_hidden = tab.outline_hidden;
             if tab.mode == TabMode::Editor && !restored.is_start() {
                 let has_draft = match &tab.source {
                     SessionTabSource::File { path } => drafts.files_with_drafts.contains(path),
@@ -450,6 +597,31 @@ pub(crate) fn restore_tabs(
         }
     }
 
+    // OI-121: the closed-tab stack is part of the window, not of a tab, so it
+    // survives a restart for both files and pasted text (whose draft owns the
+    // text). Drop entries whose pasted draft is gone.
+    for closed in &window.closed {
+        let record = match &closed.source {
+            SessionTabSource::File { path } => ClosedTab::File {
+                path: path.clone(),
+                index: closed.index,
+                anchor: closed.anchor.clone().unwrap_or_default(),
+            },
+            SessionTabSource::Pasted { id, title } => match drafts.pasted.get(id) {
+                Some(draft) => ClosedTab::Pasted {
+                    id: *id,
+                    title: title.clone(),
+                    text: draft.text.clone(),
+                    index: closed.index,
+                    anchor: closed.anchor.clone().unwrap_or_default(),
+                },
+                None => continue,
+            },
+            SessionTabSource::Start => continue,
+        };
+        state.remember_closed_tab(record);
+    }
+
     state.restoring_tabs = false;
     state.navigation.unsuppress();
     if state.tabs.is_empty() {
@@ -462,6 +634,12 @@ pub(crate) fn restore_tabs(
         .unwrap_or(0);
     state.active = active.min(state.tabs.len().saturating_sub(1));
     state.sync_editor_panes();
+    if let Some(panes) = window.panes {
+        state.left.set_width(panes.left_width);
+        state.left.set_open(panes.left_open);
+        state.right.set_width(panes.right_width);
+        state.right.set_open(panes.right_open);
+    }
     let anchor = state.active_tab().map(|tab| tab.view.anchor.clone()).unwrap_or_default();
     state.begin_restore(&anchor);
     state.load_outline_filter();
@@ -480,6 +658,21 @@ fn restored_pasted_document(shared: &AppShared, id: u64, title: &str, draft: &Dr
     document.saved.borrow_mut().hash = lmdv_core::hash_text(&draft.base);
     shared.docs_mut().insert_ready(document.clone());
     document
+}
+
+/// Opens the CLI file in the first restored window when `--restore-session`
+/// was passed alongside it (OI-124). Stored windows keep their tabs; the file
+/// joins the first one instead of replacing the whole session.
+///
+/// The one-line factory call is in the reported `app.rs` patch; until the
+/// orchestrator applies it, this helper is intentionally unused (OI-124).
+#[allow(dead_code)]
+pub(crate) fn open_launch_in_restored(state: &mut WindowState, launch: &Launch) -> bool {
+    let Some(path) = launch.path.as_ref() else { return false };
+    state.open_path(path.clone());
+    state.sync_registry();
+    let _ = state.publish_session();
+    true
 }
 
 /// The notice a restored window shows, if any.
@@ -631,12 +824,27 @@ mod tests {
 
     #[test]
     fn restore_is_skipped_for_headless_launches_and_cli_files() {
-        let allowed = RestoreConditions { restore_session: true, headless: false, has_path: false, new_window: false };
+        let allowed = RestoreConditions {
+            restore_session: true,
+            headless: false,
+            has_path: false,
+            new_window: false,
+            force: false,
+        };
         assert!(allowed.allows());
         assert!(!RestoreConditions { restore_session: false, ..allowed }.allows());
         assert!(!RestoreConditions { headless: true, ..allowed }.allows());
         assert!(!RestoreConditions { has_path: true, ..allowed }.allows());
         assert!(!RestoreConditions { new_window: true, ..allowed }.allows());
+
+        // OI-124: the explicit flag overrides prefs and a CLI path for the
+        // stored windows, but never headless or `--new-window`.
+        let forced = RestoreConditions { force: true, has_path: true, ..allowed };
+        assert!(forced.allows());
+        assert!(!RestoreConditions { headless: true, ..forced }.allows());
+        assert!(!RestoreConditions { new_window: true, ..forced }.allows());
+        // `should_restore` sets `restore_session` from the flag too.
+        assert!(RestoreConditions { force: true, ..allowed }.allows());
     }
 
     #[test]
@@ -673,6 +881,160 @@ mod tests {
     }
 
     #[test]
+    fn restored_frames_are_clamped_to_a_visible_display_and_seed_its_scale() {
+        let display = Display { id: None, name: None, position: (0, 0), size: (1920, 1080), scale: 2.0, primary: true };
+        let mut plan = PlacementPlan {
+            position: Some((3000, 1200)),
+            physical_size: Some((1000, 700)),
+            maximized: false,
+            scale: 1.0,
+        };
+        clamp_plan(&mut plan, std::slice::from_ref(&display));
+        assert_eq!(plan.position, Some((920, 380)), "the frame is pulled back onto the display");
+        assert_eq!(plan.scale, 2.0, "the first placement carries the display's scale");
+
+        let mut oversized = PlacementPlan {
+            position: Some((-100, -100)),
+            physical_size: Some((2400, 1600)),
+            maximized: false,
+            scale: 1.0,
+        };
+        clamp_plan(&mut oversized, &[display]);
+        assert_eq!(oversized.position, Some((0, 0)), "a frame too big for the display pins to its origin");
+
+        let mut headless =
+            PlacementPlan { position: Some((9, 9)), physical_size: None, scale: 1.0, ..Default::default() };
+        clamp_plan(&mut headless, &[]);
+        assert_eq!(headless.position, Some((9, 9)));
+    }
+
+    #[test]
+    fn the_closed_tab_stack_survives_a_restart() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("closed.md");
+        let session = SessionSnapshot {
+            clean: true,
+            windows: vec![WindowSession {
+                tabs: vec![TabSession::default()],
+                closed: vec![
+                    ClosedTabSession {
+                        source: SessionTabSource::File { path: path.clone() },
+                        index: 2,
+                        anchor: Some(lmdv_core::ScrollAnchor { id: "where".to_owned(), offset: 8.0 }),
+                    },
+                    ClosedTabSession {
+                        source: SessionTabSource::Pasted { id: 6, title: "Lost paste".to_owned() },
+                        index: 0,
+                        anchor: None,
+                    },
+                ],
+                ..WindowSession::default()
+            }],
+        };
+        let drafts = RestoredDrafts {
+            pasted: BTreeMap::from([(6, Draft::new("kept\n", "kept\n", 1))]),
+            ..RestoredDrafts::default()
+        };
+        let shared = test_support::shared(&temp);
+        let restored = startup_states(
+            Rc::clone(&shared),
+            &Launch::default(),
+            None,
+            Some(StartupRestore { session: &session, drafts: &drafts, positions: true }),
+        );
+        let closed = restored[0].state.closed_tabs();
+        assert_eq!(closed.len(), 2, "a closed file and a closed pasted tab with a draft both return");
+        let ClosedTab::File { path: stored, index, anchor } = &closed[0] else {
+            panic!("the restored entry is a file tab");
+        };
+        assert_eq!(stored, &path);
+        assert_eq!(*index, 2);
+        assert_eq!(anchor.id, "where");
+        let ClosedTab::Pasted { id, text, .. } = &closed[1] else {
+            panic!("the restored entry is a pasted tab");
+        };
+        assert_eq!(*id, 6);
+        assert_eq!(text, "kept\n");
+
+        // A pasted closed tab whose draft is gone cannot be reopened.
+        let no_draft = RestoredDrafts::new();
+        let restored = startup_states(
+            Rc::clone(&shared),
+            &Launch::default(),
+            None,
+            Some(StartupRestore { session: &session, drafts: &no_draft, positions: true }),
+        );
+        assert_eq!(restored[0].state.closed_tabs().len(), 1);
+    }
+
+    #[test]
+    fn an_equal_to_disk_draft_does_not_delay_the_stored_editor_mode() {
+        let temp = TempDir::new().unwrap();
+        let dirs = test_support::dirs(&temp);
+        let path = temp.path().join("same.md");
+        std::fs::write(&path, "# On disk\n").unwrap();
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Draft { key: file_key(&path), draft: Draft::new("# On disk\n", "# On disk\n", 1) });
+        assert!(handle.flush(Duration::from_secs(2)));
+        drop(handle);
+
+        let session = SessionSnapshot {
+            clean: true,
+            windows: vec![WindowSession {
+                tabs: vec![TabSession {
+                    source: SessionTabSource::File { path: path.clone() },
+                    mode: TabMode::Editor,
+                    ..TabSession::default()
+                }],
+                ..WindowSession::default()
+            }],
+        };
+        let drafts = read_restore_drafts(&dirs, &session);
+        assert!(!drafts.files_with_drafts.contains(&path), "OI-123: a silent drop has no prompt to wait for");
+
+        std::fs::write(&path, "# Changed on disk\n").unwrap();
+        let drafts = read_restore_drafts(&dirs, &session);
+        assert!(drafts.files_with_drafts.contains(&path), "a real draft still waits for the prompt");
+    }
+
+    #[test]
+    fn two_restored_windows_share_one_load_for_the_same_file() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("shared.md");
+        let shared = test_support::shared(&temp);
+        let doc = shared.docs_mut().insert_loading(DocumentKey::File(path.clone()), "shared.md".to_owned());
+        let session = SessionSnapshot {
+            clean: true,
+            windows: vec![
+                WindowSession {
+                    tabs: vec![TabSession {
+                        source: SessionTabSource::File { path: path.clone() },
+                        ..TabSession::default()
+                    }],
+                    ..WindowSession::default()
+                },
+                WindowSession {
+                    tabs: vec![TabSession {
+                        source: SessionTabSource::File { path: path.clone() },
+                        ..TabSession::default()
+                    }],
+                    ..WindowSession::default()
+                },
+            ],
+        };
+        let restored = startup_states(
+            Rc::clone(&shared),
+            &Launch::default(),
+            None,
+            Some(StartupRestore { session: &session, drafts: &RestoredDrafts::new(), positions: true }),
+        );
+        let first = restored[0].state.tabs()[0].document().expect("first tab");
+        let second = restored[1].state.tabs()[0].document().expect("second tab");
+        assert!(Rc::ptr_eq(first, second));
+        assert_eq!(first.id, doc.id, "both windows joined the one registered document");
+    }
+
+    #[test]
     fn capture_serializes_the_reopenable_state_only() {
         let temp = TempDir::new().unwrap();
         let shared = test_support::shared(&temp);
@@ -699,6 +1061,134 @@ mod tests {
         assert!(!json.contains("editor text"), "editor text is never serialized: {json}");
         let parsed: WindowSession = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, captured);
+    }
+
+    #[test]
+    fn find_outline_details_and_panes_round_trip_through_the_session() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let path = temp.path().join("notes.md");
+        std::fs::write(&path, "# Notes\n\nbody\n").unwrap();
+        let mut state = state(&shared, "window-1");
+        let tab_id = state.open_path(path);
+        let tab = state.tabs.iter_mut().find(|tab| tab.id == tab_id).expect("the tab");
+        let mut find = lmdv_core::FindState { query: "body".to_owned(), ..lmdv_core::FindState::default() };
+        find.matches.push(lmdv_core::FindMatch { source: 0..1, block: 0, line: 0 });
+        tab.view.find = Some(find);
+        tab.view.reader_find.open = true;
+        tab.view.reader_find.query.replace_text("body");
+        tab.view.reader_find.current = 2;
+        tab.view.toc_filter = "head".to_owned();
+        tab.view.details_open.insert("b1/details:0".to_owned());
+        tab.view.outline_hidden = true;
+        state.left.set_width(310.0);
+        state.left.set_open(true);
+        state.right.set_width(280.0);
+        state.right.set_open(true);
+        assert!(state.publish_session());
+        let session = shared.session_snapshot(true);
+
+        let restored_shared = test_support::shared(&temp);
+        let restored = startup_states(
+            Rc::clone(&restored_shared),
+            &Launch::default(),
+            None,
+            Some(StartupRestore { session: &session, drafts: &RestoredDrafts::new(), positions: true }),
+        );
+        let window = &restored[0].state;
+        let tab = window.tabs().iter().find(|tab| !tab.is_start()).expect("the tab");
+        let find = tab.view.find.as_ref().expect("the editor find bar");
+        assert_eq!(find.query, "body");
+        assert!(find.matches.is_empty(), "hits are recomputed, not frozen into the session");
+        assert!(tab.view.reader_find.open);
+        assert_eq!(tab.view.reader_find.query.text, "body");
+        assert_eq!(tab.view.reader_find.current, 2);
+        assert_eq!(tab.view.toc_filter, "head");
+        assert!(tab.view.details_open.contains("b1/details:0"));
+        assert!(tab.view.outline_hidden);
+        assert_eq!(window.left.width(), 310.0);
+        assert!(window.left.is_open());
+        assert_eq!(window.right.width(), 280.0);
+        // Right openness follows the restored outline's headings (O-06); the
+        // left pane's dock state is taken verbatim.
+    }
+
+    /// Headless proof for the restore/clamp slice. Set
+    /// `LMDV_SESSION_PROOF_DIR` to keep the artifacts under
+    /// `/tmp/opencode/session-polish/`; otherwise this is an ordinary test.
+    #[test]
+    fn a_restore_proof_records_the_clamp_and_the_restored_state() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("restored.md");
+        std::fs::write(&path, "# Restored\n\nbody\n").unwrap();
+        let session = SessionSnapshot {
+            clean: false,
+            windows: vec![WindowSession {
+                placement: Some(StoredPlacement { x: 5000, y: 4000, width: 1200, height: 860, maximized: false }),
+                kind: SessionWindowKind::TornOffStart,
+                tabs: vec![TabSession {
+                    source: SessionTabSource::File { path: path.clone() },
+                    mode: TabMode::Editor,
+                    toc_filter: "head".to_owned(),
+                    ..TabSession::default()
+                }],
+                active: 0,
+                closed: vec![ClosedTabSession {
+                    source: SessionTabSource::File { path: path.clone() },
+                    index: 1,
+                    anchor: Some(lmdv_core::ScrollAnchor { id: "where".to_owned(), offset: 4.0 }),
+                }],
+                ..WindowSession::default()
+            }],
+        };
+        let window_session = &session.windows[0];
+        let displays =
+            vec![Display { id: None, name: None, position: (0, 0), size: (1920, 1080), scale: 2.0, primary: true }];
+        let mut plan = PlacementPlan {
+            position: Some((5000, 4000)),
+            physical_size: Some((1200, 860)),
+            maximized: false,
+            scale: 1.0,
+        };
+        clamp_plan(&mut plan, &displays);
+        assert_eq!(plan.position, Some((720, 220)), "the stored frame is pulled onto the only display");
+        assert_eq!(plan.scale, 2.0);
+
+        let shared = test_support::shared(&temp);
+        let restored = startup_states(
+            Rc::clone(&shared),
+            &Launch::default(),
+            None,
+            Some(StartupRestore { session: &session, drafts: &RestoredDrafts::new(), positions: true }),
+        );
+        let state = &restored[0].state;
+        assert_eq!(state.tabs()[0].view.toc_filter, "head");
+        assert_eq!(state.closed_tabs().len(), 1);
+        assert_eq!(restored[0].kind, WindowKind::TornOffStart);
+        assert!(state.ui.notice.is_some(), "an unclean session reports recovery");
+
+        if let Some(dir) = std::env::var_os("LMDV_SESSION_PROOF_DIR") {
+            let dir = std::path::PathBuf::from(dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("session.json"), serde_json::to_string_pretty(&session).unwrap()).unwrap();
+            std::fs::write(
+                dir.join("clamp.txt"),
+                format!(
+                    "stored=({},{}) {}+{}\nclamped={:?} scale={}\nrestored kind={:?} tabs={} closed={} filter={:?}\n",
+                    window_session.placement.unwrap().x,
+                    window_session.placement.unwrap().y,
+                    window_session.placement.unwrap().width,
+                    window_session.placement.unwrap().height,
+                    plan.position,
+                    plan.scale,
+                    restored[0].kind,
+                    state.tabs().len(),
+                    state.closed_tabs().len(),
+                    state.tabs()[0].view.toc_filter,
+                ),
+            )
+            .unwrap();
+        }
     }
 
     #[test]

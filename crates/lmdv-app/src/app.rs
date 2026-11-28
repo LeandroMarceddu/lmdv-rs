@@ -7,7 +7,7 @@ use std::rc::Rc;
 use lmdv_io::instance::{Claim, InstancePaths, InstanceServer, LaunchAck, LaunchRequest, forward};
 use lmdv_io::store::{SessionSnapshot, load_session_reported};
 use lmdv_io::{AppDirs, DirsIssue, Launch};
-use rune::{AppSpec, Key, KeyEvent, Tx, Waker};
+use rune::{AppSpec, Cx, El, Key, KeyEvent, Tx, Waker};
 
 use crate::commands::{command_for_key_in, dispatch_command};
 use crate::session::RestoredDrafts;
@@ -113,6 +113,10 @@ fn run_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>, launch: Launch) {
     // `Drop`; keep the orderly teardown this app has always had.
     rune::orderly_exit();
     let shared = AppShared::start_reported(dirs, dirs_issues);
+    // OI-117: spend the launcher's token on this process's first native host.
+    shared.set_startup_activation_token(
+        launch.activation_token.clone().or_else(lmdv_io::launch::activation_token_from_env),
+    );
     // The saved language (or the OS's, for Auto) is process-wide and must be in
     // place before the first window builds its strings.
     crate::settings::apply_locale(&shared.prefs());
@@ -201,7 +205,8 @@ fn startup_windows(
     // foreign file must be protected before the factory's first session patch
     // — even when this launch will not restore it, because a CLI launch or
     // `--new-window` replaces the stored session on close.
-    let loaded = (!(shared.is_headless() || rune::is_headless())).then(|| load_session_reported(shared.dirs()));
+    let loaded = (!(shared.is_headless() || rune::is_headless()) || crate::session::test_restore_seam())
+        .then(|| load_session_reported(shared.dirs()));
     if let Some(issue) = loaded.as_ref().and_then(|loaded| loaded.issue.clone()) {
         shared.note_store_issue(issue.clone());
         shared.protect_store_files(std::slice::from_ref(&issue));
@@ -296,6 +301,12 @@ pub(crate) fn startup_states(
             });
         }
         if !windows.is_empty() {
+            // OI-124: keep the stored windows and open the file in the first.
+            if launch.restore_session
+                && let Some(first) = windows.first_mut()
+            {
+                crate::session::open_launch_in_restored(&mut first.state, launch);
+            }
             return windows;
         }
     }
@@ -330,6 +341,30 @@ fn headless_test_window() -> Option<PathBuf> {
     std::env::var_os("LMDV_TEST_WINDOW").map(PathBuf::from)
 }
 
+/// The window view with the app's root key preview installed (O-14).
+///
+/// Rune offers key-down events to the focused element's ancestors outermost
+/// first, before the focused field edits them. Navigation chords are taken
+/// here so `Alt+Left`/`Alt+Right` navigate even while a text field has focus,
+/// instead of word-moving inside it. Palette keys are deliberately left to
+/// [`on_key`]: a preview would fire while an IME is composing, whereas the key
+/// router suppresses the chords through [`WindowState::ime_composing`] (C-01).
+/// Rune stops previews at a modal boundary, so this never runs behind the
+/// palette, a dialog or a menu.
+pub(crate) fn app_view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
+    view::view(state, cx).on_key_preview(|state: &mut WindowState, event: &KeyEvent, tx: &mut Tx| {
+        if crate::commands::key_matches(event, "Alt+Left") {
+            let _ = crate::commands::dispatch_command(state, "nav.back", tx);
+            return true;
+        }
+        if crate::commands::key_matches(event, "Alt+Right") {
+            let _ = crate::commands::dispatch_command(state, "nav.forward", tx);
+            return true;
+        }
+        false
+    })
+}
+
 /// The callbacks every lmdv window shares.
 fn app_spec() -> AppSpec<WindowState> {
     AppSpec {
@@ -338,7 +373,7 @@ fn app_spec() -> AppSpec<WindowState> {
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
-        ..AppSpec::new("lmdv", WINDOW_SIZE, fallback_state, view::view)
+        ..AppSpec::new("lmdv", WINDOW_SIZE, fallback_state, app_view)
     }
 }
 
@@ -425,6 +460,8 @@ fn claim_instance(shared: &std::rc::Rc<AppShared>, launch: &Launch) -> Result<()
         Claim::Secondary(paths) => {
             let mut request = LaunchRequest::new(launch.clone());
             request.activation_token = std::env::var("XDG_ACTIVATION_TOKEN").ok();
+            // OI-117: the router reads Launch, not the envelope field.
+            request.launch.activation_token = request.activation_token.clone();
             match forward(&paths, &request).map_err(|error| error.to_string())? {
                 ack if ack.ok => std::process::exit(0),
                 ack => Err(ack.error.unwrap_or_else(|| "the running instance refused the launch".to_owned())),

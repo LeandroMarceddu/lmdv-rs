@@ -1668,6 +1668,24 @@ impl WindowState {
         self.shared.spell_availability()
     }
 
+    /// The viewport window to highlight, widened to the block that owns its
+    /// first byte (OI-059).
+    ///
+    /// A large source is lexed one window at a time. A window cut inside a
+    /// fenced block would start after that fence's opener, so the lexer would
+    /// lose the language and paint the body as plain text. Blocks are already
+    /// fence-aware ([`lmdv_edit::block_ranges`] keeps blank lines inside a
+    /// fence), so owning block's range gives the lexer the opener and the
+    /// closing fence it needs. A small source is highlighted whole; above the
+    /// lexer's cap a caller without a window gets the caret's own window.
+    fn syntax_window(text: &str, visible: Range<usize>) -> Range<usize> {
+        let at = visible.start.min(text.len());
+        let blocks = lmdv_edit::block_ranges(text);
+        let index = blocks.partition_point(|block| block.end <= at);
+        let Some(block) = blocks.get(index) else { return visible };
+        block.start.min(visible.start)..block.end.max(visible.end).min(text.len())
+    }
+
     /// The single field's syntax spans with spelling underlines composed in.
     ///
     /// The syntax spans keep their cache; spelling is painted on top, never
@@ -1680,7 +1698,20 @@ impl WindowState {
         visible: Option<Range<usize>>,
         underline: rune::Color,
     ) -> Vec<Span> {
-        let spans = lmdv_edit::syntax::syntax_spans(edit, theme, visible);
+        let window = match visible {
+            Some(range) => Some(Self::syntax_window(&edit.text, range)),
+            None if edit.text.len() > lmdv_edit::syntax::SYNTAX_MAX_BYTES => {
+                // E-05: a large single field colours the caret's neighbourhood
+                // instead of dropping highlighting altogether.
+                let (from, to) = edit.range();
+                let half = lmdv_edit::syntax::SYNTAX_MAX_BYTES / 2;
+                let fence = Self::syntax_window(&edit.text, from..from);
+                let context = from.saturating_sub(half)..to.saturating_add(half).min(edit.text.len());
+                Some(fence.start.min(context.start)..fence.end.max(context.end).min(edit.text.len()))
+            }
+            None => None,
+        };
+        let spans = lmdv_edit::syntax::syntax_spans(edit, theme, window);
         let revision = tab.view.editor.as_ref().map(EditorSession::revision).unwrap_or(0);
         let ranges = self.spell_ranges(tab.id, revision);
         if ranges.is_empty() {
@@ -1711,6 +1742,24 @@ impl WindowState {
             return spans;
         }
         compose_underlines(spans, &ranges, underline)
+    }
+
+    /// The plain text and source bytes of a preview block, for the block
+    /// context menu's rich copy (OI-096).
+    ///
+    /// `BlockRef` carries the rendered text and the block's source lines, not
+    /// byte offsets. Mapping the lines through the shared buffer gives the
+    /// `SelectionCopy` the export worker expects, so the copied HTML describes
+    /// the block the menu was opened on even while an edit is unsaved.
+    // OI-096: the menu item that calls this lives in orchestrator-owned
+    // `view.rs`; keep the helper built until it is wired there.
+    pub(crate) fn block_selection_copy(&self, block: &lmdv_render::BlockRef) -> Option<(String, Range<usize>)> {
+        let document = self.active_tab()?.document()?;
+        let text = document.text();
+        let last_line = text.line_count().saturating_sub(1);
+        let start = text.line_start(block.line.min(last_line));
+        let end = if block.end_line > last_line { text.text().len() } else { text.line_start(block.end_line) };
+        (start <= end && !block.text.is_empty()).then(|| (block.text.clone(), start..end))
     }
 
     fn spell_ranges(&self, tab: TabId, revision: u64) -> &[Range<usize>] {

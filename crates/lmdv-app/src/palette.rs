@@ -140,6 +140,14 @@ pub fn palette_open_chord(state: &WindowState, event: &KeyEvent) -> Option<Palet
     {
         return None;
     }
+    // C-01: a chord typed to steer or confirm an input method's composition
+    // belongs to the IME, not to the app. Rune's own composition guard only
+    // reserves Return and Escape and leaves Ctrl+K/Ctrl+Shift+P to `on_key`
+    // (and a focused text field does not consume them), so suppress the opening
+    // chords here while any field is composing.
+    if state.ime_composing() {
+        return None;
+    }
     if !event.mods.ctrl || event.mods.alt || event.mods.logo {
         return None;
     }
@@ -151,6 +159,39 @@ pub fn palette_open_chord(state: &WindowState, event: &KeyEvent) -> Option<Palet
         return Some(PaletteChord::CtrlK);
     }
     None
+}
+
+impl WindowState {
+    /// Whether a text field in this window holds an open IME composition (C-01).
+    ///
+    /// Only the focused field can compose — Rune ends a preedit when a field
+    /// loses focus — and the runtime does not expose `TextEdit::is_composing()`
+    /// or the focused field's identity to an app key handler. Reading every
+    /// field's composition state here is therefore the focused field's state as
+    /// the app can see it. A chord pressed mid-composition must not open the
+    /// palette; ordinary chords are unaffected because no field composes then.
+    pub(crate) fn ime_composing(&self) -> bool {
+        if self.palette.query.is_composing()
+            || self.browser_search.is_composing()
+            || self.outline_filter.is_composing()
+            || self.editor.scratch.is_composing()
+            || self.editor.goto_line.as_ref().is_some_and(|goto| goto.input.is_composing())
+            || self.tables.preview.as_ref().is_some_and(|preview| preview.query.is_composing())
+        {
+            return true;
+        }
+        self.tabs.iter().any(|tab| {
+            tab.view.reader_find.query.is_composing()
+                || tab.view.find_bar.query.is_composing()
+                || tab.view.find_bar.replace.is_composing()
+                || tab.view.editor.as_ref().is_some_and(|editor| {
+                    editor.edit.is_composing()
+                        || editor
+                            .block_editor()
+                            .is_some_and(|blocks| blocks.blocks().iter().any(|block| block.edit.is_composing()))
+                })
+        })
+    }
 }
 
 /// What a row is, for its icon and its accessible kind.
@@ -591,9 +632,10 @@ impl WindowState {
             }
             _ => {
                 // The opening key closes it again; a held key's auto-repeat does
-                // not (C-01: a fresh press only).
+                // not (C-01: a fresh press only). A chord typed mid-composition
+                // belongs to the IME and neither opens nor closes the palette.
                 if self.palette.chord.is_some_and(|chord| chord.matches(event)) {
-                    if !tx.key_repeat() {
+                    if !tx.key_repeat() && !self.ime_composing() {
                         self.close_palette();
                     }
                     return true;

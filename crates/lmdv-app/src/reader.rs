@@ -901,7 +901,7 @@ impl<'a> ReaderView<'a> {
 mod tests {
     use std::collections::HashMap;
 
-    use rune::{Cursor, PointerButton, Runtime, Tx};
+    use rune::{Cursor, GesturePhase, MagnifyEvent, PointerButton, Runtime, Tx};
     use tempfile::TempDir;
 
     use super::*;
@@ -1055,6 +1055,30 @@ Closing paragraph.
         assert_eq!(top, READER_PAD_TOP, "the top stays 32 above 420");
         assert!(column <= 640.0, "the pane itself is narrow: {column}");
         assert_eq!(content, column - 2.0 * side, "the content follows the narrow padding");
+    }
+
+    /// F-21: the article's `on_magnify` wire (at the end of [`ReaderView::build`])
+    /// really steps the reader size from a native, phased trackpad pinch, not
+    /// just from `reader_magnify` called directly. The side panes stay put.
+    #[test]
+    fn a_native_pinch_over_the_article_steps_only_the_reader_size() {
+        let temp = TempDir::new().unwrap();
+        let mut state = WindowState::new(test_support::shared(&temp));
+        crate::view::scene_reader(&mut state);
+        let size = state.shared().prefs().reader.size;
+        let side = state.shared().prefs().reader.side_size;
+        let mut runtime = Runtime::new(state, crate::view::view, (1280.0, 900.0), rune::Env::new(false, 1.0));
+        runtime.frame(0.0);
+
+        // A phased pinch: Began locks the article's handler; Moved deltas
+        // accumulate to one step (0.2 + 0.2 > 0.35).
+        runtime.magnify_event(MagnifyEvent::new(0.2).at(640.0, 450.0).phase(GesturePhase::Began));
+        runtime.magnify_event(MagnifyEvent::new(0.2).at(640.0, 450.0).phase(GesturePhase::Moved));
+        runtime.magnify_event(MagnifyEvent::new(0.0).at(640.0, 450.0).phase(GesturePhase::Ended));
+        runtime.frame(1.0 / 60.0);
+
+        assert_ne!(runtime.state.shared().prefs().reader.size, size, "the native pinch grew the reader one step");
+        assert_eq!(runtime.state.shared().prefs().reader.side_size, side, "the panels were untouched");
     }
 
     #[test]

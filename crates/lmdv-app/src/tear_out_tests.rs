@@ -330,6 +330,38 @@ fn reset_opener(shared: &AppShared) {
 }
 
 #[test]
+fn a_torn_tab_follows_the_pointer_and_docking_closes_the_floating_window() {
+    let temp = TempDir::new().unwrap();
+    let shared = shared(&temp);
+    let mut source = WindowState::new(Rc::clone(&shared));
+    let document = ready_file(&shared, &temp.path().join("follow.md"), "# Follow\n");
+    let tab = source.attach_document(document);
+    source.new_start_tab();
+    source.activate_tab(tab);
+    source.sync_registry();
+    place(&shared, source.id(), 100, 100, 1100, 760, 1.0);
+    reset_opener(&shared);
+    type Moves = Rc<RefCell<Vec<(WindowId, (i32, i32))>>>;
+    let moves: Moves = Rc::new(RefCell::new(Vec::new()));
+    let recorded = moves.clone();
+    shared.set_position_sink(Box::new(move |id, position| recorded.borrow_mut().push((id, position))));
+
+    source.handle_tear_move(tear_move(tab, 0, [20.0, 10.0], (500, 400)));
+    assert_eq!(OPENED.with(|opened| opened.borrow().len()), 1, "a live window maps on the first move");
+    let live = source.tear.live_window().expect("the floating window");
+    assert!(source.tab(tab).is_some(), "the tab stays here until release");
+
+    source.handle_tear_move(tear_move(tab, 0, [20.0, 10.0], (540, 430)));
+    assert_eq!(moves.borrow().as_slice(), &[(live, (516, 392))], "the window follows the pointer");
+
+    let mut back = tear_move(tab, 0, [20.0, 10.0], (500, 400));
+    back.torn = false;
+    source.handle_tear_move(back);
+    assert_eq!(source.tear.live_window(), None, "reattach closes the floating window");
+    assert!(source.tab(tab).is_some(), "and keeps the tab in the source strip");
+}
+
+#[test]
 fn a_drop_outside_every_window_opens_one_at_the_pointer_and_adopts_the_tab() {
     let temp = TempDir::new().unwrap();
     let shared = shared(&temp);

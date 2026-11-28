@@ -18,7 +18,7 @@
 //! late load) so the writer never overwrites settings or drafts it cannot
 //! read.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lmdv_core::{
-    DRAFT_MAX_CHARS, DRAFT_MAX_ENTRIES, Draft, LEFT_WIDTH_DEFAULT, LEFT_WIDTH_MAX, NavHistory, Prefs,
+    DRAFT_MAX_CHARS, DRAFT_MAX_ENTRIES, Draft, FindState, LEFT_WIDTH_DEFAULT, LEFT_WIDTH_MAX, NavHistory, Prefs,
     RIGHT_WIDTH_DEFAULT, RIGHT_WIDTH_MAX, ScrollAnchor,
 };
 use serde::de::DeserializeOwned;
@@ -434,6 +434,19 @@ pub struct WindowSession {
     pub active: usize,
     /// Closed tabs, most recent last.
     pub closed: Vec<ClosedTabSession>,
+    /// Per-window pane widths and openness (OI-121). `None` in a session
+    /// written before this field, so the panes keep their defaults.
+    pub panes: Option<PaneSession>,
+}
+
+/// A window's side panes at capture time (OI-121).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PaneSession {
+    pub left_open: bool,
+    pub right_open: bool,
+    pub left_width: f32,
+    pub right_width: f32,
 }
 
 /// Why a window exists, as the original's `WindowKind` records it.
@@ -489,6 +502,25 @@ pub struct TabSession {
     /// The mode the tab was in; text and undo always come from the file and
     /// its draft, never from the session.
     pub mode: TabMode,
+    /// The editor find/replace bar's query and options (OI-121). Hits are not
+    /// stored: they are source ranges recomputed from the buffer.
+    pub find: Option<FindState>,
+    /// The reader find bar's query and current hit (OI-121).
+    pub reader_find: Option<ReaderFindSession>,
+    /// The outline's filter text (O-05).
+    pub toc_filter: String,
+    /// `<details>` and front-matter cards the reader had open (M-22).
+    pub details_open: BTreeSet<String>,
+    /// Whether the reader hid its outline for this tab (O-06).
+    pub outline_hidden: bool,
+}
+
+/// The restorable part of the reader find bar (R-16–R-19).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ReaderFindSession {
+    pub query: String,
+    pub current: usize,
 }
 
 /// A tab's reading mode.
@@ -541,6 +573,11 @@ impl SessionSnapshot {
                     anchor.sanitize();
                 }
                 tab.nav.sanitize();
+                if let Some(find) = &mut tab.find {
+                    // Hits are source ranges from the last buffer; recompute
+                    // them on the first frame after restore.
+                    find.matches.clear();
+                }
             }
             if window.closed.len() > CLOSED_TABS_MAX {
                 let excess = window.closed.len() - CLOSED_TABS_MAX;
@@ -1571,6 +1608,7 @@ mod tests {
                         anchor_id: None,
                         nav: NavHistory::default(),
                         mode: TabMode::Editor,
+                        ..TabSession::default()
                     },
                     TabSession {
                         source: TabSource::Pasted { id: 7, title: "Notes".to_owned() },
@@ -1579,6 +1617,7 @@ mod tests {
                 ],
                 active: 1,
                 closed: Vec::new(),
+                ..WindowSession::default()
             }],
         };
         let json = serde_json::to_string(&session).unwrap();
@@ -1642,6 +1681,7 @@ mod tests {
                     anchor_id: None,
                     nav: NavHistory::default(),
                     mode: TabMode::Editor,
+                    ..TabSession::default()
                 }],
                 active: 0,
                 closed: Vec::new(),

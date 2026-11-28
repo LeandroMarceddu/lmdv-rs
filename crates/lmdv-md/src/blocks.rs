@@ -14,10 +14,10 @@ use crate::html;
 use crate::inline::{self, InlineContext};
 use crate::math;
 use crate::model::{
-    Align, Block, BlockSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, Footnote, FrontMatter, Heading, HtmlNode,
-    ImageBlock, Inline, InlineObjectKind, MathSpan, MdDoc, OBJECT_CHAR, Table,
+    Align, Block, BlockSpan, Diagnostic, DiagnosticCode, DiagnosticSeverity, Footnote, FrontMatter, Heading, HtmlChild,
+    HtmlNode, HtmlTag, ImageBlock, Inline, InlineObject, InlineObjectKind, MathSpan, MdDoc, OBJECT_CHAR, Table,
 };
-use crate::text::{Protected, line_of, line_starts};
+use crate::text::{Protected, find_ci, line_of, line_starts, repair_source_map, rfind_ci};
 
 /// Parse a document with revision 0.
 pub fn parse(source: &str) -> MdDoc {
@@ -215,7 +215,7 @@ impl<'a> BlockParser<'a> {
                 *index += 1;
             }
             let mut range = self.events[start].1.start..self.events[*index - 1].1.end;
-            let built = inline::build(&self.events[start..*index], ctx);
+            let built = build_inline(&self.events[start..*index], ctx, self.source);
             if built.inline.is_empty() {
                 return None;
             }
@@ -275,9 +275,21 @@ impl<'a> BlockParser<'a> {
                         _ => {}
                     }
                 }
-                let range = range.start..self.events[end].1.end;
+                let mut range = range.start..self.events[end].1.end;
                 let line = line_of(self.starts, range.start);
                 *index = end + 1;
+                // OI-042: a blank line ends a CommonMark HTML block, so a
+                // `<details>` body written after one is parsed as separate
+                // blocks. When this block opens a card that is not closed in
+                // it, take the whole span through `</details>` as one raw
+                // fragment so the card owns its body.
+                if let Some(new_end) = extend_open_details(self.source, &raw, &range) {
+                    while *index < self.events.len() && self.events[*index].1.start < new_end {
+                        *index += 1;
+                    }
+                    raw = self.source[range.start..new_end].to_owned();
+                    range.end = new_end;
+                }
                 let node = html::parse_block(&raw)?;
                 let block = match html_block_image(&node) {
                     Some(mut image) => {
@@ -427,7 +439,7 @@ impl<'a> BlockParser<'a> {
         ctx: &mut InlineContext<'_>,
     ) -> Option<inline::BuiltInline> {
         let end = self.find_end(*index, end_tag)?;
-        let built = inline::build(&self.events[*index + 1..end], ctx);
+        let built = build_inline(&self.events[*index + 1..end], ctx, self.source);
         *index = end + 1;
         Some(built)
     }
@@ -484,7 +496,7 @@ impl<'a> BlockParser<'a> {
             match self.events.get(index).map(|(event, _)| event) {
                 Some(Event::Start(Tag::TableCell)) => {
                     if let Some(cell_end) = self.find_end(index, TagEnd::TableCell) {
-                        cells.push(inline::build(&self.events[index + 1..cell_end], ctx).inline);
+                        cells.push(build_inline(&self.events[index + 1..cell_end], ctx, self.source).inline);
                         index = cell_end + 1;
                     } else {
                         break;
@@ -692,6 +704,151 @@ fn html_block_image(node: &HtmlNode) -> Option<ImageBlock> {
     });
     let first = nodes.next()?;
     nodes.next().is_none().then(|| html::image_from_html(first)).flatten()
+}
+
+/// Finish an inline run: correct entity/escape source mappings (OI-025) and
+/// rebuild an inline `<picture>` as one object with its `<source>` children
+/// (OI-026/OI-041).
+fn build_inline<'a>(
+    events: &[(Event<'a>, Range<usize>)],
+    ctx: &mut InlineContext<'_>,
+    source: &str,
+) -> inline::BuiltInline {
+    let mut built = inline::build(events, ctx);
+    repair_source_map(source, &mut built.inline);
+    restore_inline_picture_sources(source, &mut built.inline);
+    built
+}
+
+/// The end of the `</details>` line when `raw` opened a card it did not close
+/// (OI-042), bounded so a stray unmatched tag cannot swallow the document.
+fn extend_open_details(source: &str, raw: &str, range: &Range<usize>) -> Option<usize> {
+    if find_ci(raw, "<details").is_none() || find_ci(raw, "</details>").is_some() {
+        return None;
+    }
+    let search_end = (range.end + 64 * 1024).min(source.len());
+    let offset = find_ci(&source[range.end..search_end], "</details>")?;
+    let close = range.end + offset;
+    Some(source[close..].find('\n').map_or(source.len(), |next| close + next + 1))
+}
+
+/// Pulldown reports an inline `<picture>` as an empty picture object covering
+/// an inner `<img>` object, dropping `<source>` children entirely. Rebuild it
+/// from the source spelling: one picture object with the `<img>` and its
+/// sanitized `<source>` children, so the renderer resolves a single candidate
+/// (OI-041) with the picture's scheme sources (OI-026).
+fn restore_inline_picture_sources(source: &str, inline: &mut Inline) {
+    let pictures: Vec<usize> = inline
+        .objects
+        .iter()
+        .enumerate()
+        .filter_map(|(index, object)| (object.kind == InlineObjectKind::Picture).then_some(index))
+        .collect();
+    if pictures.is_empty() {
+        return;
+    }
+    // Back to front: removing an inner `<img>` shifts every later object.
+    let mut drop = Vec::new();
+    for index in pictures.into_iter().rev() {
+        let (picture, image_index, image_offset) = {
+            let picture = &inline.objects[index];
+            let Some(image_index) = inline.objects.iter().enumerate().find_map(|(other, object)| {
+                (object.kind == InlineObjectKind::Image
+                    && object.range.start >= picture.range.start
+                    && object.range.end <= picture.range.end)
+                    .then_some(other)
+            }) else {
+                continue;
+            };
+            let image_offset = inline.source_map.source_of(inline.objects[image_index].range.start);
+            (picture.clone(), image_index, image_offset)
+        };
+        let Some(image_offset) = image_offset else { continue };
+        let back_start = image_offset.saturating_sub(16 * 1024);
+        let before = &source[back_start..image_offset.min(source.len())];
+        let Some(open) =
+            rfind_ci(before, "<picture").and_then(|at| before[at..].find('>').map(|end| back_start + at + end + 1))
+        else {
+            continue;
+        };
+        let after = &source[image_offset.min(source.len())..(image_offset + 16 * 1024).min(source.len())];
+        let Some(close) = find_ci(after, "</picture>") else { continue };
+        let span = &source[open..image_offset.min(source.len()) + close];
+        let img = inline.objects[image_index].html.clone();
+        let mut children = Vec::new();
+        for tag in scan_tags(span, 16 * 1024) {
+            if tag.closing || tag.name != "source" {
+                continue;
+            }
+            let (mut attrs, srcset) = html::filter_attrs(HtmlTag::Source, tag.attrs);
+            // A `<source>` has no `alt` of its own: the `<img>` supplies the
+            // caption and accessibility label whichever candidate wins.
+            if let Some(node) = &img {
+                for name in ["alt", "title"] {
+                    if node.attr(name).is_some_and(|value| !value.is_empty())
+                        && attrs.iter().all(|(key, _)| key != name)
+                    {
+                        attrs.push((name.to_owned(), node.attr(name).unwrap_or_default().to_owned()));
+                    }
+                }
+            }
+            children.push(HtmlChild::Node(HtmlNode { tag: HtmlTag::Source, attrs, children: Vec::new(), srcset }));
+        }
+        if let Some(img) = img {
+            children.push(HtmlChild::Node(img));
+        }
+        if !children.is_empty() {
+            let attrs = picture.html.as_ref().map(|node| node.attrs.clone()).unwrap_or_default();
+            inline.objects[index] = InlineObject {
+                range: picture.range.clone(),
+                kind: InlineObjectKind::Picture,
+                html: Some(HtmlNode { tag: HtmlTag::Picture, attrs, children, srcset: Vec::new() }),
+            };
+            drop.push(image_index);
+        }
+    }
+    drop.sort_unstable();
+    drop.dedup();
+    for index in drop.into_iter().rev() {
+        inline.objects.remove(index);
+    }
+}
+
+/// The inline tags in a bounded source span, with quoted `>` kept inside the
+/// tag. Used only to recover `<source>` attributes of an inline `<picture>`.
+fn scan_tags(span: &str, budget: usize) -> Vec<html::ParsedTag> {
+    let bytes = span.as_bytes();
+    let mut out = Vec::new();
+    let mut index = 0usize;
+    while index < bytes.len().min(budget) {
+        if bytes[index] != b'<' {
+            index += 1;
+            continue;
+        }
+        let mut end = index + 1;
+        let mut quote = None;
+        while end < bytes.len().min(budget) {
+            let byte = bytes[end];
+            if let Some(mark) = quote {
+                if byte == mark {
+                    quote = None;
+                }
+            } else if matches!(byte, b'"' | b'\'') {
+                quote = Some(byte);
+            } else if byte == b'>' {
+                break;
+            }
+            end += 1;
+        }
+        if end >= bytes.len().min(budget) {
+            break;
+        }
+        if let Some(tag) = html::parse_tag(&span[index..=end]) {
+            out.push(tag);
+        }
+        index = end + 1;
+    }
+    out
 }
 
 fn undefined_footnote_diagnostics(

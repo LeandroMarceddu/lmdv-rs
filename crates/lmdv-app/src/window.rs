@@ -4349,6 +4349,101 @@ mod tests {
         assert_eq!(header.text, about.text);
     }
 
+    // ---- D-08: every cancel settles the kit's drag to Idle -----------------
+
+    fn drag_in_hand(runtime: &mut Runtime<WindowState>, tab: lmdv_core::TabId, dx: f32) {
+        let (x, y) = runtime.find(&format!("t-{}", tab_key(tab))).expect("the drag's tab");
+        runtime.pointer_move(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_down(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(x + dx, y);
+        runtime.frame(0.0);
+        assert!(
+            matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Dragging(_)),
+            "the reorder is in hand before the cancel: {:?}",
+            runtime.state.drag.phase()
+        );
+    }
+
+    fn three_tabs(state: &mut WindowState) -> Vec<lmdv_core::TabId> {
+        vec![
+            state.open_synthetic("One", "# One\n"),
+            state.open_synthetic("Two", "# Two\n"),
+            state.open_synthetic("Three", "# Three\n"),
+        ]
+    }
+
+    #[test]
+    fn escape_settles_an_in_hand_reorder_to_idle() {
+        use rune::{Key, KeyEvent, Mods};
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let tabs = three_tabs(&mut state);
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        drag_in_hand(&mut runtime, tabs[0], 140.0);
+
+        runtime.key(KeyEvent { key: Key::Escape, mods: Mods::default() });
+        runtime.frame(1.0 / 60.0);
+        runtime.pointer_up(0.0, 0.0);
+        runtime.frame(2.0 / 60.0);
+
+        assert!(
+            matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Idle),
+            "Escape ends the gesture: {:?}",
+            runtime.state.drag.phase()
+        );
+        let titles: Vec<_> = runtime.state.tabs().iter().map(Tab::full_title).collect();
+        assert_eq!(titles, ["One", "Two", "Three"], "the tab returned to its original slot");
+    }
+
+    #[test]
+    fn pointer_cancel_settles_an_in_hand_reorder_to_idle() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let tabs = three_tabs(&mut state);
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        drag_in_hand(&mut runtime, tabs[0], 140.0);
+
+        runtime.cancel_pointer();
+        runtime.frame(1.0 / 60.0);
+
+        assert!(
+            matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Idle),
+            "a cancelled pointer ends the gesture: {:?}",
+            runtime.state.drag.phase()
+        );
+        let titles: Vec<_> = runtime.state.tabs().iter().map(Tab::full_title).collect();
+        assert_eq!(titles, ["One", "Two", "Three"], "no reorder landed");
+    }
+
+    #[test]
+    fn opening_a_modal_settles_an_in_hand_reorder_to_idle() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let tabs = three_tabs(&mut state);
+        let mut runtime = Runtime::new(state, view, (1100.0, 760.0), Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        drag_in_hand(&mut runtime, tabs[0], 140.0);
+
+        runtime.update(|state, _| state.open_help(HelpView::Full));
+        runtime.frame(1.0 / 60.0);
+        runtime.frame(2.0 / 60.0);
+
+        assert!(
+            matches!(runtime.state.drag.phase(), rune_kit::shell::TabDragPhase::Idle),
+            "a modal taking keys ends the gesture: {:?}",
+            runtime.state.drag.phase()
+        );
+        let titles: Vec<_> = runtime.state.tabs().iter().map(Tab::full_title).collect();
+        assert_eq!(titles, ["One", "Two", "Three"], "no reorder landed");
+    }
+
     /// The accessibility node keyed `key`, depth first.
     fn a11y_node<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
         if node.get("key").and_then(|value| value.as_str()) == Some(key) {

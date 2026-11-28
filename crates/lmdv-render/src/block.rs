@@ -733,8 +733,11 @@ impl<'a> Renderer<'a> {
         let size = 15.0;
         let (fill, border) =
             if checked { (self.theme.accent, self.theme.accent) } else { (Color::TRANSPARENT, self.theme.muted) };
+        // OI-112: `item` is list-local, so nested items with the same label and
+        // index would otherwise share a key. The inline source-map byte range
+        // is unique per marker and stable across frames.
         let mut box_ = el()
-            .key(format!("task-{}", task.item))
+            .key(format!("task-{}-{}-{}", task.item, task.source.start, task.source.end))
             .role("checkbox")
             .label(task.label.clone())
             .checked(checked)

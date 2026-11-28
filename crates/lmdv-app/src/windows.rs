@@ -61,6 +61,22 @@ impl std::fmt::Debug for WindowHandles {
     }
 }
 
+impl WindowHandles {
+    /// Shows and focuses this window with the compositor's activation token
+    /// (OI-117). On Wayland a plain `focus()` may be refused: the compositor
+    /// only lets a window take focus when a token from the launching client is
+    /// passed to `WindowHandle::activate`. An empty token is ignored by Rune.
+    pub fn activate(&self, token: &str) {
+        self.native.activate(token);
+    }
+
+    /// Moves this native window where the platform allows it (X11); Wayland
+    /// keeps compositor placement (the live tear-out follow in [`crate::tear_out`]).
+    pub fn set_position(&self, position: (i32, i32)) {
+        self.native.set_position(position);
+    }
+}
+
 /// One window known to the process.
 pub struct WindowEntry {
     /// The window identity.
@@ -470,6 +486,19 @@ impl WakeSet {
         }
     }
 
+    /// Wakes every registered window except `except`.
+    ///
+    /// A publish that changed a document's dirty flag or title is visible to
+    /// the other windows (they read the registry), so they must draw another
+    /// frame; the window that published has already drawn its own (OI-074).
+    pub fn wake_except(&self, except: WindowId) {
+        let wakers: Vec<Waker> =
+            self.wakers.borrow().iter().filter(|(id, _)| **id != except).map(|(_, waker)| waker.clone()).collect();
+        for waker in wakers {
+            waker();
+        }
+    }
+
     /// A waker that wakes every window, for the launch and watcher inboxes,
     /// whose threads cannot reach [`AppShared`].
     pub fn composite(&self) -> Waker {
@@ -732,6 +761,31 @@ mod tests {
         set.detach(WindowId(1));
         set.wake_all();
         assert_eq!((first.load(Ordering::SeqCst), second.load(Ordering::SeqCst)), (2, 4));
+    }
+
+    #[test]
+    fn waking_except_one_window_leaves_the_publisher_asleep() {
+        let set = WakeSet::new();
+        let first = Arc::new(AtomicUsize::new(0));
+        let second = Arc::new(AtomicUsize::new(0));
+        let first_count = first.clone();
+        let second_count = second.clone();
+        set.attach(
+            WindowId(1),
+            Arc::new(move || {
+                first_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        set.attach(
+            WindowId(2),
+            Arc::new(move || {
+                second_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        set.wake_except(WindowId(1));
+        assert_eq!(first.load(Ordering::SeqCst), 0);
+        assert_eq!(second.load(Ordering::SeqCst), 1);
     }
 
     #[test]

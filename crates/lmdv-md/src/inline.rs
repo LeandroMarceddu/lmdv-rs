@@ -8,8 +8,8 @@ use pulldown_cmark::{Event, Tag, TagEnd};
 
 use crate::html;
 use crate::model::{
-    Diagnostic, DiagnosticCode, DiagnosticSeverity, HtmlNode, HtmlTag, Inline, InlineLink, InlineMath, InlineObject,
-    InlineObjectKind, InlineSpan, InlineStyle, MathSpan, OBJECT_CHAR, SourceMap,
+    Diagnostic, DiagnosticCode, DiagnosticSeverity, HtmlChild, HtmlNode, HtmlTag, Inline, InlineLink, InlineMath,
+    InlineObject, InlineObjectKind, InlineSpan, InlineStyle, MathSpan, OBJECT_CHAR, SourceMap,
 };
 use crate::text::line_of;
 
@@ -73,6 +73,7 @@ pub(crate) fn build<'a>(events: &[(Event<'a>, Range<usize>)], ctx: &mut InlineCo
         links_open: Vec::new(),
         html_links: Vec::new(),
         html_objects: Vec::new(),
+        svg_frames: Vec::new(),
         drop_depth: 0,
         image: None,
         suppressed_until: None,
@@ -116,6 +117,18 @@ struct HtmlObjectFrame {
     start: usize,
 }
 
+/// An inline `<svg>` being framed in a paragraph (L-12 / OI-195).
+///
+/// The placeholder is emitted as soon as the open tag arrives so the object's
+/// byte range stays before any link text the SVG contains; the parsed tree is
+/// filled in at the closing tag from the exact source slice, so shapes keep the
+/// same filtering as a block-level SVG.
+struct SvgFrame {
+    source_start: usize,
+    object_index: usize,
+    attrs: Vec<(String, String)>,
+}
+
 struct Builder<'a, 'b> {
     text: String,
     spans: Vec<InlineSpan>,
@@ -129,6 +142,7 @@ struct Builder<'a, 'b> {
     links_open: Vec<LinkFrame>,
     html_links: Vec<LinkFrame>,
     html_objects: Vec<HtmlObjectFrame>,
+    svg_frames: Vec<SvgFrame>,
     drop_depth: usize,
     image: Option<ImageFrame>,
     suppressed_until: Option<usize>,
@@ -467,6 +481,12 @@ impl Builder<'_, '_> {
         }
         let Some(tag) = html::parse_tag(raw) else { return };
         if tag.closing {
+            if tag.name == "svg"
+                && let Some(frame) = self.svg_frames.pop()
+            {
+                self.finish_svg(frame, range.end);
+                return;
+            }
             self.close_html(&tag.name);
             return;
         }
@@ -546,6 +566,24 @@ impl Builder<'_, '_> {
                 };
                 self.html_objects.push(HtmlObjectFrame { name: tag.name.clone(), kind, node, start: self.text.len() });
             }
+            HtmlTag::Svg => {
+                // OI-195: the placeholder comes before any text/link runs the
+                // SVG contains, so the object's byte range stays in place. The
+                // parsed tree is filled in at `</svg>` from the exact source
+                // slice, with the open tag's attributes as the fallback.
+                let start = self.text.len();
+                self.append_raw(&OBJECT_CHAR.to_string(), range.start);
+                self.objects.push(InlineObject {
+                    range: start..self.text.len(),
+                    kind: InlineObjectKind::Unknown,
+                    html: None,
+                });
+                self.svg_frames.push(SvgFrame {
+                    source_start: range.start,
+                    object_index: self.objects.len() - 1,
+                    attrs: node.attrs.clone(),
+                });
+            }
             _ => {}
         }
     }
@@ -574,6 +612,28 @@ impl Builder<'_, '_> {
                     self.spans.push(InlineSpan { range: start..self.text.len(), style });
                 }
             }
+        }
+    }
+
+    /// Fill the SVG object's tree once `</svg>` has been seen. Parsing the
+    /// exact source slice reuses the block path's shape marking and URL policy;
+    /// a fragment that fails to parse yields the opening tag's filtered attributes so
+    /// the renderer can still report an SVG (with its text/links fallback).
+    fn finish_svg(&mut self, frame: SvgFrame, source_end: usize) {
+        let node = self
+            .ctx
+            .source
+            .get(frame.source_start..source_end)
+            .and_then(html::parse_block)
+            .and_then(|fragment| {
+                fragment.children.into_iter().find_map(|child| match child {
+                    HtmlChild::Node(node) if node.tag == HtmlTag::Svg => Some(node),
+                    _ => None,
+                })
+            })
+            .unwrap_or(HtmlNode { tag: HtmlTag::Svg, attrs: frame.attrs, children: Vec::new(), srcset: Vec::new() });
+        if let Some(object) = self.objects.get_mut(frame.object_index) {
+            object.html = Some(node);
         }
     }
 

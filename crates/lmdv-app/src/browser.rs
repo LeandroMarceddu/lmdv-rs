@@ -53,8 +53,8 @@ use lmdv_io::store::UiPrefs;
 use lmdv_io::tree::{SearchHit, TreeListing};
 use lmdv_io::watch::TreeWatcher;
 use rune::{
-    Cursor, Cx, El, FileDialogOptions, GrowthSpec, Key, KeyEvent, Mods, PointerPress, ScrollSpec, Span, Tx, col, el,
-    icon, rich, row, text,
+    Current, Cursor, Cx, El, FileDialogOptions, GrowthSpec, Key, KeyEvent, Mods, PointerPress, ScrollSpec, Span, Tx,
+    col, el, icon, rich, row, text,
 };
 use rune_kit::shell::Sidebar;
 use rune_kit::{Button, ButtonVariant, IconButton, IconButtonVariant, Kit, MenuItem, TextInput};
@@ -2074,6 +2074,37 @@ fn tree(state: &WindowState, kit: &Kit) -> El {
     root
 }
 
+/// A row's place among its siblings and a folder's first visible child (A-06).
+///
+/// The pane draws a pre-ordered flat list: a folder's descendants follow it at
+/// a deeper level. Walking back over those descendants finds the run of rows at
+/// the row's own level that share a parent; walking forward does the same on
+/// the other side. That run is the row's ARIA set: its 1-based place is
+/// `aria-posinset`, the run's length `aria-setsize`. A folder's first child,
+/// when it is open, is the group it owns through `aria-owns`.
+pub(crate) fn row_place(rows: &[BrowserRow], index: usize) -> (usize, usize, Option<&str>) {
+    let Some(row) = rows.get(index) else { return (0, 0, None) };
+    let depth = row.depth;
+    let mut before = 0;
+    for candidate in rows[..index].iter().rev() {
+        match candidate.depth.cmp(&depth) {
+            std::cmp::Ordering::Greater => continue, // a descendant of the earlier sibling
+            std::cmp::Ordering::Less => break,       // the parent
+            std::cmp::Ordering::Equal => before += 1,
+        }
+    }
+    let mut after = 0;
+    for candidate in rows.iter().skip(index + 1) {
+        match candidate.depth.cmp(&depth) {
+            std::cmp::Ordering::Greater => continue, // this row's own subtree
+            std::cmp::Ordering::Less => break,       // the next sibling of the parent
+            std::cmp::Ordering::Equal => after += 1,
+        }
+    }
+    let child = rows.get(index + 1).filter(|next| next.depth == depth + 1).map(|next| next.path.as_str());
+    (before + 1, before + 1 + after, child)
+}
+
 fn browser_row(state: &WindowState, index: usize, kit: &Kit) -> El {
     let Some(row) = state.browser.rows().get(index) else { return el() };
     let focused = state.browser.focused() == Some(row.path.as_str());
@@ -2092,12 +2123,21 @@ fn browser_row(state: &WindowState, index: usize, kit: &Kit) -> El {
         item = item.label_color(kit.c.text_accent).icon_color(kit.c.text_accent).dot(kit.c.text_accent);
     }
     let tree_row = TreeRow::new(&row.path, row.depth).expanded(open).selected(focused || active);
+    let (position, size, first_child) = row_place(state.browser.rows(), index);
     let path = row.path.clone();
     let dir = row.dir;
     let menu_path = row.path.clone();
-    item.build(kit, &tree_row, &style)
-        .key(row.path.clone())
-        .cursor(Cursor::Pointer)
+    // The kit already sets `treeitem`, `aria-level`, `aria-expanded` and the
+    // selected state. The app's own flat rows add the set position, the folder's
+    // ownership of its first visible child and the current document (A-06).
+    let mut line = item.build(kit, &tree_row, &style).key(row.path.clone()).position_in_set(position, size);
+    if let Some(child) = first_child.filter(|_| row.dir && row.expanded) {
+        line = line.owns(child.to_owned());
+    }
+    if active {
+        line = line.current(Current::True);
+    }
+    line.cursor(Cursor::Pointer)
         .on_press_tx(move |state: &mut WindowState, tx: &mut Tx| {
             tx.focus(BROWSER_TREE_KEY, false);
             let mods = tx.mods();

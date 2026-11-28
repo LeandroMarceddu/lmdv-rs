@@ -16,7 +16,7 @@ use std::ops::Range;
 
 use lmdv_md::{HtmlNode, HtmlTag, Inline, InlineObjectKind, InlineStyle};
 use rune::text::InlineImage;
-use rune::{Color, El, Link, Span, TextHighlight, TextStyle, rich};
+use rune::{Color, El, InlineAlign, InlineBox, Link, Span, TextHighlight, TextStyle, col, rich};
 
 use crate::block::Renderer;
 use crate::math::fit;
@@ -85,6 +85,8 @@ struct Rep {
     link: Option<String>,
     /// The picture object's place in `Inline::objects`, for the preview link.
     picture: Option<usize>,
+    /// An inline SVG's shape box: the slot and the element drawn in it.
+    svg: Option<(InlineBox, El)>,
     /// Filled while composing: the replacement's position in the drawn text.
     new_start: usize,
     new_end: usize,
@@ -98,6 +100,8 @@ struct Built {
     links: Vec<(Range<usize>, String, Option<String>)>,
     /// Pressable inline pictures: drawn bytes, `image:{block}:{object}`, alt.
     picture_links: Vec<(Range<usize>, String, String)>,
+    /// In-flow SVG shape boxes: the drawn byte, its slot and its element.
+    inline_boxes: Vec<(usize, InlineBox, El)>,
     uncopied: Vec<Range<usize>>,
     /// Paint-only highlights in drawn bytes: the range, its kind and the index
     /// of the caller's [`crate::Highlight`] it came from.
@@ -110,6 +114,9 @@ impl<'a> Renderer<'a> {
         let built = self.build_inline(inline, opts.strip_tasks);
         let identity = self.note_text(opts.key, &built.text);
         let mut e = rich(built.text, built.spans).font(opts.style).color(opts.color).exact_lines().w_full();
+        for (at, slot, child) in built.inline_boxes {
+            e = e.inline(at, slot, child);
+        }
         for range in built.strikes {
             e = e.strike(range.start, range.end, None);
         }
@@ -126,9 +133,14 @@ impl<'a> Renderer<'a> {
             e = e.link(link);
         }
         // V-01 for a text-span picture: the picture itself is the preview button.
+        // V-02: a span has no element wrapper to hang the block picture's
+        // floating expand button on, so the hint is this link's own `help`:
+        // Rune shows it after the hover delay over the picture's glyphs and it
+        // takes no room in the line, so nothing reflows. The element stays the
+        // keyboard button (the hint is not a tab stop).
         for (range, dest, label) in built.picture_links {
             has_links = true;
-            e = e.link(Link::new(range, dest).role("button").label(label));
+            e = e.link(Link::new(range, dest).role("button").label(label).help(lmdv_i18n::t!("zoom.open")));
         }
         if !built.highlights.is_empty() {
             e = self.painted(e, built.highlights);
@@ -180,6 +192,7 @@ impl<'a> Renderer<'a> {
                 uncopied: Vec::new(),
                 link: None,
                 picture: None,
+                svg: None,
                 new_start: 0,
                 new_end: 0,
             };
@@ -231,6 +244,7 @@ impl<'a> Renderer<'a> {
                 uncopied: Vec::new(),
                 link: None,
                 picture: Some(object_index),
+                svg: None,
                 new_start: 0,
                 new_end: 0,
             };
@@ -309,7 +323,16 @@ impl<'a> Renderer<'a> {
                     rep.muted = true;
                 }
                 InlineObjectKind::Details | InlineObjectKind::Unknown => {
-                    rep.text.push_str(&object.html.as_ref().map(|n| n.text()).unwrap_or_default());
+                    if object.html.as_ref().is_some_and(|node| node.tag == HtmlTag::Svg) {
+                        // L-12/OI-195: the paragraph already carries the SVG's
+                        // text and link runs; the placeholder is only the shape
+                        // box's byte range, so copy/selection stay aligned.
+                        rep.text.push(lmdv_md::OBJECT_CHAR);
+                        rep.placeholder = Some(0);
+                        rep.svg = object.html.as_ref().and_then(|node| self.svg_inline(node));
+                    } else {
+                        rep.text.push_str(&object.html.as_ref().map(|n| n.text()).unwrap_or_default());
+                    }
                 }
                 InlineObjectKind::LineBreak => {}
             }
@@ -393,10 +416,14 @@ impl<'a> Renderer<'a> {
 
         let mut uncopied = Vec::new();
         let mut picture_links: Vec<(Range<usize>, String, String)> = Vec::new();
+        let mut inline_boxes: Vec<(usize, InlineBox, El)> = Vec::new();
         let pictures_pressable = self.opts.wires.link.is_some();
         let block_index = self.nested_block();
         let block_key = self.doc.block_key(block_index).map(str::to_owned).unwrap_or_else(|| format!("b{block_index}"));
-        for rep in &reps {
+        for rep in &mut reps {
+            if let Some((slot, child)) = rep.svg.take() {
+                inline_boxes.push((rep.new_start, slot, child));
+            }
             if let Some(offset) = rep.placeholder {
                 let start = rep.new_start + offset;
                 if let Some(image) = &rep.image {
@@ -442,7 +469,7 @@ impl<'a> Renderer<'a> {
         // Highlight work is skipped entirely unless the app asked for it.
         let highlights =
             if self.opts.highlights.is_empty() { Vec::new() } else { self.inline_highlights(inline, &reps, &text) };
-        Built { text, spans, strikes, links, picture_links, uncopied, highlights }
+        Built { text, spans, strikes, links, picture_links, inline_boxes, uncopied, highlights }
     }
 
     /// The source span a formula replaced: its delimiters and its TeX.
@@ -597,6 +624,24 @@ impl<'a> Renderer<'a> {
             .or_else(|| crate::block::best_candidate(&node.srcset, self.opts.scale).map(|c| c.url.as_str()))
     }
 
+    /// An inline `<svg>`'s shape box (L-12/OI-195). The parser has already
+    /// filtered the tree and marked its shape nodes, so the block shape builder
+    /// is reused verbatim. An SVG with nothing drawable stays as text/links.
+    fn svg_inline(&self, node: &HtmlNode) -> Option<(InlineBox, El)> {
+        let shape = crate::html::svg_shape(node, self.theme.text);
+        if shape.is_empty() {
+            return None;
+        }
+        let [width, height] = svg_inline_size(node);
+        let slot = InlineBox::new(width, height).align(InlineAlign::Middle);
+        let child = col()
+            .key("inline-svg")
+            .role("group")
+            .label("SVG")
+            .child(col().key("drawing").w(width).h(height).shape(shape));
+        Some((slot, child))
+    }
+
     /// The accessible label of a list item: its own text, sub-lists excluded,
     /// trimmed and capped at 120 characters (M-07).
     pub(crate) fn item_label(&self, blocks: &[lmdv_md::Block]) -> String {
@@ -716,6 +761,31 @@ fn source_after(map: &lmdv_md::SourceMap, rendered: usize) -> Option<usize> {
     map.segments.last().map(|segment| segment.source + segment.rendered.len())
 }
 
+/// The inline `<svg>`'s box: `width`/`height`, or the viewBox size, or SVG's
+/// 300×150 default, bounded like the block path so a document cannot reserve a
+/// huge box. Kept here because the block helper is private to `crate::html`.
+fn svg_inline_size(node: &HtmlNode) -> [f32; 2] {
+    let view = node.attr("viewbox").and_then(|value| {
+        let numbers: Vec<f32> = value
+            .split(|ch: char| ch == ',' || ch.is_whitespace())
+            .filter_map(|part| part.parse::<f32>().ok())
+            .take(4)
+            .collect();
+        (numbers.len() == 4 && numbers[2] > 0.0 && numbers[3] > 0.0).then(|| [numbers[2], numbers[3]])
+    });
+    let dimension = |name: &str, default: f32| {
+        node.attr(name)
+            .and_then(|value| value.trim().trim_end_matches("px").parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(default)
+            .clamp(1.0, 4096.0)
+    };
+    [
+        dimension("width", view.map(|box_| box_[0]).unwrap_or(300.0)),
+        dimension("height", view.map(|box_| box_[1]).unwrap_or(150.0)),
+    ]
+}
+
 /// The byte length of a Markdown image starting at `source`, its `!` included.
 ///
 /// The parser reports the whole `![alt](destination "title")` span, not just the
@@ -807,4 +877,142 @@ pub(crate) fn overlay(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use lmdv_md::MdDoc;
+    use rune::Cx;
+    use rune_kit::markdown::MarkdownStyle;
+
+    use crate::{DocTheme, ImageResolver, LinkWire, NoMath, RenderOptions, render};
+
+    /// A small decoded picture, so the inline `Span::image` has pixels to draw.
+    struct SquareImages;
+
+    impl ImageResolver for SquareImages {
+        fn resolve(&self, _src: &str, _alt: &str, _title: &str) -> Option<rune::Image> {
+            static PICTURE: std::sync::OnceLock<std::sync::Arc<rune::Image>> = std::sync::OnceLock::new();
+            let picture = PICTURE.get_or_init(|| {
+                let cache = rune::ImageCache::new(std::sync::Arc::new(|| {}));
+                let handle = cache.rgba(8, 4, vec![0x80; 8 * 4 * 4]);
+                handle.wait().expect("the fixture decodes");
+                std::sync::Arc::new(handle)
+            });
+            Some((**picture).clone())
+        }
+    }
+
+    static IMAGES: SquareImages = SquareImages;
+
+    struct Scene {
+        doc: MdDoc,
+        theme: DocTheme,
+        style: MarkdownStyle,
+        wired: Rc<Cell<bool>>,
+    }
+
+    impl Scene {
+        fn view(scene: &Scene, _: &mut Cx<Scene>) -> rune::El {
+            let wired = scene.wired.clone();
+            let wire: LinkWire = Rc::new(move |e| {
+                wired.set(true);
+                e
+            });
+            let opts = RenderOptions::new(760.0, &scene.style, &NoMath, &IMAGES).link_wire(wire);
+            render(&scene.doc, &scene.theme, &opts)
+        }
+    }
+
+    /// V-02: the inline picture's hover hint rides on its link. A span has no
+    /// element wrapper for the block hint's floating button, so Rune's
+    /// per-link `help` is the affordance: it takes no room in the line and is
+    /// not a tab stop, and the picture element stays the keyboard button.
+    #[test]
+    fn an_inline_picture_link_carries_the_open_preview_hint() {
+        let wired = Rc::new(Cell::new(false));
+        let scene = Scene {
+            doc: lmdv_md::parse("Before ![Alt](./pic.png) after\n"),
+            theme: DocTheme::neutral(false),
+            style: MarkdownStyle::neutral(false),
+            wired: wired.clone(),
+        };
+        let mut runtime = rune::Runtime::new(scene, Scene::view, (760.0, 400.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+
+        assert!(wired.get(), "the link wire reached the picture");
+        let link = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("image:b0:0"))
+            .expect("the drawn picture is a preview link");
+        assert_eq!(link.role, "button", "the picture itself is the button");
+        assert_eq!(link.label.as_deref(), Some("Alt"), "named by its alt text");
+        assert_eq!(link.help.as_deref(), Some("Open preview"), "V-02's hover hint");
+    }
+
+    /// L-12/OI-195: an `<svg>` in a paragraph draws its shapes in an in-flow
+    /// box at the object's placeholder, with a role/label for the a11y tree.
+    #[test]
+    fn an_inline_svg_draws_its_shapes_as_a_labelled_group() {
+        let scene = Scene {
+            doc: lmdv_md::parse(concat!(
+                "Before <svg viewBox=\"0 0 10 10\" width=\"10\" height=\"10\">",
+                "<rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"#f00\"/>",
+                "</svg> after\n",
+            )),
+            theme: DocTheme::neutral(false),
+            style: MarkdownStyle::neutral(false),
+            wired: Rc::new(Cell::new(false)),
+        };
+        let mut runtime = rune::Runtime::new(scene, Scene::view, (760.0, 400.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+
+        let group = runtime
+            .elements()
+            .into_iter()
+            .find(|element| element.key.as_deref() == Some("inline-svg"))
+            .expect("the inline shape group is in the paragraph");
+        assert_eq!(group.role, "group");
+        assert_eq!(group.label.as_deref(), Some("SVG"));
+        assert!(group.rect[2] > 0.0 && group.rect[3] > 0.0, "the box reserves room in the line");
+        assert!(
+            runtime
+                .elements()
+                .iter()
+                .any(|element| element.text.as_deref().is_some_and(|text| text.contains('\u{FFFC}'))),
+            "the placeholder byte range is still laid out"
+        );
+    }
+
+    /// Unsupported SVG has no shape to draw: its text and links remain the
+    /// fallback, as they were before the shape work landed.
+    #[test]
+    fn an_inline_svg_without_shapes_keeps_its_text_and_links() {
+        let wired = Rc::new(Cell::new(false));
+        let scene = Scene {
+            doc: lmdv_md::parse("A <svg viewBox=\"0 0 10 10\"><a href=\"#x\">Hi</a></svg> B\n"),
+            theme: DocTheme::neutral(false),
+            style: MarkdownStyle::neutral(false),
+            wired: wired.clone(),
+        };
+        let mut runtime = rune::Runtime::new(scene, Scene::view, (760.0, 400.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+
+        assert!(wired.get(), "the svg's link still reaches the link wire");
+        assert!(
+            runtime
+                .elements()
+                .iter()
+                .any(|element| element.text.as_deref().is_some_and(|text| text == "A \u{FFFC}Hi B")),
+            "the fallback is the paragraph's text"
+        );
+        assert!(
+            runtime.elements().iter().all(|element| element.key.as_deref() != Some("inline-svg")),
+            "nothing draws when there is no shape"
+        );
+    }
 }

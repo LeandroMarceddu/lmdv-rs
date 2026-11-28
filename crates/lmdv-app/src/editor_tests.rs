@@ -3263,3 +3263,137 @@ fn a_watch_overflow_is_one_notice_and_the_documents_reload() {
         state.active_tab().and_then(Tab::document).is_some_and(|doc| doc.text().text() == "two\n")
     });
 }
+
+#[test]
+fn a_syntax_window_inside_a_fenced_block_keeps_the_fence_opener() {
+    // OI-059: a large source is lexed one window at a time. A window that
+    // starts after the ``` line must still see that line, or the lexer loses
+    // the fence's language and paints the body as plain text.
+    let mut markdown = String::from("intro\n\n");
+    markdown.push_str(&"filler line\n".repeat(20_000));
+    // A blank line starts a new block at the opener: without one the filler
+    // and the fence would share a block larger than the lexer's window cap.
+    markdown.push('\n');
+    let opener = markdown.len();
+    markdown.push_str("```rust\nlet answer = 42;\n");
+    let body = markdown.len();
+    markdown.push_str(&"let x = 1;\n".repeat(200));
+    markdown.push_str("```\n\n");
+    markdown.push_str(&"tail line\n".repeat(20_000));
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Fence", &markdown);
+    enter_editor(&mut state);
+    let theme = SyntaxTheme::neutral(true);
+    let window = body..body + 4;
+    let (bare, widened) = {
+        let tab = state.active_tab().expect("the tab");
+        let editor = tab.view.editor.as_ref().expect("the editor");
+        (
+            lmdv_edit::syntax::syntax_spans(&editor.edit, &theme, Some(window.clone())),
+            state.editor_spans(tab, &editor.edit, &theme, Some(window.clone()), rune::Color::WHITE),
+        )
+    };
+    assert!(bare.iter().all(|span| (span.start as usize) >= body), "the bare window starts at the body");
+    assert!(
+        widened.iter().any(|span| (span.start as usize) < body),
+        "the widened window paints the opener at {opener}: {widened:?}"
+    );
+    assert!(
+        widened.iter().any(|span| (span.start as usize) <= opener && (span.end as usize) > opener),
+        "the opener's fence marker is colourised: {widened:?}"
+    );
+
+    // The field binds no visible range: the caret's own window must still be
+    // fence-aware, or a large single-field document loses highlighting (E-05).
+    {
+        let tab = state.active_tab_mut().expect("the tab");
+        let editor = tab.view.editor.as_mut().expect("the editor");
+        editor.edit.set_selection(body, body);
+    }
+    let caret_spans = {
+        let tab = state.active_tab().expect("the tab");
+        let editor = tab.view.editor.as_ref().expect("the editor");
+        state.editor_spans(tab, &editor.edit, &theme, None, rune::Color::WHITE)
+    };
+    assert!(
+        caret_spans.iter().any(|span| (span.start as usize) <= opener && (span.end as usize) > opener),
+        "a caret window paints the opener too: {caret_spans:?}"
+    );
+}
+
+#[test]
+fn visible_row_reports_are_bookkeeping_unless_the_first_row_moves_a_preview_sync() {
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().join("rows.md");
+    std::fs::write(&path, "one\n\ntwo\n\nthree\n").unwrap();
+    let mut state = window(&temp);
+    open_loaded(&mut state, &path);
+    enter_editor(&mut state);
+    poll_until(&mut state, "the preview parse", |state| {
+        state.active_tab().is_some_and(|tab| tab.view.reader.is_some())
+    });
+
+    // A source-only pane never measures a first row: record the range and keep
+    // the frame.
+    state.editor.preview_narrow = true;
+    assert!(!state.note_visible_blocks(0..2), "no preview to sync");
+    assert_eq!(state.editor.visible_blocks, Some(0..2));
+
+    state.editor.preview_narrow = false;
+    assert!(state.note_visible_blocks(1..3), "a new first row needs the E-07 measurement");
+    assert_eq!(state.editor.visible_blocks, Some(1..3));
+    assert!(!state.note_visible_blocks(1..4), "a tail-only change is bookkeeping");
+    assert!(!state.note_visible_blocks(1..3), "the identical range is bookkeeping");
+    assert_eq!(state.editor.visible_blocks, Some(1..3));
+}
+
+#[test]
+fn a_preview_block_maps_to_a_rich_selection_copy() {
+    // OI-096's app-side half: the block menu's reverse navigation already has
+    // a `BlockRef`; mapping it to source bytes is all the rich-copy job needs.
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Title\n\nA **bold** paragraph.\n\nLast block.\n");
+    let block = lmdv_render::BlockRef {
+        key: "b1".to_owned(),
+        line: 2,
+        end_line: 3,
+        code: false,
+        text: "A bold paragraph.".to_owned(),
+        texts: Vec::new(),
+    };
+    let (plain, source) = state.block_selection_copy(&block).expect("the block's copy selection");
+    assert_eq!(plain, "A bold paragraph.");
+    {
+        let document = state.active_tab().and_then(Tab::document).expect("the document");
+        assert_eq!(&document.text().text()[source], "A **bold** paragraph.\n");
+    }
+
+    // Headless proof: the same mapping drives a real rich-copy job and lands
+    // the block's HTML on the clipboard with the drawn text as its fallback.
+    let board = rune::clipboard::memory();
+    let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.use_clipboard(&board);
+    runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+    runtime.frame(0.0);
+    runtime.update(|state: &mut WindowState, _| {
+        let (plain, source) = state.block_selection_copy(&block).expect("the block's copy selection");
+        state.start_rich_selection_copy(plain, source);
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while board.content().is_none() {
+        assert!(Instant::now() < deadline, "the block's rich copy never reached the clipboard");
+        runtime.frame(0.0);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let copied = board.content().expect("clipboard content");
+    let html = copied.html().expect("the block's HTML form");
+    assert_eq!(copied.text(), "A bold paragraph.");
+    assert!(
+        html.contains("<strong") && html.contains(">bold</strong>"),
+        "the block's inline mark survives: {html:.400}"
+    );
+    println!("BLOCK_MENU_RICH_COPY_HTML={:.400}", html);
+}

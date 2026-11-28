@@ -168,6 +168,83 @@ fn ctrl_shift_p_opens_it_anywhere() {
 }
 
 #[test]
+fn an_ime_composition_keeps_the_palette_chords_to_itself() {
+    use rune::Ime;
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    with_notes(&mut state);
+    let mut tx = Tx::default();
+
+    // A field mid-composition owns Ctrl+K and Ctrl+Shift+P (C-01): an IME
+    // confirmation must never open the palette behind it.
+    state.browser_search.ime(&Ime::Preedit("にほん".to_owned(), Some((0, 6)), Vec::new()));
+    assert!(state.ime_composing(), "the preedit is open");
+    assert!(!crate::app::on_key(&mut state, &ctrl('k'), &mut tx), "Ctrl+K is the IME's");
+    assert!(!state.palette_is_open());
+    assert!(!crate::app::on_key(&mut state, &ctrl_shift('p'), &mut tx), "Ctrl+Shift+P too");
+    assert!(!state.palette_is_open());
+
+    // Committing ends the composition; the same chords work again.
+    state.browser_search.ime(&Ime::Commit("日本".to_owned()));
+    assert!(!state.ime_composing(), "the preedit is committed");
+    assert!(crate::app::on_key(&mut state, &ctrl('k'), &mut tx));
+    assert!(state.palette_is_open());
+}
+
+#[test]
+fn a_composing_palette_query_keeps_the_toggle_chord_to_itself() {
+    use rune::Ime;
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    with_notes(&mut state);
+    let mut tx = opened(&mut state, "");
+    state.palette.query.ime(&Ime::Preedit("にほん".to_owned(), Some((0, 9)), Vec::new()));
+    assert!(state.ime_composing());
+
+    assert!(state.palette_key(&ctrl('k'), &mut tx), "the chord is still the palette's to hold");
+    assert!(state.palette_is_open(), "but the IME's key does not close it");
+
+    state.palette.query.ime(&Ime::Commit("日本".to_owned()));
+    assert!(state.palette_key(&ctrl('k'), &mut tx));
+    assert!(!state.palette_is_open(), "a fresh press after the commit closes it again");
+}
+
+#[test]
+fn a_focused_field_composing_in_a_runtime_keeps_the_palette_closed() {
+    use rune::{Env, Ime};
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    with_notes(&mut state);
+    let mut runtime = Runtime::new(state, crate::app::app_view, (1100.0, 760.0), Env::new(true, 2.0));
+    runtime.on_key = Some(crate::app::on_key);
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+
+    runtime.key(ctrl('f'));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.state.active_tab().is_some_and(|tab| tab.view.reader_find.open), "Ctrl+F opened the find bar");
+
+    runtime.ime(Ime::Preedit("にほん".to_owned(), Some((0, 6)), Vec::new()));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.state.ime_composing(), "the focused field holds the preedit");
+
+    runtime.key(ctrl('k'));
+    runtime.frame(1.0 / 60.0);
+    assert!(!runtime.state.palette_is_open(), "the chord stays with the IME");
+
+    runtime.ime(Ime::Commit("日本".to_owned()));
+    runtime.frame(1.0 / 60.0);
+    assert!(!runtime.state.ime_composing());
+
+    runtime.key(ctrl('k'));
+    runtime.frame(1.0 / 60.0);
+    assert!(runtime.state.palette_is_open(), "the same chord opens after the commit");
+}
+
+#[test]
 fn alt_meta_and_shift_chords_do_not_open_it() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);

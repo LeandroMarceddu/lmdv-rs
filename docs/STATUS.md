@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-25
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (257 done, 54 substitutes, 13 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 7 P0 partials (kit patches, two small Rune patches or app-side wiring), six P1/P2 clauses, post-bump app-side work, reproducible builds/platform signatures and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (262 done, 55 substitutes, 7 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 6 P0 partials (kit patches or small Rune patches), the OI-061/OI-102 shared-design residuals, reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -528,7 +528,7 @@
 - Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
 - UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
-- Audit: **257 done, 54 substitute, 13 partial, 0 missing, 18 n/a; 7 P0 gaps**; 35 open OIs (OI-199 resolved by the new Rune pin). v0.11.0.
+- Audit: **262 done, 55 substitute, 7 partial, 0 missing, 18 n/a; 6 P0 gaps**; 12 open OIs. v0.11.0.
 
 ## Rune f4ec14e — ported (v0.11.0)
 
@@ -572,14 +572,41 @@
 - No app-side memory code was needed. No tag for this bump; version remains
   0.11.0.
 
+## Worker batch — parity and polish — complete
+
+- **SVG/HTML:** OI-025/026/041/042/195 closed. Supported SVG elements draw as
+  `Shape` in blocks and inline; advanced SVG (defs/use, gradients, CSS,
+  clip-path, dasharray) remains a documented fallback.
+- **ARIA/drag:** A-05, A-06 and D-08 closed with `--tree` proofs. A-06's
+  `owns` names the folder's first visible child row (flat virtual list), a
+  documented substitute; roving focus stays OI-131's activedescendant model.
+- **Input:** C-01 closed (IME chords suppressed); O-14's Alt+arrows half
+  closed via a window-root `on_key_preview`. BrowserBack/BrowserForward keys
+  remain upstream-blocked.
+- **Reader:** OI-182 closed — pinch was already wired and now has a test;
+  inline pictures carry a localized hover help on their own link.
+- **Tasks/editor:** OI-058/059/074/093/094/096/097/111/112 closed. The block
+  journal is capped at 256 KiB per field with an exact-undo barrier;
+  identical nested task keys carry source ranges; the block wire no longer
+  clones drawn text per frame. OI-061 and OI-102 remain partial with exact
+  shared-design reasons recorded in OPEN_ITEMS.
+- **Session:** OI-117/120/121/122/123/124/125 closed; OI-126 keeps its menu
+  substitute. OI-125's torn window follows the pointer and adopts the tab on
+  release (no mid-drag ghost).
+- Applying the four Rune patches still reproduces `vendor/rune` from pristine.
+  Full gate green; no tag for this batch.
+
+
 ## Next up
 
 **Next when work resumes:**
 
 1. Optional: Rune-side commit/paint cost or a virtualized article for 60 FPS on very large documents (the app-side view is now 1.9 ms). No FPS setting is planned.
-2. Close or accept the 7 remaining P0 rows: T-01/T-03/D-04/I-10 need rune-kit patches (OI-190); O-14's browser-key half and L-11's middle-drag release need small Rune patches; C-01 is app-side (`TextEdit::is_composing`). After the bump, L-12 (SVG vectors), A-05/A-06, O-14's Alt+arrows, V-02 and D-08 become app-side work; E-29 stays a large Rune patch or an accepted gap.
-3. Use the new Rune APIs for the app-side rows: L-12 SVG vectors (`Path::from_svg`/`El::shape`), C-01 (`TextEdit::is_composing`), O-14's Alt+arrows (`on_key_preview`), A-05/A-06 (`controls`/`owns`/`position_in_set`), V-02 pinch and D-08 drag-cancel. OI-189 is done.
+2. Close or accept the 6 remaining P0 rows: T-01/T-03/D-04/I-10 need rune-kit patches (OI-190); O-14's browser-key half and L-11's middle-drag release need small Rune patches. C-01, O-14 Alt+arrows, L-12, A-05/A-06, V-02 and D-08 are done; E-29 stays a large Rune patch or an accepted gap.
+3. Decide the two shared residuals: OI-061 needs a live bounded syntax-tree source for format-bar/slash state, and OI-102 needs an owned layout callback after virtual remount. Then take the remaining 12 OIs in bounded slices.
 4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime is implemented but needs the manual checklist in OI-155.
+
+**Known flake (task queue):** `tasks_tests::a_conflict_with_a_queued_tick_reverts_every_optimistic_byte` failed 2 of 4 aggregate `tasks_tests::` runs with “the task conflict never happened” but passes in isolation and in the full gate. Recorded, not masked; investigate before treating the queue path as settled.
 
 **Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on pristine `af6b1fdd` too, and an unrelated macOS Rune smoothing test fails on Linux.
 

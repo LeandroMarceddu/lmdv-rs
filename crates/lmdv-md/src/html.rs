@@ -22,6 +22,47 @@ const FILTERED: &[&str] =
 /// Elements whose content is dropped entirely (§5.4).
 const DROPPED: &[&str] = &["script", "style", "iframe", "object", "embed", "noscript", "template"];
 
+/// SVG elements mapped to a native `Shape` (L-12 / OI-195). They are kept in
+/// the allowed tree as a marked `<span>` because the frozen `HtmlTag` enum has
+/// no geometry variants; the marker is an internal attribute, never a URL.
+const SVG_SHAPES: &[&str] = &["rect", "circle", "ellipse", "line", "polyline", "polygon", "path", "g"];
+pub(crate) const SVG_SHAPE_ATTR: &str = "data-lmdv-shape";
+
+/// Geometry and presentation attributes that may survive on an SVG shape.
+/// Event handlers, URLs other than `href`/`xlink:href`, and arbitrary style are
+/// still refused; long path/point lists are capped below.
+const SVG_ATTRS: &[&str] = &[
+    "x",
+    "y",
+    "width",
+    "height",
+    "rx",
+    "ry",
+    "cx",
+    "cy",
+    "r",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "points",
+    "d",
+    "transform",
+    "fill",
+    "stroke",
+    "stroke-width",
+    "fill-rule",
+    "opacity",
+    "fill-opacity",
+    "stroke-opacity",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-dasharray",
+    "viewbox",
+    "preserveaspectratio",
+    "color",
+];
+
 /// Escape the `<` of GitHub-filtered tags.
 pub(crate) fn tagfilter(text: &str) -> Cow<'_, str> {
     let bytes = text.as_bytes();
@@ -97,14 +138,18 @@ fn fragment_children(dom: &RcDom) -> Vec<Handle> {
 }
 
 fn convert_children(children: &[Handle]) -> Vec<HtmlChild> {
+    convert_children_in(children, false)
+}
+
+fn convert_children_in(children: &[Handle], in_svg: bool) -> Vec<HtmlChild> {
     let mut out = Vec::new();
     for child in children {
-        out.extend(stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || convert_node(child)));
+        out.extend(stacker::maybe_grow(64 * 1024, 2 * 1024 * 1024, || convert_node_in(child, in_svg)));
     }
     out
 }
 
-fn convert_node(node: &Handle) -> Vec<HtmlChild> {
+fn convert_node_in(node: &Handle, in_svg: bool) -> Vec<HtmlChild> {
     match &node.data {
         NodeData::Text { contents } => {
             let text = contents.borrow().to_string();
@@ -115,18 +160,59 @@ fn convert_node(node: &Handle) -> Vec<HtmlChild> {
             if DROPPED.iter().any(|tag| tag.eq_ignore_ascii_case(name)) {
                 return Vec::new();
             }
+            let raw_attrs: Vec<(String, String)> =
+                attrs.borrow().iter().map(|attr| (attr.name.local.to_string(), attr.value.to_string())).collect();
+            // Inside `<svg>`, shapes keep their geometry and presentation
+            // attributes in a marked span. The marker is internal and the same
+            // URL policy as every other element still applies to `href`.
+            if in_svg && SVG_SHAPES.iter().any(|tag| tag.eq_ignore_ascii_case(&name.to_ascii_lowercase())) {
+                let shape = name.to_ascii_lowercase();
+                let mut kept = vec![(SVG_SHAPE_ATTR.to_owned(), shape.clone())];
+                kept.extend(filter_svg_attrs(raw_attrs));
+                let nested = matches!(shape.as_str(), "g" | "a");
+                let children = convert_children_in(&node.children.borrow(), nested);
+                return vec![HtmlChild::Node(HtmlNode {
+                    tag: HtmlTag::Span,
+                    attrs: kept,
+                    children,
+                    srcset: Vec::new(),
+                })];
+            }
             let Some(tag) = allowed_tag(name) else {
                 // Unknown tag: keep its children as text, as GitHub does.
-                return convert_children(&node.children.borrow());
+                return convert_children_in(&node.children.borrow(), in_svg);
             };
-            let attrs: Vec<(String, String)> =
-                attrs.borrow().iter().map(|attr| (attr.name.local.to_string(), attr.value.to_string())).collect();
-            let (attrs, srcset) = filter_attrs(tag, attrs);
-            let children = convert_children(&node.children.borrow());
+            let (attrs, srcset) = filter_attrs(tag, raw_attrs);
+            let children = convert_children_in(&node.children.borrow(), in_svg || tag == HtmlTag::Svg);
             vec![HtmlChild::Node(HtmlNode { tag, attrs, children, srcset })]
         }
         _ => Vec::new(),
     }
+}
+
+/// The SVG subset's attribute filter. `href` follows the ordinary safe-URL
+/// policy, numbers and colours are bounded, and everything else is refused.
+fn filter_svg_attrs(attrs: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut kept = Vec::new();
+    for (name, value) in attrs {
+        let name = name.to_ascii_lowercase();
+        if name == "href" || name == "xlink:href" {
+            let name = if name == "xlink:href" { "href".to_owned() } else { name };
+            if let Some(url) = sanitize_url(HtmlTag::Svg, &name, &value) {
+                kept.push((name, url));
+            }
+            continue;
+        }
+        if !SVG_ATTRS.contains(&name.as_str()) {
+            continue;
+        }
+        let cap = if matches!(name.as_str(), "d" | "points") { 4096 } else { 128 };
+        if value.len() > cap {
+            continue;
+        }
+        kept.push((name, value));
+    }
+    kept
 }
 
 /// Map a tag name to the allowlist.
@@ -184,9 +270,35 @@ pub(crate) fn filter_attrs(
     attrs: impl IntoIterator<Item = (String, String)>,
 ) -> (Vec<(String, String)>, Vec<SrcSetCandidate>) {
     const ALLOWED: &[&str] = &[
-        "href", "src", "alt", "title", "width", "height", "media", "type", "start", "colspan", "rowspan", "align",
-        "poster", "controls", "loop", "muted", "preload", "kind", "srclang", "label", "id", "class", "usemap", "name",
-        "shape", "coords",
+        "href",
+        "src",
+        "alt",
+        "title",
+        "width",
+        "height",
+        "media",
+        "type",
+        "start",
+        "colspan",
+        "rowspan",
+        "align",
+        "poster",
+        "controls",
+        "loop",
+        "muted",
+        "preload",
+        "kind",
+        "srclang",
+        "label",
+        "id",
+        "class",
+        "usemap",
+        "name",
+        "shape",
+        "coords",
+        "open",
+        "viewbox",
+        "preserveaspectratio",
     ];
     let mut kept = Vec::new();
     let mut srcset = Vec::new();
@@ -458,22 +570,9 @@ fn decode_entities(value: &str) -> String {
         rest = &rest[index..];
         let Some(semicolon) = rest.find(';') else { break };
         let entity = &rest[1..semicolon];
-        let decoded = match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some('\u{a0}'),
-            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-                u32::from_str_radix(&entity[2..], 16).ok().and_then(char::from_u32)
-            }
-            _ if entity.starts_with('#') => entity[1..].parse::<u32>().ok().and_then(char::from_u32),
-            _ => None,
-        };
-        match decoded {
-            Some(ch) => {
-                out.push(ch);
+        match decode_entity(entity) {
+            Some(decoded) => {
+                out.push_str(&decoded);
                 rest = &rest[semicolon + 1..];
             }
             None => {
@@ -484,4 +583,43 @@ fn decode_entities(value: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Decode one entity body (the text between `&` and `;`), for attribute
+/// values and for the source-map repair of entity-heavy inline runs (OI-025).
+/// Unknown names are left for the caller to keep verbatim.
+pub(crate) fn decode_entity(entity: &str) -> Option<String> {
+    let ch = match entity {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        "copy" => '\u{a9}',
+        "reg" => '\u{ae}',
+        "trade" => '\u{2122}',
+        "mdash" => '\u{2014}',
+        "ndash" => '\u{2013}',
+        "hellip" => '\u{2026}',
+        "laquo" => '\u{ab}',
+        "raquo" => '\u{bb}',
+        "cent" => '\u{a2}',
+        "pound" => '\u{a3}',
+        "yen" => '\u{a5}',
+        "euro" => '\u{20ac}',
+        "sect" => '\u{a7}',
+        "deg" => '\u{b0}',
+        "plusmn" => '\u{b1}',
+        "times" => '\u{d7}',
+        "divide" => '\u{f7}',
+        "bull" => '\u{2022}',
+        "middot" => '\u{b7}',
+        _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+            char::from_u32(u32::from_str_radix(&entity[2..], 16).ok()?)?
+        }
+        _ if entity.starts_with('#') => char::from_u32(entity[1..].parse::<u32>().ok()?)?,
+        _ => return None,
+    };
+    Some(ch.to_string())
 }

@@ -1,4 +1,4 @@
-//! X11 tab tear-out (T-20, P4-02c): release-only placement and the
+//! X11 tab tear-out (T-20, P4-02c): a live-following window and the
 //! cross-window drop, on top of P4-02b's transfer protocol.
 //!
 //! Rune's strip reports a torn-out tab on release as
@@ -19,10 +19,13 @@
 //!   through `move_tab_to_window_at`; over none, a new window opens with its
 //!   frame at [`tear_out_position`] and adopts the tab.
 //!
-//! This is release-only: the new window appears on mouse-up, not while the
-//! pointer moves. Live follow needs `TabDragState::hand_off` and a reattach
-//! close path; it stays a follow-up spike (OI-114). T-21 (dragging a lone tab
-//! to move its window) has no Rune API, so [`tear_out_spec`] keeps
+//! OI-125: the new window maps on the first torn-out move and follows the
+//! pointer, and docking the tab again closes it without losing the tab. The
+//! tab itself still travels on release: a live window opens with a start page
+//! and the dragged tab adopts it (or another window) on mouse-up. This keeps
+//! the transfer protocol lossless — there is no way to ask another window to
+//! send a tab back mid-drag. T-21 (dragging a lone tab to move its window)
+//! has no Rune `drag_window` API, so [`tear_out_spec`] keeps
 //! `TearOutSpec::lone` false and the **Move to a new window** menu covers it.
 
 use std::rc::Rc;
@@ -34,7 +37,7 @@ use rune_kit::shell::{TabTearMove, TabTearOut, TearOutSpec};
 
 use crate::shared::UiMsg;
 use crate::transfer::{TransferMsg, TransferToken};
-use crate::window::{WindowState, parse_tab_key};
+use crate::window::{Tab, WindowState, parse_tab_key};
 use crate::windows::{WindowKind, WindowOpenRequest};
 
 /// The strip's tear-out setting. Only where the platform reports global screen
@@ -154,6 +157,16 @@ pub(crate) struct TearState {
     /// release reports no grab, so the last move keeps it for placement.
     grab: Option<[f32; 2]>,
     hover: Option<TearHover>,
+    /// The window that follows the pointer once the tab is torn out (OI-125).
+    live: Option<WindowId>,
+}
+
+impl TearState {
+    /// The window following the pointer, for tests.
+    #[cfg(test)]
+    pub(crate) fn live_window(&self) -> Option<WindowId> {
+        self.live
+    }
 }
 
 impl WindowState {
@@ -171,11 +184,31 @@ impl WindowState {
     /// message, never a block.
     pub(crate) fn handle_tear_move(&mut self, tear: TabTearMove) -> bool {
         if !tear.torn {
+            // OI-125: docking back into the strip closes the floating window.
+            // It holds only a start page until the release, so no tab is lost.
+            let closed = self.close_live_tear_window();
             self.tear.grab = None;
-            return self.clear_tear_hover();
+            return self.clear_tear_hover() || closed;
         }
         self.tear.grab = Some(tear.grab);
         let Some(screen) = tear.screen_point else { return self.clear_tear_hover() };
+        let source = self.shared.window_placement(self.id());
+        if let Some(live) = self.tear.live {
+            let scale = source.map_or(1.0, |placement| positive_scale(placement.scale));
+            let position = tear_out_position(screen, tear.grab, source, default_frame_size(scale));
+            self.shared.move_window(live, position);
+        } else if self.can_start_live_tear(&tear) {
+            let scale = source.map_or(1.0, |placement| positive_scale(placement.scale));
+            let position = tear_out_position(screen, tear.grab, source, default_frame_size(scale));
+            let kind = self.tear_window_kind(&tear);
+            let request = WindowOpenRequest { launch: Launch::default(), kind, position: Some(position) };
+            if let Ok(opened) = Rc::clone(&self.shared).request_new_window(request) {
+                self.tear.live = Some(opened.id);
+                // The kit stops drawing the dragged tab; the floating window
+                // stands in for it until it docks or the button comes up.
+                self.drag.hand_off();
+            }
+        }
         let Some(target) = self.shared.window_at(screen, Some(self.id())) else {
             return self.clear_tear_hover();
         };
@@ -209,14 +242,13 @@ impl WindowState {
         // `TearOutSpec::lone` stays false: T-21's lone-tab window drag has no
         // Rune API, so the strip never reports its only tab and a synthetic
         // release is refused here too (the menu substitutes).
-        if self.tabs.len() <= 1 {
-            return false;
-        }
-        if !self.can_move_tab(tab) {
+        if self.tabs.len() <= 1 || !self.can_move_tab(tab) {
+            self.close_live_tear_window();
             return false;
         }
         let Some(screen) = tear.screen_point else {
             self.clear_tear_hover();
+            self.close_live_tear_window();
             return false;
         };
         // Once per release, not per move: each native placement read is a
@@ -224,46 +256,77 @@ impl WindowState {
         self.shared.refresh_window_placements();
         let source = self.shared.window_placement(self.id());
         let hovered = self.tear.hover.map(|hover| hover.target);
-        match self.shared.window_at(screen, Some(self.id())) {
-            Some(target) => {
-                if hovered.is_some_and(|previous| previous != target) {
-                    // The pointer ended over a different window than the last
-                    // hover: close that strip's gap before offering the tab.
-                    self.clear_tear_hover();
-                }
-                // The target's strip opened its gap from `on_tear_move` and
-                // resolves the slot when `Adopt` arrives; a menu move has no
-                // hover and inserts after its active tab.
-                match self.move_tab_to_window_at(tab, target, None) {
-                    Ok(()) => {
-                        // The target clears its incoming gap when it adopts.
-                        self.tear.hover = None;
-                        true
-                    }
-                    Err(error) => {
-                        self.clear_tear_hover();
-                        self.notice(error);
-                        true
+        let live = self.tear.live.take();
+        // OI-120: a start page tears out into a non-reusable window.
+        let kind = if self.tab(tab).is_some_and(Tab::is_start) { WindowKind::TornOffStart } else { WindowKind::Normal };
+        let target = self.shared.window_at(screen, Some(self.id()));
+        if target.is_none() && live.is_none() {
+            let scale = source.map_or(1.0, |placement| positive_scale(placement.scale));
+            let position = tear_out_position(screen, grab, source, default_frame_size(scale));
+            let request = WindowOpenRequest { launch: Launch::default(), kind, position: Some(position) };
+            match Rc::clone(&self.shared).request_new_window(request) {
+                Ok(opened) => {
+                    if let Err(error) = self.move_tab_to_window_at(tab, opened.id, None) {
+                        self.notice(lmdv_i18n::t!("msg.tearOffFailed", "err" => error));
                     }
                 }
+                Err(error) => self.notice(lmdv_i18n::t!("msg.tearOffFailed", "err" => error)),
             }
-            None => {
+            return true;
+        }
+        // The floating window under the pointer is the destination; any other
+        // live window is closed and the tab is offered where the button came up.
+        if let (Some(other), Some(live)) = (target, live)
+            && other != live
+        {
+            self.shared.close_window(live);
+        }
+        let Some(target) = target.or(live) else { return true };
+        if hovered.is_some_and(|previous| previous != target) {
+            // The pointer ended over a different window than the last hover:
+            // close that strip's gap before offering the tab.
+            self.clear_tear_hover();
+        }
+        match self.move_tab_to_window_at(tab, target, None) {
+            Ok(()) => {
+                // The target clears its incoming gap when it adopts.
+                self.tear.hover = None;
+                true
+            }
+            Err(error) => {
                 self.clear_tear_hover();
-                let scale = source.map_or(1.0, |placement| positive_scale(placement.scale));
-                let position = tear_out_position(screen, grab, source, default_frame_size(scale));
-                let request =
-                    WindowOpenRequest { launch: Launch::default(), kind: WindowKind::Normal, position: Some(position) };
-                match Rc::clone(&self.shared).request_new_window(request) {
-                    Ok(opened) => {
-                        if let Err(error) = self.move_tab_to_window_at(tab, opened.id, None) {
-                            self.notice(lmdv_i18n::t!("msg.tearOffFailed", "err" => error));
-                        }
-                    }
-                    Err(error) => self.notice(lmdv_i18n::t!("msg.tearOffFailed", "err" => error)),
-                }
+                self.notice(error);
                 true
             }
         }
+    }
+
+    /// Whether a floating window may start for this gesture: the tab is still
+    /// here, it is not the strip's only one (T-21 has no native API), and it is
+    /// movable right now.
+    fn can_start_live_tear(&self, tear: &TabTearMove) -> bool {
+        if self.tabs.len() <= 1 {
+            return false;
+        }
+        parse_tab_key(&tear.id).and_then(|tab| self.tab(tab)).is_some_and(|tab| self.can_move_tab(tab.id))
+    }
+
+    /// A start page tears out into a `TornOffStart` window, which launch
+    /// routing may not reuse as an idle target (OI-120).
+    fn tear_window_kind(&self, tear: &TabTearMove) -> WindowKind {
+        if parse_tab_key(&tear.id).and_then(|tab| self.tab(tab)).is_some_and(Tab::is_start) {
+            WindowKind::TornOffStart
+        } else {
+            WindowKind::Normal
+        }
+    }
+
+    /// Closes the window that followed the pointer. It holds only a start
+    /// page until release, so a dock-back loses no tab (OI-125).
+    pub(crate) fn close_live_tear_window(&mut self) -> bool {
+        let Some(live) = self.tear.live.take() else { return false };
+        self.shared.close_window(live);
+        true
     }
 
     /// Clears the target's incoming gap (`Hover { point: None }`). Returns
@@ -281,6 +344,11 @@ impl WindowState {
     /// lost pointer): the strip reports only the release, so `poll` notices the
     /// gesture is gone and closes the target's gap.
     pub(crate) fn clear_stale_tear_hover(&mut self) -> bool {
-        self.tear.hover.is_some() && !self.drag.torn_out() && self.clear_tear_hover()
+        if self.drag.torn_out() {
+            return false;
+        }
+        let hover = self.tear.hover.is_some() && self.clear_tear_hover();
+        let live = self.close_live_tear_window();
+        hover || live
     }
 }

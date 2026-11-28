@@ -27,7 +27,7 @@
 use std::ops::Range;
 use std::rc::Rc;
 
-use lmdv_md::Block;
+use lmdv_md::{Block, MdDoc};
 use lmdv_render::{BlockRef, BlockWire, PreviewText};
 use rune::{El, PointerEvent, PointerPress, SelectedText, TextSelection, Tx};
 
@@ -47,13 +47,34 @@ pub struct BlockMenu {
     pub point: PointerPress,
 }
 
+/// The cheap identity of a drawn block, kept by the wire instead of the whole
+/// [`BlockRef`] (OI-097). The renderer still builds the drawn text for its wire
+/// call, but no handler needs a per-frame copy of it: pointer moves need only
+/// the key, and a double press or right click rebuilds the drawn reference from
+/// the parsed model at event time (both are rare, unlike a frame).
+#[derive(Clone, Debug)]
+pub(crate) struct BlockHead {
+    key: String,
+    line: usize,
+    end_line: usize,
+    code: bool,
+}
+
+impl BlockHead {
+    pub(crate) fn of(block: &BlockRef) -> Self {
+        Self { key: block.key.clone(), line: block.line, end_line: block.end_line, code: block.code }
+    }
+}
+
 /// The renderer's one block wire: E-35's double press and E-04's right-click.
 pub fn block_wire() -> BlockWire {
     Rc::new(|element: El, block: &BlockRef| {
-        let shared = Rc::new(block.clone());
-        let pressed = shared.clone();
-        let hovered = shared.clone();
-        let menu = shared;
+        // OI-097: three handlers share this head, not the drawn text. The full
+        // `BlockRef` is rebuilt from the model only when an event fires.
+        let head = BlockHead::of(block);
+        let pressed = head.clone();
+        let hovered = head.clone();
+        let menu = head;
         element
             // Focusable but out of the Tab order: a click puts the keyboard on
             // the block so Shift+F10 can open its menu, without adding a Tab
@@ -68,9 +89,130 @@ pub fn block_wire() -> BlockWire {
                 state.editor.preview_point.set(Some([point.window_x, point.window_y]));
                 state.editor.preview_block.set(block_index(&hovered.key));
             })
-            .on_double_press_tx(move |state: &mut WindowState, tx: &mut Tx| state.preview_double_press(&pressed, tx))
-            .on_secondary_press(move |state: &mut WindowState, point, _| state.show_block_menu(&menu, point))
+            .on_double_press_tx(move |state: &mut WindowState, tx: &mut Tx| {
+                state.preview_double_press_head(&pressed, tx)
+            })
+            .on_secondary_press(move |state: &mut WindowState, point, _| state.show_block_menu_head(&menu, point))
     })
+}
+
+/// Rebuilds the drawn reference a wire head names from the active document.
+///
+/// The rendered text of a block is its inline text in reading order, each text
+/// followed by a newline, with one [`PreviewText`] per inline (OI-097). The
+/// renderer's own `note_text` uses the same shape, so a selected word maps to
+/// the same offset and the same occurrence of a repeated word as it did when
+/// the wire carried a copy of the frame's `BlockRef`.
+pub(crate) fn drawn_block(doc: &MdDoc, head: &BlockHead) -> Option<BlockRef> {
+    let index = doc.block_spans.iter().position(|span| span.key == head.key)?;
+    let mut drawn = DrawnBlock::new(&head.key);
+    drawn.block(&doc.blocks[index], doc);
+    if matches!(doc.blocks.get(index), Some(Block::FootnoteDefs)) {
+        for footnote in &doc.footnotes {
+            for body in &footnote.blocks {
+                drawn.block(body, doc);
+            }
+        }
+    }
+    Some(BlockRef {
+        key: head.key.clone(),
+        line: head.line,
+        end_line: head.end_line,
+        code: head.code,
+        text: drawn.text,
+        texts: drawn.texts,
+    })
+}
+
+/// Collects a block's inline texts the way the renderer's `note_text` does.
+struct DrawnBlock {
+    block: String,
+    text: String,
+    texts: Vec<PreviewText>,
+    path: Vec<String>,
+}
+
+impl DrawnBlock {
+    fn new(block: &str) -> Self {
+        Self { block: block.to_owned(), text: String::new(), texts: Vec::new(), path: Vec::new() }
+    }
+
+    fn note(&mut self, key: Option<&str>, drawn: &str) {
+        let index = self.texts.len();
+        let start = self.text.len();
+        let identity = key.map(str::to_owned).unwrap_or_else(|| format!("{}-text-{index}", self.block));
+        self.text.push_str(drawn);
+        self.text.push('\n');
+        self.texts.push(PreviewText {
+            key: Some(identity),
+            index,
+            range: start..start + drawn.len(),
+            path: self.path.clone(),
+        });
+    }
+
+    fn block(&mut self, block: &Block, doc: &MdDoc) {
+        match block {
+            Block::Para(inline) => self.note(None, &inline.text),
+            Block::Heading { heading, inline } => self.note(Some(&lmdv_render::heading_key(*heading)), &inline.text),
+            Block::Code { text, .. } => self.note(None, text),
+            Block::List { items, .. } => {
+                for (k, item) in items.iter().enumerate() {
+                    self.path.push(format!("i{k}"));
+                    for child in item {
+                        self.block(child, doc);
+                    }
+                    self.path.pop();
+                }
+            }
+            Block::Quote { blocks, .. } => {
+                for child in blocks {
+                    self.block(child, doc);
+                }
+            }
+            Block::Table(table) => {
+                // The renderer builds the body rows before the sticky head and
+                // scopes each cell with `c{column}`; the drawn-text order is
+                // body first, head last (table.rs:79-96).
+                for (row, cells) in table.rows.iter().enumerate() {
+                    self.path.push(format!("row-{row}"));
+                    for (column, inline) in cells.iter().enumerate() {
+                        self.path.push(format!("c{column}"));
+                        self.note(None, &inline.text);
+                        self.path.pop();
+                    }
+                    self.path.pop();
+                }
+                self.path.push("head-row".to_owned());
+                for (column, inline) in table.head.iter().enumerate() {
+                    self.path.push(format!("c{column}"));
+                    self.note(None, &inline.text);
+                    self.path.pop();
+                }
+                self.path.pop();
+            }
+            // Pictures, diagrams, formulas, rules and the TOC hold no selectable
+            // text in the rendered article; a task box strips into its item's
+            // inline text, already noted above.
+            Block::Rule | Block::Image(_) | Block::Mermaid { .. } | Block::MathBlock { .. } | Block::Toc => {}
+            // The renderer notes the allowed HTML subset as styled inlines;
+            // its concatenated text is enough to count a clicked word and to
+            // offer the block's plain text for copy.
+            Block::HtmlBlock(node) => {
+                let text = node.text();
+                if !text.is_empty() {
+                    self.note(None, &text);
+                }
+            }
+            Block::FootnoteDefs => {
+                for footnote in &doc.footnotes {
+                    for body in &footnote.blocks {
+                        self.block(body, doc);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The index in a block's `b{index}` stable key.
@@ -81,6 +223,27 @@ fn block_index(key: &str) -> Option<usize> {
 /// A double-click while reading only selects a word (R-27); while editing it
 /// places the source caret (E-35).
 impl WindowState {
+    /// `on_double_press` of a preview block from the wire's lightweight head
+    /// (OI-097). Viewer presses only select a word, so only an editor press
+    /// rebuilds the drawn reference it maps through.
+    fn preview_double_press_head(&mut self, head: &BlockHead, tx: &mut Tx) {
+        if self.active_tab().is_none_or(|tab| tab.view.mode != Mode::Editor) {
+            return;
+        }
+        let Some(doc) = self.active_reader() else { return };
+        let Some(block) = drawn_block(&doc, head) else { return };
+        self.preview_double_press(&block, tx);
+    }
+
+    /// `on_secondary_press` of a preview block from the wire's head (OI-097).
+    /// The menu is opened by an actual right click, so rebuilding the drawn
+    /// reference here keeps its source range without a per-frame copy.
+    fn show_block_menu_head(&mut self, head: &BlockHead, point: PointerPress) {
+        let Some(doc) = self.active_reader() else { return };
+        let Some(block) = drawn_block(&doc, head) else { return };
+        self.show_block_menu(&block, point);
+    }
+
     /// `on_double_press` of a preview block (E-35).
     pub(crate) fn preview_double_press(&mut self, block: &BlockRef, tx: &mut Tx) {
         if !self.active_tab().is_some_and(|tab| tab.view.mode == Mode::Editor) {

@@ -44,6 +44,8 @@ pub const TOOLBAR_CORE_MIN: f32 = 640.0;
 /// Below this width the strip's `+` disappears, leaving Ctrl+T and the tab
 /// list (T-34).
 pub const TAB_PLUS_MIN: f32 = 560.0;
+/// The window's content shell, named by each tab's `aria-controls` (A-05).
+pub const SHELL_KEY: &str = "shell";
 
 /// The editor header's line count and block count are catalog plurals.
 const EDITOR_LINES: lmdv_i18n::PluralKey = lmdv_i18n::plural_key("editor.lines");
@@ -110,6 +112,10 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
             }
             state.nav_pointer_button(tx.button(), tx);
         })
+        // A-05: the shell is the panel the tablist's tabs control. The kit's
+        // SplitView already keys its root `shell`; asserting the key here keeps
+        // `El::controls` pointed at a real node rather than a dangling id.
+        .key(SHELL_KEY)
         .role("group");
 
     // T-16's card floats under its tab, below every menu and dialog.
@@ -185,12 +191,24 @@ fn block_context_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
                 },
             ));
         }
+        let copy = block.clone();
         menu = menu.item(MenuItem::new(lmdv_i18n::t!("ctx.editHere")).on_select_tx(
             move |state: &mut WindowState, tx: &mut Tx| {
                 state.close_block_menu();
                 state.edit_from_here(&block, tx);
             },
         ));
+        // OI-096: copy the block's drawn text and its rich source range.
+        if state.active_tab().is_some_and(|tab| tab.view.mode == Mode::Viewer) {
+            menu = menu.item(MenuItem::new(lmdv_i18n::t!("share.copy")).on_select_tx(
+                move |state: &mut WindowState, _tx: &mut Tx| {
+                    state.close_block_menu();
+                    if let Some((plain, source)) = state.block_selection_copy(&copy) {
+                        state.start_rich_selection_copy(plain, source);
+                    }
+                },
+            ));
+        }
         // R-17: the reading view can start a find from the block under the
         // pointer; in edit mode Ctrl+F belongs to the source pane.
         if state.active_tab().is_some_and(|tab| tab.view.mode == Mode::Viewer) {
@@ -758,9 +776,15 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
                 }
             };
             item.decorate(move |el, _| {
-                let el = el.label(full).on_secondary_press(move |state: &mut WindowState, point, _| {
-                    state.show_tab_menu(tab_id, point);
-                });
+                // A-05: the full name is the accessible label (the drawn title
+                // may carry the shortened reading time), and every tab names
+                // the shell it selects as its controlled panel. The title bar
+                // and panes are the document's panel; the kit's `tablist` and
+                // `tab` roles, selected state and roving focus stay untouched.
+                let el =
+                    el.label(full).controls(SHELL_KEY).on_secondary_press(move |state: &mut WindowState, point, _| {
+                        state.show_tab_menu(tab_id, point);
+                    });
                 match described {
                     Some(described) => el.description(described.clone()).help(described),
                     None => el,
@@ -4318,6 +4342,80 @@ mod tests {
     }
 
     // ---- T-15: a tab opened behind says so in the tree ---------------------
+
+    // ---- A-05: tablist/tab accessibility ----------------------------------
+
+    #[test]
+    fn the_tablist_names_each_tab_its_panel_and_the_active_reading_time() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let front = state.active_tab().map(|tab| tab.id).expect("a front tab");
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        // A bare runtime does not run the window's poll, which is where the
+        // reading time is counted; the app's AppSpec installs this hook.
+        runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+        for t in [0.0, 1.0 / 60.0, 2.0 / 60.0, 3.0 / 60.0, 4.0 / 60.0, 5.0 / 60.0] {
+            runtime.frame(t);
+        }
+        let stats = runtime.state.active_tab().and_then(|tab| tab.view.reading);
+
+        let tree = runtime.accessibility_json();
+        let list = a11y(&tree, crate::tab_list::TAB_STRIP_LIST_KEY).expect("the tablist");
+        assert_eq!(list["role"], "tab-list");
+        assert_eq!(list["name"], "Open documents");
+
+        for tab in runtime.state.tabs() {
+            let key = format!("t-{}", tab_key(tab.id));
+            let node = a11y(&tree, &key).unwrap_or_else(|| panic!("no tab {key} in {tree}"));
+            assert_eq!(node["role"], "tab", "{key} is a tab");
+            assert_eq!(node["name"].as_str(), Some(tab.full_title().as_str()), "{key} says its full name");
+            assert_eq!(node["controls"], serde_json::json!([SHELL_KEY]), "{key} controls the shell");
+            assert!(a11y(&tree, SHELL_KEY).is_some(), "the controlled shell is a real accessibility node");
+            let states = a11y_states(node);
+            assert_eq!(states.contains(&"selected"), tab.id == front, "{key}'s selected state");
+        }
+
+        let active = a11y(&tree, &format!("t-{}", tab_key(front))).expect("the active tab");
+        let reading = stats.expect("the front tab's reading time").description();
+        assert_eq!(active["description"].as_str(), Some(reading.as_str()), "the tab speaks its reading time");
+    }
+
+    #[test]
+    fn arrows_home_and_end_rove_over_the_tabs_and_enter_selects_the_focused_one() {
+        use rune::{Key, KeyEvent, Mods};
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let ids: Vec<_> = state.tabs().iter().map(|tab| tab.id).collect();
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+        runtime.frame(0.0);
+        runtime.frame(1.0 / 60.0);
+        let focus_key = |id| format!("t-{}", tab_key(id));
+        let focused = |runtime: &rune::Runtime<WindowState>| {
+            runtime.elements().into_iter().find(|element| element.focused).and_then(|element| element.key)
+        };
+        runtime.update(|_, tx| tx.focus(focus_key(ids[0]).clone(), false));
+        runtime.frame(2.0 / 60.0);
+        assert_eq!(runtime.state.active_index(), 1, "focus alone does not change the active tab");
+
+        runtime.key(KeyEvent { key: Key::Right, mods: Mods::default() });
+        runtime.frame(3.0 / 60.0);
+        assert_eq!(focused(&runtime), Some(focus_key(ids[1])), "Right roves to the next tab");
+        runtime.key(KeyEvent { key: Key::End, mods: Mods::default() });
+        runtime.frame(4.0 / 60.0);
+        assert_eq!(focused(&runtime), Some(focus_key(*ids.last().unwrap())), "End roves to the last tab");
+        runtime.key(KeyEvent { key: Key::Home, mods: Mods::default() });
+        runtime.frame(5.0 / 60.0);
+        assert_eq!(focused(&runtime), Some(focus_key(ids[0])), "Home roves to the first tab");
+        runtime.key(KeyEvent { key: Key::Left, mods: Mods::default() });
+        runtime.frame(6.0 / 60.0);
+        assert_eq!(focused(&runtime), Some(focus_key(*ids.last().unwrap())), "Left wraps to the last tab");
+
+        runtime.key(KeyEvent { key: Key::Text(" ".into()), mods: Mods::default() });
+        runtime.frame(7.0 / 60.0);
+        assert_eq!(runtime.state.active_index(), ids.len() - 1, "Space selects the roved tab");
+    }
 
     #[test]
     fn a_pulsing_background_tab_reads_unread_until_it_is_activated() {

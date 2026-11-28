@@ -32,6 +32,10 @@ use crate::windows::{
 
 /// A test seam that records a window's always-on-top request.
 type PinSink = Box<dyn Fn(WindowId, bool)>;
+/// A test seam that records a compositor activation (OI-117).
+type ActivationSink = Box<dyn Fn(WindowId, String)>;
+/// A test seam that records a native window move (OI-125).
+type PositionSink = Box<dyn Fn(WindowId, (i32, i32))>;
 /// A test seam that records a desktop-open request.
 type ExternalSink = Box<dyn Fn(&Path)>;
 
@@ -130,6 +134,14 @@ pub struct AppShared {
     pin_support: Cell<Option<bool>>,
     /// The test seam for `view.pin`'s native call; `None` uses the live handle.
     pin_sink: RefCell<Option<PinSink>>,
+    /// The test seam for compositor activation (OI-117); `None` uses the live
+    /// native window handle.
+    activation_sink: RefCell<Option<ActivationSink>>,
+    /// The activation token given to this process at launch (OI-117). It is
+    /// spent on the first native host that appears.
+    startup_token: RefCell<Option<String>>,
+    /// The test seam for native window moves (OI-125).
+    position_sink: RefCell<Option<PositionSink>>,
     /// The test seam for opening a path with the desktop; `None` runs the job.
     external_sink: RefCell<Option<ExternalSink>>,
     /// The watcher service thread's handle; it owns the `DocWatcher`, so no
@@ -256,6 +268,9 @@ impl AppShared {
             screen_positions: Cell::new(None),
             pin_support: Cell::new(None),
             pin_sink: RefCell::new(None),
+            activation_sink: RefCell::new(None),
+            startup_token: RefCell::new(None),
+            position_sink: RefCell::new(None),
             external_sink: RefCell::new(None),
             watcher: RefCell::new(None),
             watch_error: Arc::new(Mutex::new(None)),
@@ -1061,8 +1076,14 @@ impl AppShared {
 
     /// Stores an open window's native and Rune handles, its kind and, where
     /// the platform reports it, its current placement.
+    ///
+    /// The launch's activation token is spent here on the first host that
+    /// maps: Wayland will not let that window focus itself without it (OI-117).
     pub fn attach_window_handles(&self, id: WindowId, handles: WindowHandles, kind: WindowKind) {
         let placement = handles.native.placement();
+        if let Some(token) = self.startup_token.borrow_mut().take() {
+            handles.activate(&token);
+        }
         if let Some(entry) = self.windows.borrow_mut().get_mut(id) {
             entry.handles = Some(handles);
             entry.kind = kind;
@@ -1070,6 +1091,12 @@ impl AppShared {
                 entry.placement = placement;
             }
         }
+    }
+
+    /// Sets the compositor token this process was launched with, for its
+    /// first native window (OI-117).
+    pub fn set_startup_activation_token(&self, token: Option<String>) {
+        *self.startup_token.borrow_mut() = token;
     }
 
     /// Publishes what a window shows after `poll`. Returns whether the
@@ -1080,12 +1107,17 @@ impl AppShared {
     /// read the union; no window has to hash every buffer each frame.
     pub fn publish_window(&self, id: WindowId, snapshot: WindowSnapshot) -> bool {
         let mut changed = false;
+        // OI-074: a dirty flag or a title the other windows read from the
+        // registry is not enough on its own — the windows showing the same
+        // document must draw again to see the new dot/name.
+        let mut wake_others = false;
         {
             let mut windows = self.windows.borrow_mut();
             let Some(entry) = windows.get_mut(id) else { return false };
             if entry.title != snapshot.title {
                 entry.title = snapshot.title;
                 changed = true;
+                wake_others = true;
             }
             if entry.active_document != snapshot.active_document {
                 entry.active_document = snapshot.active_document;
@@ -1098,6 +1130,7 @@ impl AppShared {
             if entry.dirty != snapshot.dirty {
                 entry.dirty = snapshot.dirty;
                 changed = true;
+                wake_others = true;
             }
             if entry.only_start != snapshot.only_start {
                 entry.only_start = snapshot.only_start;
@@ -1110,6 +1143,9 @@ impl AppShared {
         }
         // A document that has appeared in its target no longer needs a claim.
         self.claims.borrow_mut().retain(|doc, window| !(*window == id && snapshot.documents.contains(doc)));
+        if wake_others {
+            self.wake_set.wake_except(id);
+        }
         changed
     }
 
@@ -1375,6 +1411,7 @@ impl AppShared {
     /// reported as [`RouteAction::OpenHere`]; other windows get the launch in
     /// their own mailbox and are focused.
     pub fn route_launch(self: Rc<Self>, launch: Launch, origin: Option<WindowId>) -> RouteAction {
+        let activation = launch.activation_token.clone();
         let path = launch.path.as_ref().map(|path| lmdv_io::absolute_lexical(path));
         let document = path.map(|path| {
             let mut docs = self.docs_mut();
@@ -1395,6 +1432,11 @@ impl AppShared {
                         if let Some(doc) = document {
                             self.claim_document(doc, opened.id);
                         }
+                        // OI-117: the token belongs to the client that asked
+                        // for this window; use it on the new host as well.
+                        if let Some(token) = activation.as_deref() {
+                            self.activate_window(opened.id, token);
+                        }
                         RouteAction::Opened(opened.id)
                     }
                     Err(error) => {
@@ -1410,12 +1452,18 @@ impl AppShared {
                 if let Some(doc) = document {
                     self.claim_document(doc, id);
                 }
+                // OI-117: focus with the client's token where it has one;
+                // a plain focus is otherwise unchanged.
+                let focus = |shared: &Self| match activation.as_deref() {
+                    Some(token) => shared.activate_window(id, token),
+                    None => shared.focus_window(id),
+                };
                 if origin == Some(id) {
-                    self.focus_window(id);
+                    focus(self.as_ref());
                     return RouteAction::OpenHere;
                 }
                 if self.post_window(id, UiMsg::OpenLaunch(launch)) {
-                    self.focus_window(id);
+                    focus(self.as_ref());
                     RouteAction::Posted(id)
                 } else {
                     RouteAction::Failed(lmdv_i18n::t!("transfer.targetGone").to_owned())
@@ -1439,6 +1487,57 @@ impl AppShared {
         self.note_window_focused(id);
         self.post_window(id, UiMsg::FocusWindow(id));
         true
+    }
+
+    /// Shows and focuses a window with a compositor activation token (OI-117).
+    ///
+    /// `WindowHandle::activate` asks Wayland for authorized focus; a plain
+    /// `focus()` may be ignored there. Before the native host exists the focus
+    /// message is queued instead, so the window still settles when it maps.
+    pub fn activate_window(&self, id: WindowId, token: &str) -> bool {
+        let handles = self.windows.borrow().get(id).and_then(|entry| entry.handles.clone());
+        if handles.is_none() && self.windows.borrow().get(id).is_none() {
+            return false;
+        }
+        if let Some(sink) = self.activation_sink.borrow().as_ref() {
+            sink(id, token.to_owned());
+        } else if let Some(handles) = handles {
+            handles.activate(token);
+        }
+        self.note_window_focused(id);
+        self.post_window(id, UiMsg::FocusWindow(id));
+        true
+    }
+
+    /// Moves a native window where the platform reports positions (X11).
+    ///
+    /// Used by the live tear-out follower; Wayland keeps compositor placement
+    /// and this returns false without touching a window.
+    pub fn move_window(&self, id: WindowId, position: (i32, i32)) -> bool {
+        let handles = self.windows.borrow().get(id).and_then(|entry| entry.handles.clone());
+        if let Some(sink) = self.position_sink.borrow().as_ref() {
+            sink(id, position);
+            return true;
+        }
+        match handles {
+            Some(handles) => {
+                handles.set_position(position);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Records native moves instead of calling a window handle.
+    #[cfg(test)]
+    pub(crate) fn set_position_sink(&self, sink: PositionSink) {
+        *self.position_sink.borrow_mut() = Some(sink);
+    }
+
+    /// Records compositor activations instead of calling a native handle.
+    #[cfg(test)]
+    pub(crate) fn set_activation_sink(&self, sink: ActivationSink) {
+        *self.activation_sink.borrow_mut() = Some(sink);
     }
 
     /// Asks a window to close through its own close guard (T-24/T-25).
@@ -2008,6 +2107,104 @@ mod tests {
         assert!(shared.finish_spell_load(generation, None));
         assert!(shared.spell_availability().is_none(), "an unreadable dictionary hides the toggle");
         assert!(shared.spell_dictionary().is_none());
+    }
+
+    #[test]
+    fn activation_tokens_follow_the_chosen_window() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let first = shared.allocate_window();
+        let second = shared.allocate_window();
+        let first_inbox = Rc::new(UiMailbox::new());
+        let second_inbox = Rc::new(UiMailbox::new());
+        shared.register_window(
+            first,
+            crate::windows::window_key(first),
+            first_inbox.clone(),
+            "one",
+            WindowKind::Normal,
+        );
+        shared.register_window(
+            second,
+            crate::windows::window_key(second),
+            second_inbox.clone(),
+            "two",
+            WindowKind::Normal,
+        );
+        shared.note_window_focused(second);
+
+        let seen: Rc<std::cell::RefCell<Vec<(WindowId, String)>>> = Rc::new(std::cell::RefCell::new(Vec::new()));
+        let recorded = seen.clone();
+        shared.set_activation_sink(Box::new(move |id, token| recorded.borrow_mut().push((id, token))));
+        let launch = Launch { activation_token: Some("wayland-token".to_owned()), ..Launch::default() };
+        assert_eq!(Rc::clone(&shared).route_launch(launch, None), RouteAction::Posted(second));
+        assert_eq!(seen.borrow().as_slice(), &[(second, "wayland-token".to_owned())]);
+        assert_eq!(second_inbox.len(), 2, "the launch and the focus message");
+        assert_eq!(first_inbox.len(), 0);
+
+        seen.borrow_mut().clear();
+        assert_eq!(Rc::clone(&shared).route_launch(Launch::default(), None), RouteAction::Posted(second));
+        assert!(seen.borrow().is_empty(), "without a token a plain focus is used");
+        assert_eq!(second_inbox.len(), 4);
+    }
+
+    #[test]
+    fn a_dirty_publication_wakes_the_other_windows_only() {
+        let temp = TempDir::new().unwrap();
+        let shared = test_support::shared(&temp);
+        let first = shared.allocate_window();
+        let second = shared.allocate_window();
+        shared.register_window(
+            first,
+            crate::windows::window_key(first),
+            Rc::new(UiMailbox::new()),
+            "one",
+            WindowKind::Normal,
+        );
+        shared.register_window(
+            second,
+            crate::windows::window_key(second),
+            Rc::new(UiMailbox::new()),
+            "two",
+            WindowKind::Normal,
+        );
+        let first_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let second_wakes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_count = first_wakes.clone();
+        let second_count = second_wakes.clone();
+        shared.attach_window_waker(
+            first,
+            Arc::new(move || {
+                first_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        shared.attach_window_waker(
+            second,
+            Arc::new(move || {
+                second_count.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+
+        let clean = WindowSnapshot {
+            title: "a.md — lmdv".to_owned(),
+            active_document: None,
+            documents: BTreeSet::from([DocumentId(3)]),
+            dirty: BTreeSet::new(),
+            only_start: false,
+            prompt_open: false,
+        };
+        shared.publish_window(first, clean.clone());
+        first_wakes.store(0, Ordering::SeqCst);
+        second_wakes.store(0, Ordering::SeqCst);
+
+        let dirty = WindowSnapshot { dirty: BTreeSet::from([DocumentId(3)]), ..clean };
+        assert!(shared.publish_window(first, dirty.clone()));
+        assert_eq!(first_wakes.load(Ordering::SeqCst), 0, "the publisher already drew its own frame");
+        assert_eq!(second_wakes.load(Ordering::SeqCst), 1, "OI-074: another window must repaint the dot");
+
+        let renamed = WindowSnapshot { title: "a.md * — lmdv".to_owned(), ..dirty };
+        assert!(shared.publish_window(first, renamed));
+        assert_eq!(second_wakes.load(Ordering::SeqCst), 2, "a title change is visible to the others too");
     }
 
     #[test]

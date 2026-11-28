@@ -118,6 +118,11 @@ impl Scene {
         self
     }
 
+    fn dark(mut self) -> Self {
+        self.theme = DocTheme::neutral(true);
+        self
+    }
+
     /// The document labels of `id`, without switching the process locale.
     fn localized(mut self, id: &str) -> Self {
         let locale = lmdv_i18n::find_locale(id).unwrap_or_else(|| panic!("unknown locale {id}"));
@@ -1795,4 +1800,82 @@ fn an_svg_draws_its_link_text_and_each_anchor_opens_its_own_href() {
     runtime.frame(0.0);
     assert_eq!(runtime.state.clicked.borrow().as_slice(), ["#a"]);
     assert!(elements.iter().any(|element| element.text.as_deref() == Some("Beta")), "the second anchor draws too");
+}
+
+// ------------------------------------------------ SVG geometry and HTML cards
+
+fn find_html_tag<'a>(node: &'a lmdv_md::HtmlNode, name: &str) -> Option<&'a lmdv_md::HtmlNode> {
+    if node.tag.name() == name {
+        return Some(node);
+    }
+    node.children.iter().find_map(|child| match child {
+        lmdv_md::HtmlChild::Node(child) => find_html_tag(child, name),
+        lmdv_md::HtmlChild::Text(_) => None,
+    })
+}
+
+#[test]
+fn svg_shapes_build_fills_strokes_and_group_transforms() {
+    let doc = lmdv_md::parse(concat!(
+        "<div><svg viewBox=\"0 0 100 50\">",
+        "<rect x=\"1\" y=\"2\" width=\"10\" height=\"20\" fill=\"#ff0000\"/>",
+        "<g transform=\"translate(5,7)\"><circle cx=\"3\" cy=\"4\" r=\"2\" fill=\"blue\" stroke=\"black\" stroke-width=\"2\"/></g>",
+        "<path d=\"M0 0 L4 4\" fill=\"none\" stroke=\"green\"/>",
+        "</svg></div>\n",
+    ));
+    let fragment = match &doc.blocks[0] {
+        lmdv_md::Block::HtmlBlock(node) => node,
+        other => panic!("html block: {other:?}"),
+    };
+    let svg = find_html_tag(fragment, "svg").expect("the svg node");
+    let shape = crate::html::svg_shape(svg, rune::Color::BLACK);
+    assert!(!shape.is_empty(), "geometry reaches the shape");
+    assert_eq!(shape.view_box, Some([100.0, 50.0]));
+    match &shape.ops[0] {
+        rune::shape::Op::Rect { rect, .. } => assert_eq!(*rect, [1.0, 2.0, 10.0, 20.0]),
+        other => panic!("the rect is a box primitive: {other:?}"),
+    }
+    let transformed = shape.ops.iter().find_map(|op| match op {
+        rune::shape::Op::Fill { points, .. } if points.len() > 8 => Some(points.clone()),
+        _ => None,
+    });
+    let circle = transformed.expect("the translated circle is a filled polygon");
+    assert!(circle.iter().all(|[x, y]| *x >= 5.0 && *y >= 7.0), "the group transform moved it: {circle:?}");
+    assert!(shape.ops.iter().any(|op| matches!(op, rune::shape::Op::Stroke { .. })), "strokes survive");
+}
+
+#[test]
+fn an_open_details_card_starts_open_and_its_toggle_key_is_distinct() {
+    let closed_state = Scene::new("<details open><summary>More</summary>Body</details>\n").render();
+    let card = closed_state.by_key("details").expect("the details card");
+    assert_eq!(card.expanded, Some(true), "the source's `open` wins without app state");
+    assert!(closed_state.has_text("Body"));
+
+    // The app stores a set of open keys, so a default-open card uses a
+    // `:closed` key: an all-open state closes it on the first press.
+    let toggled = Scene::new("<details open><summary>More</summary>Body</details>\n").details(true).render();
+    assert_eq!(toggled.by_key("details").expect("card").expanded, Some(false));
+}
+
+#[test]
+fn inline_picture_picks_its_source_by_scheme_and_draws_once() {
+    let source = concat!(
+        "<picture><source media=\"(prefers-color-scheme: dark)\" srcset=\"dark.png 1x\">",
+        "<img src=\"light.png\"></picture>\n",
+    );
+    let light = Scene::new(source).render();
+    let dark = Scene::new(source).dark().render();
+    assert_eq!(light.texts().iter().filter(|text| text.ends_with(".png")).count(), 1);
+    assert_eq!(dark.texts().iter().filter(|text| text.ends_with(".png")).count(), 1);
+    assert!(light.has_text("light.png"), "{:?}", light.texts());
+    assert!(dark.has_text("dark.png"), "{:?}", dark.texts());
+}
+
+#[test]
+fn a_details_card_owns_its_body_after_a_blank_line() {
+    let tree = Scene::new("<details><summary>More</summary>\n\nBody text\n\n</details>\n").details(true).render();
+    assert_eq!(tree.elements.iter().filter(|element| element.key.as_deref() == Some("details")).count(), 1);
+    let card = tree.by_key("details").expect("the single card");
+    assert_eq!(card.expanded, Some(true));
+    assert!(tree.has_text("Body text"), "the body is inside the card");
 }

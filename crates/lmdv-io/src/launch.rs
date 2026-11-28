@@ -1,4 +1,5 @@
-//! The original command-line grammar: `lmdv [--new-window] [file] [--line N]`.
+//! The original command-line grammar: `lmdv [--new-window] [file] [--line N]`,
+//! plus the session extension `--restore-session`.
 //!
 //! The parser is deliberately small and does not validate that a file exists:
 //! a missing file still gets a full path so the window can show “Not found”
@@ -24,16 +25,38 @@ pub struct Launch {
     pub line: Option<usize>,
     /// `--new-window`: a window of its own, whatever other windows hold.
     pub new_window: bool,
+    /// `--restore-session`: restore the stored windows even when this launch
+    /// also names a file (the file still wins for the first window).
+    pub restore_session: bool,
     /// The client's working directory, absolute and lexically normalized.
     pub cwd: PathBuf,
+    /// A compositor activation token (`XDG_ACTIVATION_TOKEN` on Wayland,
+    /// `DESKTOP_STARTUP_ID` on X11) forwarded with the launch so the window
+    /// that opens it can take focus (OI-117). Grammar parsing stays pure; the
+    /// entry point fills this from [`activation_token_from_env`].
+    pub activation_token: Option<String>,
+}
+
+/// The activation token the desktop gave this process, when it gave one.
+///
+/// Wayland compositors only grant focus to a window whose launch can prove it
+/// came from an interaction; the token travels with the launch request and is
+/// handed to Rune's `WindowHandle::activate`. X11's startup id is the equivalent
+/// older spelling.
+pub fn activation_token_from_env() -> Option<String> {
+    ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"]
+        .into_iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .find(|token| !token.is_empty())
 }
 
 /// Parses the original CLI grammar.
 ///
 /// `args` includes the program name, exactly like `std::env::args()`.
 /// Relative paths are resolved against `cwd` without touching the disk;
-/// `.` and `..` are folded lexically. `--new-window` is accepted anywhere
-/// before `--`; unknown flags beginning with `-` are ignored; only the first
+/// `.` and `..` are folded lexically. `--new-window` and `--restore-session`
+/// (with its `--no-restore-session` negation) are accepted anywhere before
+/// `--`; unknown flags beginning with `-` are ignored; only the first
 /// positional path is used; a non-numeric value after `--line`/`-l` or after
 /// `--line=` is ignored. A `--line` with no following argument consumes
 /// nothing and leaves the line unset, matching the original.
@@ -59,6 +82,8 @@ where
         match text {
             "--" if !positional_only => positional_only = true,
             "--new-window" if !positional_only => launch.new_window = true,
+            "--restore-session" if !positional_only => launch.restore_session = true,
+            "--no-restore-session" if !positional_only => launch.restore_session = false,
             "--line" | "-l" if !positional_only => {
                 launch.line = it.next().and_then(|value| value.as_ref().to_str()?.parse().ok());
             }
@@ -216,6 +241,25 @@ mod tests {
     }
 
     #[test]
+    fn restore_session_is_an_optional_flag_that_can_be_negated() {
+        let launch = parse(&["--restore-session", "a.md", "--line=2"]);
+        assert!(launch.restore_session);
+        assert_eq!(launch.path.as_deref(), Some(Path::new("/home/user/notes/a.md")));
+        assert_eq!(launch.line, Some(2));
+        assert!(!launch.new_window);
+
+        let launch = parse(&["a.md", "--restore-session", "--no-restore-session"]);
+        assert!(!launch.restore_session, "the last spelling wins");
+
+        let launch = parse(&["--", "--restore-session"]);
+        assert!(!launch.restore_session, "after -- it is a file name");
+        assert_eq!(launch.path.as_deref(), Some(Path::new("/home/user/notes/--restore-session")));
+
+        assert!(!parse(&[]).restore_session);
+        assert!(!parse(&["--restore-session=1"]).restore_session, "unknown spellings stay flags");
+    }
+
+    #[test]
     fn only_the_first_positional_is_used() {
         let launch = parse(&["one.md", "two.md", "three.md"]);
         assert_eq!(launch.path.as_deref(), Some(Path::new("/home/user/notes/one.md")));
@@ -277,5 +321,23 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(value["newWindow"], serde_json::json!(true));
         assert_eq!(value["line"], serde_json::json!(9));
+    }
+
+    #[test]
+    fn session_and_token_fields_join_the_socket_json() {
+        let launch = parse(&["--restore-session", "a.md"]);
+        let json = serde_json::to_string(&launch).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["restoreSession"], serde_json::json!(true));
+        assert!(value["activationToken"].is_null());
+
+        let mut launch = launch;
+        launch.activation_token = Some("wayland-token".to_owned());
+        let parsed: Launch = serde_json::from_str(&serde_json::to_string(&launch).unwrap()).unwrap();
+        assert_eq!(parsed, launch);
+        // An older peer's JSON leaves the extension fields at their default.
+        let old: Launch = serde_json::from_str(r#"{"path":"/a.md","line":3,"newWindow":false,"cwd":"/"}"#).unwrap();
+        assert!(!old.restore_session);
+        assert_eq!(old.activation_token, None);
     }
 }

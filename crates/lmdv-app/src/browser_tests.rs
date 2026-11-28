@@ -9,7 +9,7 @@ use lmdv_io::tree::{SearchHit, TreeEntry, TreeError, TreeListing};
 use rune::{ElementInfo, Tx};
 use tempfile::TempDir;
 
-use crate::browser::{SEARCH_DEBOUNCE, collapse_key, search_prefill};
+use crate::browser::{BrowserRow, SEARCH_DEBOUNCE, collapse_key, search_prefill};
 use crate::test_support;
 use crate::view::view;
 use crate::window::WindowState;
@@ -1379,6 +1379,97 @@ fn a_folded_pane_opens_as_a_peek_over_the_text() {
         elements.iter().any(|element| element.role == "treeitem" && element.label.as_deref() == Some("a.md")),
         "the tree's rows are in the peek"
     );
+}
+
+// ---- A-06: tree ARIA on the app's own rows ---------------------------------
+
+fn a11y_node<'a>(node: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    if node.get("key").and_then(|value| value.as_str()) == Some(key) {
+        return Some(node);
+    }
+    node.get("children")?.as_array()?.iter().find_map(|child| a11y_node(child, key))
+}
+
+fn a11y_states(node: &serde_json::Value) -> Vec<&str> {
+    node.get("states")
+        .and_then(|value| value.as_array())
+        .map(|states| states.iter().filter_map(|state| state.as_str()).collect())
+        .unwrap_or_default()
+}
+
+fn tree_a11y(state: WindowState) -> serde_json::Value {
+    let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));
+    runtime.frame(0.0);
+    runtime.frame(1.0 / 60.0);
+    runtime.accessibility_json()
+}
+
+#[test]
+fn tree_rows_carry_level_set_position_ownership_and_current() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = temp.path().join("notes");
+    write(&root, "a.md", "a");
+    write(&root, "b.md", "b");
+    write(&root, "nested/deeper.md", "deep");
+    show(&mut state, listing(&root));
+    let nested = root.join("nested").to_string_lossy().into_owned();
+    let deeper = root.join("nested/deeper.md").to_string_lossy().into_owned();
+    let a = root.join("a.md").to_string_lossy().into_owned();
+    state.open_path(PathBuf::from(&deeper));
+    assert!(state.follow_browser_active(), "the open document is current in the tree");
+    state.left.set_open(true);
+
+    let tree = tree_a11y(state);
+    let list = a11y_node(&tree, BROWSER_TREE_KEY).expect("the tree");
+    assert_eq!(list["role"], "tree", "the pane is one tree");
+
+    // Root-level siblings are folders and files in one visual list, so the
+    // folder's set has three members and it comes first.
+    let folder = a11y_node(&tree, &nested).expect("the folder row");
+    assert_eq!(folder["role"], "tree-item");
+    assert_eq!(folder["level"], 1);
+    assert_eq!(folder["position"], 1);
+    assert_eq!(folder["setSize"], 3);
+    assert!(a11y_states(folder).contains(&"expanded"), "an open folder says expanded");
+    assert_eq!(folder["owns"], serde_json::json!([deeper]), "the folder owns its first visible child");
+
+    let first_file = a11y_node(&tree, &a).expect("the first file row");
+    assert_eq!(first_file["level"], 1);
+    assert_eq!(first_file["position"], 2);
+    assert_eq!(first_file["setSize"], 3);
+    assert!(first_file.get("owns").is_none(), "a file owns no group");
+
+    let child = a11y_node(&tree, &deeper).expect("the nested file row");
+    assert_eq!(child["level"], 2);
+    assert_eq!(child["position"], 1);
+    assert_eq!(child["setSize"], 1);
+    assert_eq!(child["current"], "true", "the open document is aria-current");
+    assert!(a11y_states(child).contains(&"selected"));
+}
+
+#[test]
+fn row_place_counts_each_level_separately() {
+    let rows = |entries: &[(&str, u32)]| {
+        entries
+            .iter()
+            .map(|(path, depth)| BrowserRow {
+                path: (*path).to_owned(),
+                name: (*path).to_owned(),
+                depth: *depth,
+                dir: *path == "folder" || *path == "second",
+                expanded: true,
+            })
+            .collect::<Vec<_>>()
+    };
+    // folder / child / other-child / second / file. The two depth-1 children
+    // share the folder's set of two; the three depth-0 rows are one set of three.
+    let rows = rows(&[("folder", 0), ("child", 1), ("other-child", 1), ("second", 0), ("file", 0)]);
+    assert_eq!(crate::browser::row_place(&rows, 0), (1, 3, Some("child")));
+    assert_eq!(crate::browser::row_place(&rows, 1), (1, 2, None));
+    assert_eq!(crate::browser::row_place(&rows, 2), (2, 2, None));
+    assert_eq!(crate::browser::row_place(&rows, 3), (2, 3, None));
+    assert_eq!(crate::browser::row_place(&rows, 4), (3, 3, None));
 }
 
 #[test]

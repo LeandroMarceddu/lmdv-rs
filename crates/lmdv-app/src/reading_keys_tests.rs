@@ -30,6 +30,14 @@ fn open(state: WindowState) -> Runtime<WindowState> {
     runtime
 }
 
+/// `open` with the app's root key preview, as `AppSpec` installs it (O-14).
+fn open_preview(state: WindowState) -> Runtime<WindowState> {
+    let mut runtime = Runtime::new(state, crate::app::app_view, (1100.0, 760.0), Env::new(false, 2.0));
+    runtime.poll = Some(|state: &mut WindowState, now, tx| state.poll(now, tx));
+    runtime.on_key = Some(crate::app::on_key);
+    runtime
+}
+
 fn settle(runtime: &mut Runtime<WindowState>, frames: usize) {
     for _ in 0..frames {
         runtime.frame(1.0 / 60.0);
@@ -386,6 +394,40 @@ fn the_outline_filter_owns_the_reading_keys() {
     }
     assert_eq!(runtime.state.outline_filter.text, "jg ", "the filter field typed them");
     assert_eq!(scroll(&runtime).offset, start.offset, "the article never moved");
+}
+
+// ---- O-14: navigation chords over a focused field -----------------------
+
+#[test]
+fn alt_left_navigates_while_a_text_field_has_focus() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    scene_reader(&mut state);
+    let mut runtime = open_preview(state);
+    settle(&mut runtime, 4);
+
+    // A jump records a place to go back to (O-12); let its glide land first.
+    let list = heading_list(&runtime);
+    let target = *list.last().expect("a heading");
+    runtime.update(|state, tx| state.jump_to_heading(&heading_key(target), tx));
+    settle(&mut runtime, 120);
+    let jumped = scroll(&runtime).offset;
+    assert!(runtime.state.nav_can_back(), "the jump recorded a place");
+
+    // The reading find field takes the keyboard. Without the root preview its
+    // own Alt+Left word-move would consume the chord instead of navigating.
+    runtime.key(command('f'));
+    runtime.frame(1.0 / 60.0);
+    let focused = runtime.elements().into_iter().find(|element| element.focused).and_then(|element| element.key);
+    assert_eq!(focused.as_deref(), Some(crate::reader_find::READER_FIND_QUERY_KEY), "the field owns the keyboard");
+    let before = runtime.state.active_tab().map(|tab| tab.view.reader_find.query.text.clone()).unwrap_or_default();
+
+    runtime.key(KeyEvent { key: Key::Left, mods: Mods { alt: true, ..Mods::default() } });
+    settle(&mut runtime, 120);
+    assert!(!runtime.state.nav_can_back(), "Back used the place and took the chord");
+    assert!(scroll(&runtime).offset < jumped - 100.0, "the article went back: {jumped} -> {:?}", scroll(&runtime));
+    let after = runtime.state.active_tab().map(|tab| tab.view.reader_find.query.text.clone()).unwrap_or_default();
+    assert_eq!(after, before, "the find field never word-moved");
 }
 
 // ---- O-04: the pin and the glide ----------------------------------------

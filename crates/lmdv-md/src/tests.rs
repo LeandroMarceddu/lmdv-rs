@@ -1556,3 +1556,194 @@ fn multi_line_inline_display_math_stays_inside_a_quote() {
     assert!(inline.text.starts_with("text "));
     assert!(inline.text.ends_with(" more"));
 }
+
+// ------------------------------------------------ HTML model and SVG geometry
+
+fn marked_svg_nodes(node: &HtmlNode, out: &mut Vec<HtmlNode>) {
+    for child in &node.children {
+        if let HtmlChild::Node(child) = child {
+            if child.attr(crate::html::SVG_SHAPE_ATTR).is_some() {
+                out.push(child.clone());
+            }
+            marked_svg_nodes(child, out);
+        }
+    }
+}
+
+#[test]
+fn svg_shapes_keep_geometry_and_drop_event_handlers() {
+    let doc = doc(concat!(
+        "<div><svg viewBox=\"0 0 100 50\" onload=\"evil()\">",
+        "<rect x=\"1\" y=\"2\" width=\"10\" height=\"20\" fill=\"#f00\" onclick=\"evil()\"/>",
+        "<g transform=\"translate(3,4)\"><circle cx=\"5\" cy=\"6\" r=\"7\"/></g>",
+        "<path d=\"M0 0 L9 9\" fill-rule=\"evenodd\"/>",
+        "<a href=\"javascript:evil()\"><line x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"/></a>",
+        "</svg></div>\n",
+    ));
+    let fragment = match &doc.blocks[0] {
+        Block::HtmlBlock(node) => node,
+        other => panic!("html block: {other:?}"),
+    };
+    let svg = child_node(fragment, "svg").expect("the svg container is part of the safe subset");
+    assert_eq!(svg.tag, HtmlTag::Svg);
+    assert_eq!(svg.attr("viewbox"), Some("0 0 100 50"));
+    assert!(svg.attr("onload").is_none());
+    let mut shapes = Vec::new();
+    marked_svg_nodes(svg, &mut shapes);
+    let names: Vec<&str> = shapes.iter().filter_map(|node| node.attr(crate::html::SVG_SHAPE_ATTR)).collect();
+    assert_eq!(names, ["rect", "g", "circle", "path", "line"]);
+    assert_eq!(shapes[0].attr("fill"), Some("#f00"));
+    assert_eq!(shapes[0].attr("x"), Some("1"));
+    assert!(shapes[0].attr("onclick").is_none());
+    assert_eq!(shapes[2].attr("r"), Some("7"));
+    assert_eq!(shapes[3].attr("fill-rule"), Some("evenodd"));
+    assert_eq!(shapes[3].attr("d"), Some("M0 0 L9 9"));
+    let anchors = {
+        let mut out = Vec::new();
+        collect_tag(svg, "a", &mut out);
+        out
+    };
+    assert!(anchors[0].attr("href").is_none(), "unsafe SVG hrefs stay refused");
+}
+
+#[test]
+fn inline_svg_in_a_paragraph_records_shapes_and_keeps_link_runs() {
+    let doc = doc(concat!(
+        "Before <svg viewBox=\"0 0 10 10\" width=\"10\" height=\"10\" onload=\"evil()\">",
+        "<rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"#f00\"/>",
+        "<a href=\"#dest\">Go<circle cx=\"5\" cy=\"5\" r=\"2\" onclick=\"evil()\"/></a>",
+        "<a href=\"javascript:evil()\">Bad</a>",
+        "</svg> after\n",
+    ));
+    let Block::Para(inline) = &doc.blocks[0] else { panic!("a paragraph: {:?}", doc.blocks[0]) };
+    assert_eq!(inline.text, format!("Before {}GoBad after", crate::model::OBJECT_CHAR));
+    let objects: Vec<_> = inline
+        .objects
+        .iter()
+        .filter(|object| object.html.as_ref().is_some_and(|node| node.tag == HtmlTag::Svg))
+        .collect();
+    assert_eq!(objects.len(), 1, "one inline svg object");
+    let node = objects[0].html.as_ref().unwrap();
+    assert_eq!(node.attr("viewbox"), Some("0 0 10 10"));
+    assert!(node.attr("onload").is_none());
+    let mut shapes = Vec::new();
+    marked_svg_nodes(node, &mut shapes);
+    let names: Vec<&str> = shapes.iter().filter_map(|node| node.attr(crate::html::SVG_SHAPE_ATTR)).collect();
+    assert_eq!(names, ["rect", "circle"]);
+    assert_eq!(shapes[0].attr("fill"), Some("#f00"));
+    assert!(shapes[1].attr("onclick").is_none(), "shape event handlers stay refused");
+    let dests: Vec<&str> = inline.links.iter().map(|link| link.dest.as_str()).collect();
+    assert_eq!(dests, ["#dest"], "safe svg links stay in the paragraph, unsafe ones do not");
+}
+
+#[test]
+fn inline_svg_without_drawable_shapes_keeps_its_text_and_links() {
+    let doc = doc("A <svg viewBox=\"0 0 10 10\"><a href=\"#x\">Hi</a></svg> B\n");
+    let Block::Para(inline) = &doc.blocks[0] else { panic!("a paragraph: {:?}", doc.blocks[0]) };
+    assert_eq!(inline.text, format!("A {}Hi B", crate::model::OBJECT_CHAR));
+    let object = inline
+        .objects
+        .iter()
+        .find(|object| object.html.as_ref().is_some_and(|node| node.tag == HtmlTag::Svg))
+        .expect("the svg object exists even without shapes");
+    let mut shapes = Vec::new();
+    marked_svg_nodes(object.html.as_ref().unwrap(), &mut shapes);
+    assert!(shapes.is_empty(), "unsupported svg has no shapes to draw");
+    assert_eq!(inline.links.len(), 1, "its link text still works");
+    assert_eq!(inline.links[0].dest, "#x");
+}
+
+#[test]
+fn entity_and_escape_boundaries_map_back_to_their_source_spelling() {
+    let source = "A &amp; B \\*C\\* &copy; D\n";
+    let doc = doc(source);
+    let inline = match &doc.blocks[0] {
+        Block::Para(inline) => inline,
+        other => panic!("para: {other:?}"),
+    };
+    assert_eq!(inline.text, "A & B *C* © D");
+    assert_eq!(source_range_of(inline, "&"), 2..3);
+    assert_eq!(source_range_of(inline, "*"), 11..12);
+    assert_eq!(source_range_of(inline, "C"), 12..13);
+    assert_eq!(source_range_of(inline, "©"), 16..17);
+    assert_eq!(source_range_of(inline, "D"), 23..24);
+}
+
+#[test]
+fn inline_picture_keeps_its_sources_and_emits_one_object() {
+    let source = concat!(
+        "Before <picture><source media=\"(prefers-color-scheme: dark)\" ",
+        "srcset=\"dark.png 1x, javascript:evil() 2x\">",
+        "<img src=\"light.png\" alt=\"Logo\"></picture> After\n",
+    );
+    let doc = doc(source);
+    let inline = match &doc.blocks[0] {
+        Block::Para(inline) => inline,
+        other => panic!("para: {other:?}"),
+    };
+    let pictures: Vec<&InlineObject> =
+        inline.objects.iter().filter(|object| object.kind == InlineObjectKind::Picture).collect();
+    assert_eq!(pictures.len(), 1, "one picture object: {:?}", inline.objects);
+    assert!(!inline.objects.iter().any(|object| object.kind == InlineObjectKind::Image));
+    let picture = pictures[0].html.as_ref().expect("picture node");
+    assert_eq!(picture.tag, HtmlTag::Picture);
+    let nodes: Vec<&HtmlNode> = picture
+        .children
+        .iter()
+        .filter_map(|child| match child {
+            HtmlChild::Node(node) => Some(node),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(nodes.len(), 2, "one source and one img: {nodes:?}");
+    assert_eq!(nodes[0].tag, HtmlTag::Source);
+    assert_eq!(nodes[0].attr("media"), Some("(prefers-color-scheme: dark)"));
+    assert_eq!(nodes[0].srcset.len(), 1, "the unsafe candidate was dropped");
+    assert_eq!(nodes[0].srcset[0].url, "dark.png");
+    assert_eq!(nodes[1].tag, HtmlTag::Img);
+    assert_eq!(nodes[1].attr("src"), Some("light.png"));
+}
+
+#[test]
+fn two_inline_pictures_each_keep_their_own_source() {
+    let source = concat!(
+        "<picture><source srcset=\"first.png 1x\"><img src=\"first-fallback.png\"></picture> and ",
+        "<picture><source srcset=\"second.png 1x\"><img src=\"second-fallback.png\"></picture>\n",
+    );
+    let doc = doc(source);
+    let inline = match &doc.blocks[0] {
+        Block::Para(inline) => inline,
+        other => panic!("para: {other:?}"),
+    };
+    let pictures: Vec<&InlineObject> =
+        inline.objects.iter().filter(|object| object.kind == InlineObjectKind::Picture).collect();
+    assert_eq!(pictures.len(), 2, "one object per picture: {:?}", inline.objects);
+    assert!(!inline.objects.iter().any(|object| object.kind == InlineObjectKind::Image));
+    for (picture, name) in pictures.iter().zip(["first.png", "second.png"]) {
+        let node = picture.html.as_ref().expect("picture node");
+        let sources: Vec<&HtmlNode> = node
+            .children
+            .iter()
+            .filter_map(|child| match child {
+                HtmlChild::Node(child) if child.tag == HtmlTag::Source => Some(child),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].srcset[0].url, name);
+    }
+}
+
+#[test]
+fn details_body_after_a_blank_line_stays_in_the_card() {
+    let doc = doc("<details open><summary>More</summary>\n\nBody text\n\n</details>\n");
+    assert_eq!(doc.blocks.len(), 1, "the blank lines no longer split the card");
+    let fragment = match &doc.blocks[0] {
+        Block::HtmlBlock(node) => node,
+        other => panic!("html block: {other:?}"),
+    };
+    let node = child_node(fragment, "details").expect("the details card");
+    assert_eq!(node.tag, HtmlTag::Details);
+    assert!(node.attr("open").is_some(), "the open state is kept");
+    assert!(node.text().contains("Body text"), "the card owns its body");
+}

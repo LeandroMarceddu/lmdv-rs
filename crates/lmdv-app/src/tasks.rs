@@ -56,7 +56,7 @@ pub struct Candidate {
 pub struct TaskUndo {
     /// The document the write belongs to.
     pub doc: DocumentId,
-    /// The path that was written.
+    /// The path that was written, or an empty path for a pasted buffer.
     pub path: PathBuf,
     /// The marker's source bytes.
     pub range: Range<usize>,
@@ -64,6 +64,12 @@ pub struct TaskUndo {
     pub before: u8,
     /// The middle byte the write produced.
     pub after: u8,
+    /// The saved-base metadata the inverse must guard against. A pasted
+    /// document has no file, so there is no metadata to compare.
+    pub expected_meta: Option<FileMeta>,
+    /// A dirty/leased/pasted tick never reaches disk; its Undo only flips the
+    /// byte back in the shared buffer and leaves the editor's save to persist it.
+    pub buffer_only: bool,
 }
 
 /// The conflict prompt's pending edit: the bytes to write if the user chooses
@@ -98,10 +104,25 @@ struct TaskSave {
     offer_undo: bool,
 }
 
+/// A tick accepted while a save was in flight (OI-094).
+///
+/// The byte is flipped in the shared buffer right away so the reader shows the
+/// click, but the write waits for the in-flight save: its completion supplies
+/// the file metadata the follow-up save must guard against. Earlier queued
+/// ticks on other markers are accumulated; the last one owns the notice's Undo.
+#[derive(Clone, Debug)]
+struct QueuedTick {
+    range: Range<usize>,
+    before: u8,
+    after: u8,
+    offer_undo: bool,
+}
+
 /// Task state owned by one window: the job contexts and their stale guards.
 #[derive(Debug, Default)]
 pub struct TaskState {
     saves: HashMap<JobId, TaskSave>,
+    queued: HashMap<DocumentId, Vec<QueuedTick>>,
     generations: crate::jobs::GenerationTracker,
 }
 
@@ -117,9 +138,23 @@ impl TaskState {
         self.saves.len()
     }
 
+    /// The number of ticks waiting for an in-flight save (tests).
+    #[cfg(test)]
+    pub fn queued(&self, doc: DocumentId) -> usize {
+        self.queued.get(&doc).map_or(0, Vec::len)
+    }
+
     /// Whether `job` is a task save this window started.
     pub fn is_job(&self, job: JobId) -> bool {
         self.saves.contains_key(&job)
+    }
+
+    fn queue(&mut self, doc: DocumentId, tick: QueuedTick) {
+        self.queued.entry(doc).or_default().push(tick);
+    }
+
+    fn take_queued(&mut self, doc: DocumentId) -> Vec<QueuedTick> {
+        self.queued.remove(&doc).unwrap_or_default()
     }
 }
 
@@ -148,11 +183,20 @@ pub fn task_control_wire() -> TaskControlWire {
 
 /// The stable key of a task's control.
 ///
-/// The label's hash keeps nested lists unique when two lists in one block both
-/// have an item at the same index (the renderer's `TaskRef::item` is list-local
-/// and the wire never sees the list path).
+/// The label's hash and the inline source-map byte range keep nested lists
+/// unique when two items in one block share the same label and list-local
+/// index (`TaskRef::item` is list-local and the wire never sees the list path).
+/// The range is the marker's own bytes, so identical labels at different source
+/// positions cannot collide (OI-112).
 pub fn task_hit_key(task: &TaskRef) -> String {
-    format!("task-hit-{}-{}-{:08x}", task.block, task.item, label_hash(&task.label))
+    format!(
+        "task-hit-{}-{}-{:08x}-{}-{}",
+        task.block,
+        task.item,
+        label_hash(&task.label),
+        task.source.start,
+        task.source.end
+    )
 }
 
 fn label_hash(label: &str) -> u32 {
@@ -346,10 +390,6 @@ impl WindowState {
             self.notice(lmdv_i18n::t!("task.notReady"));
             return;
         }
-        if self.tasks.is_saving(document.id) {
-            self.notice(lmdv_i18n::t!("task.saving"));
-            return;
-        }
         let Some(marker) = locate_marker(&model, task) else {
             self.notice(lmdv_i18n::t!("task.ambiguous"));
             return;
@@ -373,11 +413,33 @@ impl WindowState {
         }
         self.sync_tab_dirty(&document);
 
+        // OI-094: a second click while the save is in flight is queued, not
+        // refused. Its byte is already in the buffer (which is dirty until the
+        // first save lands), so this check must precede the buffer-only branch.
+        // The in-flight save's completion starts the follow-up against the
+        // metadata it just wrote.
+        if self.tasks.is_saving(document.id) {
+            self.tasks.queue(document.id, QueuedTick { range: marker, before: middle, after, offer_undo: true });
+            self.notice(lmdv_i18n::t!("task.saving"));
+            return;
+        }
         // A document with unsaved edits (another window's editor) keeps the
         // tick in the buffer and lets that save write it; a pasted document has
-        // no file at all. Neither may start a viewer write.
+        // no file at all. Neither may start a viewer write, but both still get
+        // an Undo that reverses the byte in the buffer (OI-093).
         if dirty || leased || path.is_none() {
-            self.show_task_notice(lmdv_i18n::t!("task.bufferChanged"), None, NoticeKind::Info);
+            let expected_meta = path.as_ref().map(|_| expected);
+            let undo_path = path.unwrap_or_default();
+            let undo = TaskUndo {
+                doc: document.id,
+                path: undo_path,
+                range: marker,
+                before: middle,
+                after,
+                expected_meta,
+                buffer_only: true,
+            };
+            self.show_task_notice(lmdv_i18n::t!("task.bufferChanged"), Some(undo), NoticeKind::Info);
             return;
         }
         let path = path.expect("the path was checked above");
@@ -443,6 +505,32 @@ impl WindowState {
     /// Reverses the toggle the notice's Undo action names.
     pub(crate) fn undo_task(&mut self, undo: TaskUndo) {
         let Some(document) = self.shared.docs().get(undo.doc) else { return };
+        // OI-093: a buffer-only tick has no file to write back to. Its Undo
+        // flips the same byte in the buffer, guarded by the saved-base metadata
+        // captured at tick time: a disk change in the meantime wins.
+        if undo.buffer_only {
+            if !undo.path.as_os_str().is_empty() && document.key.borrow().path() != Some(undo.path.as_path()) {
+                self.notice(lmdv_i18n::t!("msg.undoFailed", "err" => lmdv_i18n::t!("task.undoMoved")));
+                return;
+            }
+            if let Some(expected) = undo.expected_meta
+                && document.saved.borrow().meta != expected
+            {
+                self.notice(lmdv_i18n::t!("msg.undoFailed", "err" => lmdv_i18n::t!("task.undoChanged")));
+                return;
+            }
+            let current = {
+                let buffer = document.text();
+                marker_middle(buffer.text(), &undo.range)
+            };
+            if current != Some(undo.after) || !set_middle(&document, &undo.range, undo.after, undo.before) {
+                self.notice(lmdv_i18n::t!("msg.undoFailed", "err" => lmdv_i18n::t!("task.undoChanged")));
+                return;
+            }
+            self.sync_tab_dirty(&document);
+            self.show_task_notice(lmdv_i18n::t!("task.bufferUndone"), None, NoticeKind::Info);
+            return;
+        }
         if document.key.borrow().path() != Some(undo.path.as_path()) {
             self.notice(lmdv_i18n::t!("msg.undoFailed", "err" => lmdv_i18n::t!("task.undoMoved")));
             return;
@@ -453,6 +541,17 @@ impl WindowState {
         }
         let was_dirty = document.is_dirty();
         let leased = document.lease_holder().is_some();
+        // The inverse write guards the metadata the forward write produced.
+        // If another save landed after the notice, the disk is no longer the
+        // state the Undo was offered against, so it must not be overwritten.
+        let expected = match undo.expected_meta {
+            Some(meta) => meta,
+            None => document.saved.borrow().meta,
+        };
+        if document.saved.borrow().meta != expected {
+            self.notice(lmdv_i18n::t!("msg.undoFailed", "err" => lmdv_i18n::t!("task.undoChanged")));
+            return;
+        }
         let current = {
             let buffer = document.text();
             marker_middle(buffer.text(), &undo.range)
@@ -467,10 +566,13 @@ impl WindowState {
         }
         self.sync_tab_dirty(&document);
         if was_dirty || leased {
+            // Edits made after the tick belong to their own save; do not
+            // persist them behind an Undo.
             self.show_task_notice(lmdv_i18n::t!("task.bufferUndone"), None, NoticeKind::Info);
             return;
         }
-        let expected = document.saved.borrow().meta;
+        // Undo never offers a second Undo; the document is clean again unless
+        // the user typed something after the tick.
         self.start_task_save(&document, undo.path, undo.range, undo.after, undo.before, Some(expected), false);
     }
 
@@ -489,7 +591,11 @@ impl WindowState {
         if save.doc != doc || !self.tasks.generations.finish(save.doc, generation) {
             return Some(false);
         }
-        let Some(document) = self.shared.docs().get(save.doc) else { return Some(false) };
+        let Some(document) = self.shared.docs().get(save.doc) else {
+            // A closed document's queued ticks can no longer be written.
+            self.tasks.take_queued(save.doc);
+            return Some(false);
+        };
         match result {
             Ok(outcome) => Some(self.task_saved(save, &document, outcome)),
             Err(error) => Some(self.task_save_failed(save, &document, error)),
@@ -532,17 +638,40 @@ impl WindowState {
             }
         }
         self.sync_editor_titles();
-        if save.offer_undo {
+        // OI-094: ticks that arrived while this save ran are already in the
+        // buffer. Their write waits for this one so disk order stays the same
+        // as click order, and so the metadata just returned guards the next job.
+        let queued = self.tasks.take_queued(save.doc);
+        let current_hash = hash_text(document.text().text());
+        if !queued.is_empty() && current_hash != save.hash {
+            let last = queued.last().expect("queued ticks are not empty");
+            self.start_task_save(
+                document,
+                new_path,
+                last.range.clone(),
+                last.before,
+                last.after,
+                Some(outcome.meta),
+                last.offer_undo,
+            );
+            return true;
+        }
+        if queued.is_empty() && save.offer_undo {
             let undo = TaskUndo {
                 doc: document.id,
                 path: new_path,
                 range: save.range,
                 before: save.before,
                 after: save.after,
+                expected_meta: Some(outcome.meta),
+                buffer_only: false,
             };
             let checked = save.after != b' ';
             let text = if checked { lmdv_i18n::t!("msg.taskChecked") } else { lmdv_i18n::t!("msg.taskUnchecked") };
             self.show_task_notice(text, Some(undo), NoticeKind::Success);
+        } else if !queued.is_empty() {
+            // A later click already put the buffer back to the bytes on disk.
+            self.show_task_notice(lmdv_i18n::t!("task.bufferUndone"), None, NoticeKind::Info);
         } else {
             self.dismiss_notice();
         }
@@ -552,7 +681,13 @@ impl WindowState {
     }
 
     fn task_save_failed(&mut self, save: TaskSave, document: &Rc<Document>, error: WriteError) -> bool {
-        // A failed write never leaves the viewer's optimistic tick behind.
+        // A failed write never leaves the viewer's optimistic ticks behind,
+        // including ones queued during this job (OI-094): their bytes can only
+        // be written on top of the state this save was trying to reach.
+        let queued = self.tasks.take_queued(save.doc);
+        for tick in queued.iter().rev() {
+            set_middle(document, &tick.range, tick.after, tick.before);
+        }
         set_middle(document, &save.range, save.after, save.before);
         self.sync_tab_dirty(document);
         match error {
