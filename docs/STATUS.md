@@ -581,7 +581,7 @@
 3. Use the new Rune APIs for the app-side rows: L-12 SVG vectors (`Path::from_svg`/`El::shape`), C-01 (`TextEdit::is_composing`), O-14's Alt+arrows (`on_key_preview`), A-05/A-06 (`controls`/`owns`/`position_in_set`), V-02 pinch and D-08 drag-cancel. OI-189 is done.
 4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime is implemented but needs the manual checklist in OI-155.
 
-**Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on pristine `f4ec14e` too, and an unrelated macOS Rune smoothing test fails on Linux.
+**Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on pristine `af6b1fdd` too, and an unrelated macOS Rune smoothing test fails on Linux.
 
 **Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. Record any repeat with the run id.
 
