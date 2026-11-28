@@ -47,7 +47,7 @@
 | T-29 | P1 | done | The command/menu precedence is audited, and `close_active_tab` now consumes Ctrl+W/Ctrl+F4 during an in-hand tab drag (a second press closes). A runtime test pins the whole key path; the tab-key cancel test remains. |
 | T-30 | P0 | done | `commands.rs` test `close_window_goes_through_the_dirty_guard`; `guard_close_window` refuses a second question while one is open; chord is Ctrl+Shift+W. |
 | T-31 | P1 | done | `WindowPlan`/`new_window_plan` implement the 3 s chain anchor, 32 pt cascade from the last runtime-created window, display-edge restart, and maximized/minimized inheritance; tests cover the chain and placements. Forwarded `--new-window`, browser/link and tear-out paths still use the plain cascade (tracked in S-13's residual). |
-| T-32 | P1 | substitute | OI-002 accepted: Rune's native file dialog is single-select. |
+| T-32 | P1 | done | `Ctrl+O` uses `Tx::pick_files`; headless proof opens three files with the first in front and two background tabs in selection order. |
 | T-33 | P0 | done | `window::tests::two_windows_share_one_document_one_lease_and_one_registry`; `windows::tests::an_open_document_selects_the_most_recently_focused_holder`, `a_file_prefers_the_first_idle_normal_window_in_focus_order`. |
 | T-34 | P1 | done | Toolbar rules disappear <720, Open/Help <640, `+` <560; Ctrl+T/Ctrl+O/F1 and the all-tabs list remain. The centred title is dropped <720 because the kit has no flexible middle slot. |
 | T-35 | P2 | done | `reading_meta` tests `a_tab_keeps_its_time_only_while_the_strip_has_room`, `a_long_name_gives_way_to_the_time_in_the_tabs_width`; `tab_card_tests::a_drag_hides_the_card_and_the_time_while_a_pointer_close_freezes_the_widths`; OI-142 fixed. |
@@ -87,7 +87,7 @@
 | C-12 | P1 | substitute | `palette_tests::the_input_and_list_carry_the_combobox_roles`, `the_count_is_announced_after_the_typing_pauses`; OI-148: Rune has no `aria-autocomplete`/`aria-controls` state. |
 | C-13 | P1 | substitute | `palette_tests::a_tab_switch_or_a_document_change_closes_it`, `another_modal_closes_it`; `poll_palette` closes on prompt/help/Share/table/lightbox/block-menu/tab-menu (`palette.rs:695-711`). The full-window scrim (`palette_ui.rs:49-78`) makes a tab drag unreachable while the palette is open, so no drag trigger is needed; static linkage makes the module-load-failure clause n/a. |
 | W-01 | P0 | substitute | Native Linux frame (ADR-007; FEATURE_PARITY §4 W-01/02/03/05/06/08). The app toolbar is not a window-drag region (there is no `data-tauri-drag-region` equivalent), so dragging or double-clicking the toolbar does not move/maximize the window; the native frame owns both. |
-| W-02 | P0 | substitute | Native caption buttons; Close still runs the unsaved prompt through Rune patch 0002 and `app.rs:480-485 close_request` (STATUS P0). |
+| W-02 | P0 | substitute | Native caption buttons; Close still runs the unsaved prompt through upstream `CloseResponse` and `app.rs:480-485 close_request` (STATUS P0). |
 | W-03 | P2 | n/a | Windows 11 Snap flyout over app-drawn caption buttons; Linux uses the native frame and the compositor's own snap. FEATURE_PARITY §4 lists it n/a. |
 | W-04 | P1 | substitute | The native frame draws the max/restore icon and state; there is no app caption to switch label or aria state (ADR-007). |
 | W-05 | P2 | n/a | The native titlebar supplies the system menu; there is no app-drawn caption to right-click. FEATURE_PARITY §4 lists it n/a. |

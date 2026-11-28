@@ -18,12 +18,12 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 262 done, 55 substitute, 7 partial, 0 missing, 18 n/a.
+**342 rows:** 263 done, 54 substitute, 7 partial, 0 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 27 | 3 | 0 | 0 | 0 |
-| Tabs and windows | 35 | 25 | 8 | 2 | 0 | 0 |
+| Tabs and windows | 35 | 26 | 7 | 2 | 0 | 0 |
 | Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 18 | 0 | 0 | 0 | 0 |
@@ -39,7 +39,7 @@ matches this audit.
 | Accessibility | 15 | 14 | 1 | 0 | 0 | 0 |
 | Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **262** | **55** | **7** | **0** | **18** |
+| **All** | **342** | **263** | **54** | **7** | **0** | **18** |
 
 ## P0 gaps (6)
 

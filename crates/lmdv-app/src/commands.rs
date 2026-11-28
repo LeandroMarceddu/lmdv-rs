@@ -7,7 +7,7 @@
 //! same table.
 
 use crate::window::{NoticeKind, WindowState};
-use rune::{FileDialogOptions, Key, KeyEvent, Tx};
+use rune::{FileDialogOptions, FileHandle, Key, KeyEvent, Tx};
 
 /// The menu/palette group a command belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,14 +77,25 @@ fn open_file(_: &mut WindowState, tx: &mut Tx) {
     let options =
         FileDialogOptions { title: lmdv_i18n::t!("dialog.openFile").to_owned(), ..FileDialogOptions::default() }
             .filter(lmdv_i18n::t!("filter.markdown"), &MARKDOWN_EXTENSIONS);
-    tx.open_file(options, |state: &mut WindowState, result, tx| match result {
-        Ok(Some(path)) => {
-            state.open_path(path);
-            state.apply_pending_scroll(tx);
-        }
+    tx.pick_files(options, |state: &mut WindowState, result, tx| match result {
+        Ok(Some(handles)) => open_selected_files(state, handles, tx),
         Ok(None) => {}
         Err(error) => state.notice_kind(lmdv_i18n::t!("msg.fileDialogFailed", "err" => error), NoticeKind::Error),
     });
+}
+
+/// Opens the files picked by `Ctrl-O` (T-32): the first in front, the rest in
+/// selection order behind it, each its own tab. A handle without a local path
+/// (a web or document provider) cannot back a file document and is skipped;
+/// native desktop hosts always deliver path-backed handles.
+fn open_selected_files(state: &mut WindowState, handles: Vec<FileHandle>, tx: &mut Tx) {
+    let mut paths = handles.into_iter().filter_map(|handle| handle.path().map(|path| path.to_path_buf()));
+    let Some(first) = paths.next() else { return };
+    state.open_path(first);
+    for path in paths {
+        state.open_path_background(path);
+    }
+    state.apply_pending_scroll(tx);
 }
 
 fn paste_document(state: &mut WindowState, tx: &mut Tx) {
@@ -2233,5 +2244,25 @@ mod tests {
         assert!(state.run_command("file.open", &mut tx));
         assert_eq!(state.tabs().len(), 1, "the dialog itself does not change tabs");
         assert_eq!(state.ui.last_command.as_deref(), Some("file.open"));
+        let requests = format!("{tx:?}");
+        assert_eq!(requests.matches("FileDialogCall").count(), 1, "one dialog was asked for: {requests}");
+        assert!(requests.contains("(Open, true,"), "Ctrl+O asks for a multi-select Open dialog: {requests}");
+    }
+
+    #[test]
+    fn three_picked_files_open_one_front_and_two_background_tabs_in_order() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let mut tx = Tx::default();
+        let paths: Vec<_> = ["first.md", "second.md", "third.md"].iter().map(|name| temp.path().join(name)).collect();
+        let handles = paths.iter().cloned().map(rune::FileHandle::from_path).collect();
+        open_selected_files(&mut state, handles, &mut tx);
+
+        assert_eq!(state.tabs().len(), paths.len(), "the front start page is replaced by the first file");
+        assert_eq!(state.active_index(), 0, "the first picked file stays in front");
+        for (tab, path) in state.tabs().iter().zip(&paths) {
+            let actual = tab.document().and_then(|doc| doc.key.borrow().path().map(|path| path.to_path_buf()));
+            assert_eq!(actual.as_deref(), Some(path.as_path()), "tabs follow selection order");
+        }
     }
 }

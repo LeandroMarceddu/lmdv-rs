@@ -41,7 +41,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 27 | 3 | 0 | 0 | 0 |
-| Tabs and windows | 35 | 25 | 8 | 2 | 0 | 0 |
+| Tabs and windows | 35 | 26 | 7 | 2 | 0 | 0 |
 | Editor | 40 | 36 | 2 | 1 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 18 | 0 | 0 | 0 | 0 |
@@ -57,7 +57,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Accessibility | 15 | 14 | 1 | 0 | 0 | 0 |
 | Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **262** | **55** | **7** | **0** | **18** |
+| **All** | **342** | **263** | **54** | **7** | **0** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -125,7 +125,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-29** Close-key precedence (P1 · F-PREVIEW) — done
 - [x] **T-30** Window close key (P0 · F-TABS) — done
 - [x] **T-31** New window (P1 · F-WINDOW) — done
-- [x] **T-32** Multi-select open (P1 · F-BASIC) — substitute
+- [x] **T-32** Multi-select open (P1 · F-BASIC) — done
 - [x] **T-33** Tabs across windows (P0 · F-WINDOW) — done
 - [x] **T-34** Tab overflow and narrow toolbar (P1 · F-NARROW) — done
 - [x] **T-35** Reading time/ad ratio in tab (P2 · F-TABS) — done

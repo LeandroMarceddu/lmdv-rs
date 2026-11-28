@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-25
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (262 done, 55 substitutes, 7 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 6 P0 partials (kit patches or small Rune patches), the OI-061/OI-102 shared-design residuals, reproducible builds/platform signatures and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (263 done, 54 substitutes, 7 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 6 P0 partials (kit patches or small Rune patches), the OI-061/OI-102 shared-design residuals, reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -527,7 +527,7 @@
 - Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
 - UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
-- Audit: **262 done, 55 substitute, 7 partial, 0 missing, 18 n/a; 6 P0 gaps**; 12 open OIs. v0.11.0.
+- Audit: **263 done, 54 substitute, 7 partial, 0 missing, 18 n/a; 6 P0 gaps**; 12 open OIs. v0.11.0.
 
 ## Rune f4ec14e — ported (v0.11.0)
 
@@ -584,6 +584,7 @@
   identical nested task keys carry source ranges; the block wire no longer
   clones drawn text per frame. OI-061 and OI-102 remain partial with exact
   shared-design reasons recorded in OPEN_ITEMS.
+- **Multi-open:** OI-002/T-32 closed with `Tx::pick_files` — first picked file in front, rest in background in selection order; headless proof with three files.
 - **Session:** OI-117/120/121/122/123/124/125 closed; OI-126 keeps its menu
   substitute. OI-125's torn window follows the pointer and adopts the tab on
   release (no mid-drag ghost).

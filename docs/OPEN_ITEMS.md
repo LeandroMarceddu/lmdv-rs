@@ -14,7 +14,7 @@ At a phase gate, no item scheduled for that phase may remain `open`. `accepted` 
 | ID | Source | Limitation / follow-up | Decision | Phase | Status |
 |---|---|---|---|---|---|
 | OI-001 | P1-02 app | Startup reads prefs/positions/recents on the UI thread before the first frame, not as a job | Move to a startup IO job once the parsing job exists; keep deterministic scenes | P2/P3 | open |
-| OI-002 | P1-02 app | Rune's native file dialog is single-select; the specified `Ctrl+O` multi-select is T-32 | Accepted gap until Rune exposes multi-select; document in parity | P6 | accepted-gap |
+| OI-002 | P1-02 app | Rune's native file dialog was single-select; the specified `Ctrl+O` multi-select is T-32 | Fixed with upstream `Tx::pick_files`: `Ctrl+O` opens the first picked file in front and the rest as background tabs in selection order. Headless proof with three files in `/tmp/opencode/multi-open/`. | P6 | fixed |
 | OI-003 | P1-02 app | Tab strip sits below the toolbar rather than inside it | Visual polish; not a behavior block | P6 | scheduled |
 | OI-004 | P1-02 app | Recents showed stale paths until opened | Fixed: `AppShared::prune_dead_recents` removes `NotFound` paths on a 2 s display-clock sweep while the start page is front; persisted through the store writer. | P2/P6 | fixed |
 | OI-005 | P1-02 app | Opening the same file through two symlink spellings can briefly create two docs | Load completion now checks the canonical path and `(dev, ino)` before registering: an already-ready document survives as the one document, a still-loading duplicate is absorbed, and every tab/window view is remapped with its strip place, anchor and history. The alias id leaves the registry; watches move to the canonical path once. Tests cover a load completing in the duplicate, a ready survivor and the window broadcast. | P6 | fixed |
@@ -274,7 +274,7 @@ Derived from the register rows above. Behavior-level status is in `docs/PARITY_A
 
 - **Open (12):** 001, 024, 044, 049, 051, 054, 055, 061, 102, 155, 176, 190
 - **Scheduled (4):** OI-003, 023, 027, 050
-- **Accepted (33):** OI-002, 022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 141, 150, 154, 157, 161, 163, 166, 174, 175, 177, 179, 200
+- **Accepted (32):** OI-022, 029, 038, 039, 040, 045, 046, 062, 063, 065, 066, 070, 072, 107, 108, 131, 133, 134, 136, 139, 141, 150, 154, 157, 161, 163, 166, 174, 175, 177, 179, 200
 - **Fixed (104):** kept for history.
 
 P3, P4 (with substitutes) and P5 are closed; P6 polish and P7 audit remain. Accepted gaps are re-checked at the next gate.
