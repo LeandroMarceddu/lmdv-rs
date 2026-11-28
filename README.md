@@ -109,6 +109,7 @@ plan.
 ## Development
 
 - Current state and known issues: [`docs/STATUS.md`](docs/STATUS.md)
+- Notable changes: [`CHANGELOG.md`](CHANGELOG.md)
 - Authoritative 342-row behavior spec: [`docs/BEHAVIOR_SPEC.md`](docs/BEHAVIOR_SPEC.md)
 - Design and ownership: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 - Fixtures, scenes and gates: [`docs/TESTING.md`](docs/TESTING.md)
