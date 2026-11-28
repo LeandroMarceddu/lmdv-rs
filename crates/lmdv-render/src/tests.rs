@@ -8,12 +8,11 @@ use std::rc::Rc;
 use lmdv_md::MdDoc;
 use rune::Cx;
 use rune::runtime::ElementInfo;
-use rune::text::InlineImage;
 use rune_kit::markdown::MarkdownStyle;
 
 use crate::{
-    AllClosed, DocLabels, DocTheme, Highlight, HighlightKind, LinkWire, MathResolver, NoImages, NoMath, RenderOptions,
-    render,
+    AllClosed, DocLabels, DocTheme, Highlight, HighlightKind, LinkWire, MathImage, MathResolver, NoImages, NoMath,
+    RenderOptions, render,
 };
 
 const FEATURES: &str = include_str!("../../../tests/fixtures/test-features.md");
@@ -36,19 +35,19 @@ struct Scene {
 struct SquareMath;
 
 impl MathResolver for SquareMath {
-    fn inline(&self, _tex: &str, _size_pt: f32) -> Option<InlineImage> {
+    fn inline(&self, _tex: &str, _size_pt: f32) -> Option<MathImage> {
         Some(square())
     }
 
-    fn display(&self, _tex: &str, _size_pt: f32) -> Option<InlineImage> {
+    fn display(&self, _tex: &str, _size_pt: f32) -> Option<MathImage> {
         Some(square())
     }
 }
 
-fn square() -> InlineImage {
+fn square() -> MathImage {
     let pixels = rune::Pixels::new();
     pixels.set(2, 2, vec![255; 16]);
-    InlineImage::new(pixels, 24.0, 12.0)
+    MathImage::new(pixels, 24.0, 12.0, 0.0)
 }
 
 static SQUARE: SquareMath = SquareMath;

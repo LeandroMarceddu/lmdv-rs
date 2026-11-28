@@ -509,8 +509,8 @@ impl<'a> Renderer<'a> {
         let max_width = (self.opts.width - 8.0).max(16.0);
         match self.opts.math.display(tex, self.theme.body.size) {
             Some(image) => {
-                let image = crate::math::fit(image, max_width, max_width.max(48.0));
-                let (width, height) = (image.width, image.height);
+                let image = image.fit(max_width, max_width.max(48.0));
+                let (width, height) = (image.width, image.ascent + image.descent);
                 let drawn = el().size(width, height).pixels(&image.pixels).a11y_hidden();
                 col().key("math").role("math").label(label).w_full().child(
                     col()

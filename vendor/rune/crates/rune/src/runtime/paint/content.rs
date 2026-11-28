@@ -740,7 +740,6 @@ impl RuntimeCore {
             let mut pill_icons = Vec::new();
             let mut pill_images = Vec::new();
             let mut bare_all = Vec::new();
-            let mut span_images = Vec::new();
             let pill_bg = spec.cold.pill_colors.map_or(spec.rich_style().link.alpha(0.2), |(bg, _)| bg);
             for piece in flow.pieces_in(rows.start, rows.end) {
                 let layout = piece.layout;
@@ -791,16 +790,6 @@ impl RuntimeCore {
                     let mut bare = Vec::new();
                     crate::text::bare_icons(layout, &pills, s, d_origin, &mut bare);
                     bare_all.extend(bare.into_iter().map(|(k, at, px)| (pills[k].clone(), at, px)));
-                }
-                // An inline image draws at the box the text reserved for it, at its own size and
-                // on its baseline; its placeholder shapes as nothing behind it.
-                if spans.iter().any(|sp| sp.image.is_some()) {
-                    let mut found = Vec::new();
-                    crate::text::inline_images(layout, spans, s, d_origin, &mut found);
-                    span_images.extend(found.into_iter().filter_map(|(k, at, size)| {
-                        let image = spans.get(k).and_then(|sp| sp.image.as_deref())?;
-                        Some((image.pixels.clone(), at, size))
-                    }));
                 }
             }
             if !spec.cold.highlights.is_empty() {
@@ -954,38 +943,6 @@ impl RuntimeCore {
                 let (w, h) = (w as f32, h as f32);
                 let k = (drawn / w).min(drawn / h);
                 let rect = [at[0] + (drawn - w * k) * 0.5, at[1] + (drawn - h * k) * 0.5, w * k, h * k];
-                let visible = shown_x[1] > shown_x[0]
-                    && shown[1] > shown[0]
-                    && rect[2] > 0.0
-                    && rect[3] > 0.0
-                    && rect[0] + rect[2] > shown_x[0]
-                    && rect[0] < shown_x[1]
-                    && rect[1] + rect[3] > shown[0]
-                    && rect[1] < shown[1];
-                if visible && let Some((image, next)) = self.images.place_at(&pixels, [rect[2], rect[3]], Some(now)) {
-                    if let Some(at) = next {
-                        inline_image_wake = Some(inline_image_wake.map_or(at, |prev| prev.min(at)));
-                    }
-                    self.instances.push(Instance {
-                        rect,
-                        radii: [0.0; 4],
-                        fill: [0.0, 0.0, 0.0, o],
-                        border: [0.0; 4],
-                        params: [image.page as f32, KIND_IMAGE, image.premultiplied as u8 as f32, 1.0],
-                        uv: image.rect.map(|v| v as f32),
-                        clip,
-                        fade: crate::render::pack_fade(fade, clip, clip),
-                    });
-                }
-            }
-            // Each inline image draws at the box the text reserved for it, at its own size and on
-            // its baseline; the placeholder behind it shapes as nothing.
-            for (pixels, at, (w, h)) in span_images {
-                let at = [
-                    base_rest[0] + (at[0] - base_d_origin[0]) * tk + glide[0],
-                    base_rest[1] + (at[1] - base_d_origin[1]) * tk + glide[1],
-                ];
-                let rect = [at[0], at[1], w * tk, h * tk];
                 let visible = shown_x[1] > shown_x[0]
                     && shown[1] > shown[0]
                     && rect[2] > 0.0

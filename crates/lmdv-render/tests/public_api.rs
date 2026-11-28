@@ -3,10 +3,9 @@
 
 use lmdv_md::MdDoc;
 use lmdv_render::{
-    AllClosed, DocTheme, FOOTNOTES_KEY, Highlight, HighlightKind, ImageResolver, MathResolver, NoMath, RenderOptions,
-    footnote_key, footnote_link, heading_key, highlight_key, render,
+    AllClosed, DocTheme, FOOTNOTES_KEY, Highlight, HighlightKind, ImageResolver, MathImage, MathResolver, NoMath,
+    RenderOptions, footnote_key, footnote_link, heading_key, highlight_key, render,
 };
-use rune::text::InlineImage;
 use rune_kit::Kit;
 use rune_kit::markdown::MarkdownStyle;
 
@@ -21,15 +20,15 @@ impl ImageResolver for Images {
 struct Formulas;
 
 impl MathResolver for Formulas {
-    fn inline(&self, tex: &str, _size_pt: f32) -> Option<InlineImage> {
+    fn inline(&self, tex: &str, _size_pt: f32) -> Option<MathImage> {
         (tex == "x").then(|| {
             let pixels = rune::Pixels::new();
             pixels.set(1, 1, vec![0, 0, 0, 255]);
-            InlineImage::new(pixels, 8.0, 8.0)
+            MathImage::new(pixels, 8.0, 8.0, 0.0)
         })
     }
 
-    fn display(&self, _tex: &str, _size_pt: f32) -> Option<InlineImage> {
+    fn display(&self, _tex: &str, _size_pt: f32) -> Option<MathImage> {
         None
     }
 }

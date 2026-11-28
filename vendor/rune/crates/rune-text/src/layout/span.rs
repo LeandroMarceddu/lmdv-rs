@@ -22,10 +22,6 @@ pub struct Span {
     pub underline: Option<Color>,
     /// The family's italic face, or a synthetic oblique when it has none.
     pub italic: bool,
-    /// An image drawn in place of this span (see [`Span::image`]).
-    pub image: Option<Box<InlineImage>>,
-    /// Baseline shift in points; 0 sits on the baseline (see [`Span::rise`]).
-    pub rise: f32,
 }
 
 impl Span {
@@ -73,8 +69,6 @@ impl Span {
             || self.italic
             || self.bg.is_some()
             || self.underline.is_some()
-            || self.image.is_some()
-            || self.rise != 0.0
     }
 
     /// What [`Self::affects_layout`] depends on, hashed into a layout's key.
@@ -84,17 +78,7 @@ impl Span {
     }
 
     /// Non-range fields that affect shaping, line metrics, or decorations.
-    ///
-    /// Paragraph-key reuse compares this directly (`paragraphs/keying.rs`), so the image's
-    /// pixels and geometry and the rise's bits are part of it: a changed formula must never
-    /// reuse a layout shaped for another picture or baseline.
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn layout_attr_key(
-        &self,
-    ) -> (bool, Option<u32>, Option<u32>, bool, bool, Option<u32>, bool, u32, Option<((u64, u64), [u32; 4])>) {
-        let image = self.image.as_deref().map(|i| {
-            (i.pixels.signature(), [i.width.to_bits(), i.height.to_bits(), i.ascent.to_bits(), i.descent.to_bits()])
-        });
+    pub(crate) fn layout_attr_key(&self) -> (bool, Option<u32>, Option<u32>, bool, bool, Option<u32>, bool) {
         (
             self.mono,
             self.weight.map(f32::to_bits),
@@ -103,8 +87,6 @@ impl Span {
             self.bg.is_some(),
             self.bg.map(|_| self.bg_pad.to_bits()),
             self.underline.is_some(),
-            self.rise.to_bits(),
-            image,
         )
     }
 
@@ -119,108 +101,6 @@ impl Span {
         self.underline = Some(color);
         self
     }
-
-    /// Draws `image` where this span's first [`U+FFFC`](OBJECT_REPLACEMENT) placeholder is, in
-    /// room of its own: the placeholders shape as zero-width spaces, so the image takes their
-    /// place and the text around it moves aside. The span must hold a placeholder; without one
-    /// it draws nothing, and its bytes stay ordinary text. The image never splits across lines;
-    /// a line break falls before or after it, as one around an atomic inline box does.
-    ///
-    /// Selection and copy still see the span's placeholder bytes: mark the same range
-    /// `El::uncopied` to copy around the image, or leave it to copy the `U+FFFC` object marker.
-    ///
-    /// ```ignore
-    /// rich("the area is A = πr² in all cases", vec![Span::new(a, a + 3).image(InlineImage::new(pixels, 22.0, 12.0))])
-    /// ```
-    pub fn image(mut self, image: InlineImage) -> Span {
-        self.image = Some(Box::new(image));
-        self
-    }
-
-    /// Raises this span `points` above the baseline, negative lowers it, as CSS's
-    /// `vertical-align: <length>` does; an image in the span rises with it. The line still
-    /// makes room for where the span is drawn.
-    pub fn rise(mut self, points: f32) -> Span {
-        self.rise = if points.is_finite() { points } else { 0.0 };
-        self
-    }
-}
-
-/// The character a text puts where an inline image goes. Inside a [`Span::image`] it draws
-/// nothing and takes no width; outside one it is an ordinary character.
-pub const OBJECT_REPLACEMENT: char = '\u{fffc}';
-
-/// A bitmap drawn inline with text at its own size, such as a formula: a picture in place of
-/// text, not a glyph.
-///
-/// `width` and `height` are what it draws, in points. `ascent` and `descent` are the room it
-/// reserves above and below the baseline, so a formula's depth dips below the line as its
-/// descenders do; its top sits `ascent` points above the baseline. [`new`](Self::new) puts the
-/// whole height above the baseline, as an inline image at the baseline does.
-#[derive(Clone, Debug)]
-pub struct InlineImage {
-    /// The pixels drawn, as `El::pixels` draws them.
-    pub pixels: rune_image::pixels::Pixels,
-    /// The drawn width in points.
-    pub width: f32,
-    /// The drawn height in points.
-    pub height: f32,
-    /// The room above the baseline in points.
-    pub ascent: f32,
-    /// The room below the baseline in points.
-    pub descent: f32,
-    /// What a screen reader says where the image draws (see [`Self::label`]): a formula's TeX,
-    /// a picture's alt text. `None` leaves it out of the accessibility text.
-    pub label: Option<Box<str>>,
-}
-
-impl InlineImage {
-    /// `pixels` drawn `width` by `height` points, sitting on the baseline: all of its height is
-    /// above the baseline.
-    pub fn new(pixels: rune_image::pixels::Pixels, width: f32, height: f32) -> InlineImage {
-        let (width, height) = (length(width), length(height));
-        InlineImage { pixels, width, height, ascent: height, descent: 0.0, label: None }
-    }
-
-    /// The words a screen reader says where the image draws: a formula's TeX, a picture's alt
-    /// text, in place of the [`U+FFFC`](OBJECT_REPLACEMENT) marker the drawn text holds. Empty
-    /// text sets none, and the accessibility text leaves the marker out. The image draws the
-    /// same either way.
-    pub fn label(mut self, text: impl Into<String>) -> InlineImage {
-        let text = text.into();
-        self.label = (!text.trim().is_empty()).then(|| text.into_boxed_str());
-        self
-    }
-
-    /// The room it reserves above the baseline in points, where its top sits.
-    pub fn ascent(mut self, points: f32) -> InlineImage {
-        self.ascent = length(points);
-        self
-    }
-
-    /// The room it reserves below the baseline in points.
-    pub fn descent(mut self, points: f32) -> InlineImage {
-        self.descent = length(points);
-        self
-    }
-}
-
-impl PartialEq for InlineImage {
-    /// The same pixels ([`Pixels::set`] starts a new image) at the same size and baseline.
-    ///
-    /// [`Pixels::set`]: rune_image::pixels::Pixels::set
-    fn eq(&self, other: &InlineImage) -> bool {
-        self.pixels.signature() == other.pixels.signature()
-            && self.width == other.width
-            && self.height == other.height
-            && self.ascent == other.ascent
-            && self.descent == other.descent
-    }
-}
-
-/// `points` clamped to a finite, non-negative length.
-fn length(points: f32) -> f32 {
-    if points.is_finite() { points.max(0.0) } else { 0.0 }
 }
 
 /// Non-empty spans in `spans` that change shaping, line metrics or painted decorations.
@@ -279,15 +159,17 @@ pub struct BareIcon {
 }
 
 /// An image set on the baseline in place of a pill's label (see `InlineImage`): `width`
-/// points wide, `ascent` points above the baseline and `descent` below it. The label still
-/// holds its bytes, for selection and copy, but takes no room and draws nothing. The image
-/// draws `bleed` points past each edge of that box.
+/// points wide, `ascent` points above the baseline and `descent` below it, optionally shifted
+/// vertically by `rise` points (positive raises above the baseline). The label still holds its
+/// bytes, for selection and copy, but takes no room and draws nothing. The image draws `bleed`
+/// points past each edge of that box.
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Replace {
     pub width: f32,
     pub ascent: f32,
     pub descent: f32,
+    pub rise: f32,
     pub bleed: f32,
 }
 
@@ -295,7 +177,8 @@ pub struct Replace {
 pub(crate) const HIDDEN_SIZE: f32 = 1e-3;
 
 /// Whether a glyph run shaped at `font_size` device px is a replaced label, which draws nothing.
-pub(crate) fn is_hidden_size(font_size: f32) -> bool {
+#[doc(hidden)]
+pub fn is_hidden_size(font_size: f32) -> bool {
     font_size <= HIDDEN_SIZE * 2.0
 }
 
@@ -352,15 +235,15 @@ pub(crate) const fn pill_index(id: u64) -> usize {
     ((id & !(PILL_BOX | PILL_BARE)) >> 1) as usize
 }
 
+/// Pill slice index of a leading pill inline box (`side == 0`, not a bare inline icon).
+#[doc(hidden)]
+pub const fn replaced_pill_index(id: u64) -> Option<usize> {
+    if id & PILL_BOX != 0 && id & PILL_BARE == 0 && id & 1 == 0 { Some(pill_index(id)) } else { None }
+}
+
 /// Tags the inline boxes around padded [`SpanBox`] ranges: the rest of the id is the box's index
 /// shifted left once, with the low bit set on the trailing spacer.
 pub(crate) const SPAN_BOX: u64 = 1 << 61;
-
-/// Tags an inline image's box: the rest of the id is the image span's index in the layout's
-/// spans (see [`Span::image`]). Its own bit: `PILL_BOX`, `PILL_BARE`, `SPAN_BOX` and
-/// `INLINE_BOX` already sit at `1 << 62`, `1 << 59`, `1 << 61` and `1 << 60`, and
-/// `cursor.rs`, `line_break.rs` and `pill_chips.rs` read those. `1 << 58` is free.
-pub(crate) const IMAGE_BOX: u64 = 1 << 58;
 
 /// Tags in-flow element [`InlineBox`] slots: the lower bits carry the index into the slice of
 /// [`InlineBoxRun`]s passed to shaping.
@@ -672,14 +555,6 @@ pub fn flatten_spans(spans: &[Span]) -> Vec<Span> {
                 m.underline = s.underline;
             }
             m.italic |= s.italic;
-            // An image draws at its span's first byte: the interval starting there keeps it,
-            // and the rest of a split span keeps its look but no second copy of the image.
-            if s.image.is_some() && a == s.start {
-                m.image = s.image.clone();
-            }
-            if s.rise != 0.0 {
-                m.rise = s.rise;
-            }
         }
         if let Some(m) = merged {
             if let Some(last) = out.last_mut()
@@ -692,8 +567,6 @@ pub fn flatten_spans(spans: &[Span]) -> Vec<Span> {
                 && last.bg_pad == m.bg_pad
                 && last.underline == m.underline
                 && last.italic == m.italic
-                && last.image == m.image
-                && last.rise == m.rise
             {
                 last.end = m.end;
             } else {

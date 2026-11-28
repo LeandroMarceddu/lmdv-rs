@@ -2,10 +2,10 @@
 //!
 //! `lmdv-math` parses, lays out and rasterizes a formula; this module owns the
 //! per-window pieces the renderer must not: the `MathRenderer`, the
-//! `rune::InlineImage` cache and the error cache (OI-020, OI-021).
+//! [`MathImage`] cache and the error cache (OI-020, OI-021).
 //!
 //! A frame asks for the same formulas it asked for last frame, so a hit must
-//! neither re-render nor rebuild an RGBA buffer: the cached `InlineImage` is
+//! neither re-render nor rebuild an RGBA buffer: the cached `MathImage` is
 //! cloned, which only clones the shared [`rune::Pixels`] handle. A formula that
 //! failed last time is answered from the error cache immediately and the
 //! renderer draws its TeX in a code chip (M-34).
@@ -14,13 +14,12 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use lmdv_math::{MathError, MathRenderer, MathRequest};
-use lmdv_render::MathResolver;
+use lmdv_render::{MathImage, MathResolver};
 use rune::Color;
 use rune::Pixels;
-use rune::text::InlineImage;
 
 /// The most formula images one window keeps. The renderer's own cache is
-/// bounded by bytes; this bound keeps the `InlineImage` handles finite too.
+/// bounded by bytes; this bound keeps the `MathImage` handles finite too.
 pub const MATH_IMAGE_CACHE: usize = 256;
 /// The most failed formulas one window remembers.
 pub const MATH_ERROR_CACHE: usize = 256;
@@ -47,7 +46,7 @@ impl MathKey {
 pub struct MathCache {
     renderer: RefCell<MathRenderer>,
     /// `Some(image)` for a rendered formula, `None` for one that failed.
-    images: RefCell<HashMap<MathKey, Option<InlineImage>>>,
+    images: RefCell<HashMap<MathKey, Option<MathImage>>>,
     errors: RefCell<HashMap<MathKey, String>>,
     renders: Cell<usize>,
 }
@@ -71,10 +70,10 @@ impl MathCache {
 
     /// The picture for one formula, or `None` when it cannot be rendered.
     ///
-    /// Cached in both directions: a hit returns the same [`InlineImage`] handle
+    /// Cached in both directions: a hit returns the same [`MathImage`] handle
     /// and never clones the RGBA buffer, and a failure returns immediately so
     /// the frame does not re-parse bad TeX.
-    pub fn resolve(&self, tex: &str, size_pt: f32, color: [u8; 4], display: bool, scale: f32) -> Option<InlineImage> {
+    pub fn resolve(&self, tex: &str, size_pt: f32, color: [u8; 4], display: bool, scale: f32) -> Option<MathImage> {
         let scale = if scale.is_finite() { scale.clamp(0.01, 16.0) } else { 1.0 };
         let key = MathKey::new(tex, size_pt, color, display, scale);
         if let Some(cached) = self.images.borrow().get(&key) {
@@ -101,7 +100,7 @@ impl MathCache {
         }
     }
 
-    fn insert_image(&self, key: MathKey, image: Option<InlineImage>) {
+    fn insert_image(&self, key: MathKey, image: Option<MathImage>) {
         let mut images = self.images.borrow_mut();
         if images.len() >= MATH_IMAGE_CACHE {
             images.clear();
@@ -147,18 +146,17 @@ impl MathCache {
 
 /// Turns `lmdv-math`'s raster into the inline object Rune lays out.
 ///
-/// `width` and `height` are device pixels, so the drawn size divides by the
-/// device scale; the ascent and descent are already points at the requested
-/// size (patch 0001 places them independently of the image box).
-fn inline_image(math: &lmdv_math::RenderedMath, scale: f32) -> InlineImage {
+/// `width` is device pixels, so the drawn width divides by the device scale;
+/// the ascent and descent are already points at the requested size and Rune
+/// takes them directly, keeping them independent of the pixel box.
+fn inline_image(math: &lmdv_math::RenderedMath, scale: f32) -> MathImage {
     let pixels = Pixels::new();
     let expected = (math.width as usize).saturating_mul(math.height as usize).saturating_mul(4);
     if math.width > 0 && math.height > 0 && math.rgba.len() >= expected {
         pixels.set(math.width, math.height, math.rgba.clone());
     }
     let width = math.width as f32 / scale;
-    let height = math.height as f32 / scale;
-    InlineImage::new(pixels, width, height).ascent(math.ascent_pt).descent(math.descent_pt)
+    MathImage::new(pixels, width, math.ascent_pt, math.descent_pt)
 }
 
 /// The straight sRGB bytes of a theme colour, as `lmdv-math` expects them.
@@ -184,11 +182,11 @@ impl<'a> WindowMath<'a> {
 }
 
 impl MathResolver for WindowMath<'_> {
-    fn inline(&self, tex: &str, size_pt: f32) -> Option<InlineImage> {
+    fn inline(&self, tex: &str, size_pt: f32) -> Option<MathImage> {
         self.cache.resolve(tex, size_pt, self.color, false, self.scale)
     }
 
-    fn display(&self, tex: &str, size_pt: f32) -> Option<InlineImage> {
+    fn display(&self, tex: &str, size_pt: f32) -> Option<MathImage> {
         self.cache.resolve(tex, size_pt, self.color, true, self.scale)
     }
 }
@@ -241,7 +239,7 @@ mod tests {
     fn the_image_keeps_its_baseline_metrics_in_points() {
         let cache = MathCache::new();
         let image = cache.resolve(r"\frac{1}{2}", 20.0, [0, 0, 0, 255], true, 2.0).expect("renders");
-        assert!(image.width > 0.0 && image.height > 0.0);
+        assert!(image.width > 0.0 && image.ascent + image.descent > 0.0);
         assert!(image.ascent > 0.0, "the numerator is above the baseline");
         assert!(image.descent > 0.0, "the denominator dips below it");
     }

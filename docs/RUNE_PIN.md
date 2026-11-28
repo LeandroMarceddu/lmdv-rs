@@ -1,12 +1,13 @@
 # Rune pin
 
 - Repository: https://github.com/anomalyco/rune
-- Snapshot commit: `af6b1fdd9537a3f278f9c85e0f0893f1e773302a`
+- Snapshot commit: `07bf8c5d3b04d2291f5493392aee8e0694096ce5`
 - Branch: `dev`
 - Snapshot date: 2026-11-28
-- Upstream head checked 2026-11-28: `af6b1fdd9537a3f278f9c85e0f0893f1e773302a`
+- Upstream head checked 2026-11-28: `07bf8c5d3b04d2291f5493392aee8e0694096ce5`
   (same as the pin; `dev` is the default branch and there is no `main`;
-  this rev includes the OI-199 rest and heap-trim fixes)
+  this rev includes the rest/heap-trim fixes and the inline-image/a11y/
+  highlight/Mermaid-SVG features that retired all four local patches)
 - License: MIT
 - Toolchain pinned by upstream: Rust `1.99.1` (`rust-toolchain.toml`)
 

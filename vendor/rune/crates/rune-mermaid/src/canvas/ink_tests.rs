@@ -52,7 +52,7 @@ const FLOW: &str = "flowchart LR\n  R1[Retry at once] -->|fails| R2[Back off 1 s
 #[test]
 fn a_line_is_no_brighter_at_its_joints_under_its_head_or_round_a_corner() {
     let paint = DiagramStyle::neutral(true);
-    let ops = scene(FLOW, &paint, None).expect("draws").svg_ops;
+    let ops = scene(FLOW, &paint, None).expect("draws").ops;
     let at = |p| painted(&ops, paint.surface, p);
     let mut checked = 0;
     for op in &ops {
@@ -87,7 +87,7 @@ fn every_diagram_draws_its_ink_opaque_over_an_opaque_surface() {
         let paint = DiagramStyle::neutral(dark);
         assert_eq!(paint.surface.a, 1.0);
         for src in sources {
-            let ops = scene(src, &paint, None).unwrap_or_else(|| panic!("draws {src:?}")).svg_ops;
+            let ops = scene(src, &paint, None).unwrap_or_else(|| panic!("draws {src:?}")).ops;
             for op in &ops {
                 match op {
                     Op::Stroke { color, .. } => assert_eq!(color.a, 1.0, "a translucent stroke in {src:?}"),

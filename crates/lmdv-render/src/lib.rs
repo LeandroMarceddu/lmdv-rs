@@ -87,8 +87,8 @@ use lmdv_md::MdDoc;
 use rune::El;
 use rune_kit::markdown::MarkdownStyle;
 
-pub use math::{MathResolver, NoMath};
-pub use rune::text::InlineImage;
+pub use math::{MathImage, MathResolver, NoMath};
+pub use rune::InlineImage;
 pub use table::table_refs;
 pub use theme::{CalloutPaint, DocLabels, DocTheme};
 

@@ -884,28 +884,3 @@ fn windows_system_font_weight_matches_for_ascii_and_unicode() {
     assert_eq!(inter_ascii, first_face(&mut ts, "Sample…", &[], inter, 0));
     assert_eq!(inter_ascii.2, 500);
 }
-
-/// A range over an inline image's placeholder paints the picture's drawn box: the placeholder
-/// itself shapes as zero width and the picture draws at the room its inline box reserved.
-#[test]
-fn a_range_over_an_inline_image_keeps_the_picture_box() {
-    let mut ts = TextSystem::default();
-    let content = format!("before {OBJECT_REPLACEMENT} after");
-    let at = content.find(OBJECT_REPLACEMENT).unwrap();
-    let pixels = rune_image::pixels::Pixels::new();
-    pixels.set(4, 2, vec![255; 32]);
-    let image = InlineImage::new(pixels, 40.0, 12.0).ascent(10.0).descent(2.0);
-    let span = Span::new(at, at + OBJECT_REPLACEMENT.len_utf8()).image(image);
-    let layout = ts.layout_rich(&content, &[span], TextStyle::new(16.0, 400.0).lh(22.0), 1.0, None);
-
-    let boxes = range_boxes(&layout, at, at + OBJECT_REPLACEMENT.len_utf8(), false);
-    assert_eq!(boxes.len(), 1, "the picture is one box: {boxes:?}");
-    let (bb, _) = boxes[0];
-    assert!((bb.x1 - bb.x0 - 40.0).abs() < 0.5, "as wide as the picture: {bb:?}");
-    assert!((bb.y1 - bb.y0 - 12.0).abs() < 0.5, "as tall as the picture: {bb:?}");
-
-    // The prose before it keeps the line's own box, and no image box bleeds into it.
-    let prose = range_boxes(&layout, 0, 6, false);
-    assert_eq!(prose.len(), 1, "one line box for the prose: {prose:?}");
-    assert!(prose[0].0.x1 <= bb.x0 + 0.5, "the prose stops before the picture: {prose:?} {bb:?}");
-}

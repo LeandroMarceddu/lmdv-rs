@@ -24,15 +24,9 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 
 **Context:** Rune is pre-release, `dev` moves, upstream does not accept pull requests, and the app needs five things at the text/window layer. Rune's crates depend on siblings by path; patching the text system means owning the tree. A dependency's `[patch]` does not apply to the dependent workspace.
 
-**Decision:** Vendor the full pinned Rune workspace under `vendor/rune/`, depend on it by path, repeat Rune's eight `[patch.crates-io]` entries in our root, and keep numbered patches in `vendor/rune/patches/`:
+**Decision:** Vendor the full pinned Rune workspace under `vendor/rune/`, depend on it by path, and repeat Rune's eight `[patch.crates-io]` entries in our root. Numbered local patches are retired: `0002` was superseded by upstream `CloseResponse`, and `0001`/`0003`/`0004`/`0005` by Rune `07bf8c5d3` (#2743). `vendor/rune/patches/` is intentionally empty.
 
-- `0001-text-inline-object` — `Span::image` + `Span::rise`, inline-box geometry (math).
-- `0002-close-request-veto` — superseded: upstream `App::on_close_request -> CloseResponse` (Rune `f4ec14e`) keeps the unsaved-close guard without a local patch.
-- `0003-text-hit` (only if needed) — rendered byte under the pointer.
-- `0004-window-theme` (optional) — native frame theme.
-- `0005-linux-frame` (deferred) — interactive resize/CSD.
-
-**Consequences:** Reproducible offline builds, exact control over text/window behavior. Rev bumps require re-applying patches and rerunning goldens; record checksums and a bump runbook.
+**Consequences:** Reproducible offline builds with no local framework divergence. Rev bumps are plain upstream copies plus goldens; record checksums and a bump runbook.
 
 **Update 2026-11-17:** the vendor pin moved from `d6d04d3` to `cca5df6`; Rune now patches five crates (`accesskit_macos` added) and `tiny-skia-path` is a path dependency of `crates/rune`. Patches 0001/0002 were rebased and the full gate is green. See `docs/STATUS.md` P7-RUNE and OI-164 for the visual/manual re-baseline still due.
 

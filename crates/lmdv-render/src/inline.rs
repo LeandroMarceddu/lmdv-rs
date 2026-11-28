@@ -4,8 +4,8 @@
 //! The parser guarantees that [`lmdv_md::Inline::text`] is what is drawn:
 //! soft breaks are spaces, hard breaks are `\n`, and every formula, inline
 //! image and task checkbox is one U+FFFC (three bytes) with a side-table entry.
-//! Drawing therefore has two jobs: give each placeholder something to draw (a
-//! [`rune::Span::image`], a chip, or the escaped source) and keep every range in
+//! Drawing therefore has two jobs: give each placeholder something to draw (an
+//! [`rune::El::inline_image`], a chip, or the escaped source) and keep every range in
 //! the side tables aligned with the string that is finally laid out.
 //!
 //! Replacement text (a failed formula's TeX, an image's alt) shifts byte
@@ -15,11 +15,10 @@
 use std::ops::Range;
 
 use lmdv_md::{HtmlNode, HtmlTag, Inline, InlineObjectKind, InlineStyle};
-use rune::text::InlineImage;
+use rune::InlineImage;
 use rune::{Color, El, InlineAlign, InlineBox, Link, Span, TextHighlight, TextStyle, col, rich};
 
 use crate::block::Renderer;
-use crate::math::fit;
 use crate::{HighlightKind, highlight_key};
 
 /// A hard line break as the parser writes it.
@@ -71,7 +70,10 @@ struct Rep {
     text: String,
     /// Where the U+FFFC sits inside `text`, for an inline image.
     placeholder: Option<usize>,
+    /// The image drawn over the placeholder, with its accessible label set.
     image: Option<InlineImage>,
+    /// The same label, for a picture's preview link (Rune keeps labels private).
+    label: Option<String>,
     /// The source the replacement came from, delimiters and Markdown syntax
     /// included, so a highlight over any of it paints what is drawn (OI-127).
     source: Option<Range<usize>>,
@@ -102,6 +104,8 @@ struct Built {
     picture_links: Vec<(Range<usize>, String, String)>,
     /// In-flow SVG shape boxes: the drawn byte, its slot and its element.
     inline_boxes: Vec<(usize, InlineBox, El)>,
+    /// Inline images: the replaced U+FFFC bytes and the Rune image drawn there.
+    images: Vec<(Range<usize>, InlineImage)>,
     uncopied: Vec<Range<usize>>,
     /// Paint-only highlights in drawn bytes: the range, its kind and the index
     /// of the caller's [`crate::Highlight`] it came from.
@@ -116,6 +120,11 @@ impl<'a> Renderer<'a> {
         let mut e = rich(built.text, built.spans).font(opts.style).color(opts.color).exact_lines().w_full();
         for (at, slot, child) in built.inline_boxes {
             e = e.inline(at, slot, child);
+        }
+        // The bytes stay in the text for selection, copy and find; Rune draws
+        // the image over them and substitutes its label in the a11y tree.
+        for (range, image) in built.images {
+            e = e.inline_image(range, image);
         }
         for range in built.strikes {
             e = e.strike(range.start, range.end, None);
@@ -171,14 +180,16 @@ impl<'a> Renderer<'a> {
             } else {
                 self.opts.math.inline(&math.tex, self.theme.body.size)
             };
+            // OI-037: a reader hears the TeX, never the object marker. Rune
+            // substitutes this label into the text's accessible value.
+            let label = lmdv_i18n::render(&self.theme.labels.math, &[("tex", &math.tex)]);
             let image = image.map(|image| {
                 let drawn = if math.display {
-                    fit(image, max_width, max_width.max(48.0))
+                    image.fit(max_width, max_width.max(48.0))
                 } else {
-                    fit(image, max_width, self.theme.inline_image_max_height)
+                    image.fit(max_width, self.theme.inline_image_max_height)
                 };
-                // OI-037: a reader hears the TeX, never the object marker (patch 0003).
-                drawn.label(lmdv_i18n::render(&self.theme.labels.math, &[("tex", &math.tex)]))
+                drawn.into_image(label.clone())
             });
             let mut rep = Rep {
                 start: math.range.start,
@@ -186,6 +197,7 @@ impl<'a> Renderer<'a> {
                 text: String::new(),
                 placeholder: None,
                 image,
+                label: Some(label),
                 source: self.formula_source(inline, math.range.start, math.range.end, &math.tex),
                 chip: false,
                 muted: false,
@@ -238,6 +250,7 @@ impl<'a> Renderer<'a> {
                 text: String::new(),
                 placeholder: None,
                 image: None,
+                label: None,
                 source: self.object_source(inline, object),
                 chip: false,
                 muted: false,
@@ -273,7 +286,8 @@ impl<'a> Renderer<'a> {
                         }
                         rep.text.push(lmdv_md::OBJECT_CHAR);
                         rep.placeholder = Some(0);
-                        rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h).label(alt));
+                        rep.label = Some(alt.to_owned());
+                        rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h, 0.0).label(alt));
                         rep.uncopied.push(0..3);
                     } else {
                         // M-25: with no alt text the placeholder shows the
@@ -297,7 +311,8 @@ impl<'a> Renderer<'a> {
                             let draw_w = (draw_h * ratio).min((self.opts.width - 8.0).max(16.0));
                             rep.text.push(lmdv_md::OBJECT_CHAR);
                             rep.placeholder = Some(0);
-                            rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h).label(alt));
+                            rep.label = Some(alt.to_owned());
+                            rep.image = Some(InlineImage::new(image.pixels().clone(), draw_w, draw_h, 0.0).label(alt));
                             rep.uncopied.push(0..3);
                         } else {
                             // M-25: no alt falls back to the chosen source.
@@ -383,10 +398,10 @@ impl<'a> Renderer<'a> {
                 InlineStyle::Code => spans
                     .push(Span::new(start, end).mono().size(self.theme.body.size * 0.9).bg(self.theme.code_bg, 2.0)),
                 InlineStyle::Mark => spans.push(Span::new(start, end).bg(self.theme.mark, 2.0)),
-                InlineStyle::Sub => spans
-                    .push(Span::new(start, end).size(self.theme.body.size * 0.72).rise(-self.theme.body.size * 0.18)),
-                InlineStyle::Sup => spans
-                    .push(Span::new(start, end).size(self.theme.body.size * 0.72).rise(self.theme.body.size * 0.35)),
+                // Upstream no longer carries patch 0001's `Span::rise`: keep
+                // the smaller glyphs; Rune has no text-run baseline shift.
+                InlineStyle::Sub => spans.push(Span::new(start, end).size(self.theme.body.size * 0.72)),
+                InlineStyle::Sup => spans.push(Span::new(start, end).size(self.theme.body.size * 0.72)),
                 InlineStyle::Kbd => spans
                     .push(Span::new(start, end).mono().size(self.theme.body.size * 0.85).bg(self.theme.code_bg, 1.5)),
                 InlineStyle::Underline => spans.push(Span::new(start, end).underline(self.theme.text)),
@@ -417,6 +432,7 @@ impl<'a> Renderer<'a> {
         let mut uncopied = Vec::new();
         let mut picture_links: Vec<(Range<usize>, String, String)> = Vec::new();
         let mut inline_boxes: Vec<(usize, InlineBox, El)> = Vec::new();
+        let mut images: Vec<(Range<usize>, InlineImage)> = Vec::new();
         let pictures_pressable = self.opts.wires.link.is_some();
         let block_index = self.nested_block();
         let block_key = self.doc.block_key(block_index).map(str::to_owned).unwrap_or_else(|| format!("b{block_index}"));
@@ -426,15 +442,15 @@ impl<'a> Renderer<'a> {
             }
             if let Some(offset) = rep.placeholder {
                 let start = rep.new_start + offset;
-                if let Some(image) = &rep.image {
-                    spans.push(Span::new(start, start + 3).image(image.clone()));
+                if let Some(image) = rep.image.take() {
                     if pictures_pressable && let Some(object) = rep.picture {
                         picture_links.push((
                             start..start + 3,
                             format!("image:{block_key}:{object}"),
-                            image.label.as_deref().unwrap_or_default().to_owned(),
+                            rep.label.clone().unwrap_or_default(),
                         ));
                     }
+                    images.push((start..start + 3, image));
                 } else {
                     uncopied.push(start..start + 3);
                 }
@@ -469,7 +485,7 @@ impl<'a> Renderer<'a> {
         // Highlight work is skipped entirely unless the app asked for it.
         let highlights =
             if self.opts.highlights.is_empty() { Vec::new() } else { self.inline_highlights(inline, &reps, &text) };
-        Built { text, spans, strikes, links, picture_links, inline_boxes, uncopied, highlights }
+        Built { text, spans, strikes, links, picture_links, inline_boxes, images, uncopied, highlights }
     }
 
     /// The source span a formula replaced: its delimiters and its TeX.

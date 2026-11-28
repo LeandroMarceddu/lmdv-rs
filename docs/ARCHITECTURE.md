@@ -31,7 +31,7 @@ lmdv-rs/
   rust-toolchain.toml        # 1.99.1
   PLAN.md  AGENTS.md
   docs/                      # this plan set
-  vendor/rune/               # pinned Rune workspace + patches/
+  vendor/rune/               # pinned Rune workspace (no local patches)
   assets/fonts/  assets/icons/
   locales/                   # en/it/de/fr/es/zh-CN JSON catalogs
   crates/
@@ -90,12 +90,12 @@ Rules:
 
 ### Rune patch set
 
-| Patch | Scope | Acceptance |
-|---|---|---|
-| `0001-text-inline-object.patch` | `Span::image(InlineImage)` + `Span::rise(f32)`, U+FFFC placeholder, inline-box geometry in `rune-text/src/layout/{span,shape,pill_chips}.rs`, `runtime/paint/content.rs`, and `InlineImage::label` | Inline formula baseline within 0.5 pt, correct aspect, wraps whole, selection skips it, RTL works |
-| `0003-a11y-inline-object.patch` | Accessibility text substitutes an inline image's label (TeX or alt) for the U+FFFC marker in node names, values and text runs | No U+FFFC in the accessibility tree; the formula reads as `Math: {tex}`; character lengths and word starts match the spoken value |
-| `0004-text-highlight-inline-image.patch` | A text highlight whose range holds an inline image's placeholder keeps the picture's box, merged into the glyph intervals | Find/line highlights cover formulas and inline images; text highlights stay unchanged |
-| `0005-mermaid-svg.patch` | Static SVG serialization of a laid-out Mermaid scene (`render_svg`, `Drawing::to_svg`) for rich copy, HTML, DOCX, PDF and the lightbox | Self-contained SVG with paths, labels and title; no scripts, images or external fonts |
+No local Rune patches remain. Rune `07bf8c5d3` (#2743) provides
+`InlineImage::{rise,label}` with fractional point metrics, a11y label
+substitution, inline-image highlight boxes in `range_boxes(..., false)`, and
+static Mermaid SVG (`render_svg`, `Drawing::to_svg`, `rune_kit::mermaid::svg`).
+lmdv attaches images with `El::inline_image` and exposes `MathImage`; the
+upstream feature tests replace the old patch-proof suite.
 
 Root `[patch.crates-io]` must repeat Rune's eight vendored crates:
 

@@ -446,9 +446,6 @@ fn same_style(left: &Span, right: &Span) -> bool {
         && left.bg_pad == right.bg_pad
         && left.underline == right.underline
         && left.italic == right.italic
-        && left.image.is_none()
-        && right.image.is_none()
-        && left.rise == right.rise
 }
 
 fn front_matter_end(text: &str) -> usize {

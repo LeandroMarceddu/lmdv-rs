@@ -471,7 +471,7 @@ impl Renderer {
 
 /// Compiler-checked destructuring of every [`Span`] field.
 fn hash_span(sp: &Span, h: &mut impl Hasher) {
-    let Span { start, end, weight, mono, size, color, bg, bg_pad, underline, italic, .. } = *sp;
+    let Span { start, end, weight, mono, size, color, bg, bg_pad, underline, italic } = *sp;
     (
         start,
         end,
@@ -485,10 +485,6 @@ fn hash_span(sp: &Span, h: &mut impl Hasher) {
         italic,
     )
         .hash(h);
-    // An inline image and a rise shape the line (`Span::image`, `Span::rise`), so a change to
-    // either is a new key.
-    let image = sp.image.as_deref().map(|i| (i.pixels.signature(), [i.width, i.height, i.ascent, i.descent].map(f32::to_bits)));
-    (sp.rise.to_bits(), image).hash(h);
 }
 
 fn hash_align(a: Align, h: &mut impl Hasher) {

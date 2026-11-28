@@ -15,7 +15,7 @@ This is the first file every agent (and every future, context-pruned orchestrato
 3. **Completeness over shortcuts.** Do not silently drop a behavior. Every row in `docs/BEHAVIOR_SPEC.md` is in scope; a substitute/gap needs the user's explicit acceptance and a row in `docs/FEATURE_PARITY.md`.
 4. **Personal project; licensing is not a constraint.** Port/copy freely; keep Rune provenance in `vendor/rune/`.
 5. **The behavior spec is the contract.** Cite `docs/BEHAVIOR_SPEC.md` rows and the `file:line` references they record. README/CHANGELOG state intent; the implementation states edge cases.
-6. **Rune is pinned and vendored.** Rev in `docs/RUNE_PIN.md`; the full workspace lives in `vendor/rune/`; patches are numbered `.patch` files.
+6. **Rune is pinned and vendored.** Rev in `docs/RUNE_PIN.md`; the full workspace lives in `vendor/rune/`. There are currently no local patches; upstream #2743 provides the formerly patched features.
 7. **Do not set `CARGO_TARGET_DIR`.** Build in the repository `target/`.
 8. **No telemetry, no runtime network calls** except user-initiated external links/opens.
 9. **Never delete/rewrite user files outside the repository.** No “cleanup” of unrelated files.
@@ -285,4 +285,4 @@ See `docs/RISKS_AND_SPIKES.md`.
 - Cross-window tab drag has no clean Wayland path.
 - PDF/DOCX fidelity beyond Rune needs Typst/OOXML.
 - Multi-cursor and Linux spellcheck are staged; gaps need acceptance.
-- Rune pre-release: vendor bumps re-apply patches 0001/0002 and rerun goldens.
+- Rune pre-release: vendor bumps are plain upstream copies with no local patches; rerun goldens.

@@ -75,13 +75,14 @@ pub(crate) use handlers::{
 };
 pub use handlers::{Drag, Phase, PointerEvent, PointerPress, SwipeEdge};
 pub(crate) use help::{HELP_KEY, HELP_ROW, help_words};
+pub(crate) use input::InputModelFlags;
 pub use input::{Autofill, InputMode, InputSpec, auto_grow, edit_access, text_input};
 pub use items::VirtualItems;
 #[doc(hidden)]
 pub use layout::PathBind;
 pub use pills::{InlineIcon, InlineImage};
 pub use rare::OptionAsAlt;
-pub(crate) use rare::{ElCold, ElFlags, RoleTag};
+pub(crate) use rare::{ElCold, ElFlags, RoleTag, VirtualFlat};
 pub use rune_motion::Cycle;
 pub(crate) use scroll::FadeStyle;
 pub use scroll::ScrollFade;

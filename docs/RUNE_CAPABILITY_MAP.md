@@ -644,14 +644,10 @@ this is **not** a display list you can serialise to SVG text/shapes. Use it only
 - Keep the `Cargo.lock`; Rune depends on pre-release-ish ranges: `wgpu ~30.0.1`, `winit 0.30.13`, `taffy 0.15`,
   `parley 0.12`, `accesskit 0.25.2`, `resvg 0.45`, `pulldown-cmark 0.13` (`crates/rune/Cargo.toml:60-130`;
   `crates/rune-kit/Cargo.toml:16`).
-- Patching Rune itself: keep each patch as a numbered `.patch` + rationale, and
-  `scripts/apply-rune-patches.sh` makes a rev bump mechanical. The current local set is:
-  1. `0001-text-inline-object` — non-square inline image box for math (§3).
-  2. `0003-a11y-inline-object` — the accessibility text speaks the image label.
-  3. `0004-text-highlight-inline-image` — a highlight keeps the image's box.
-  4. `0005-mermaid-svg` — static SVG for export/lightbox.
-  All re-ported onto `f4ec14e`; `0002` is upstream now. Run
-  `scripts/test-rune-patches.sh` after a vendor change.
+- Patching Rune itself: no local patches remain as of `07bf8c5d3`. All four
+  behaviors (span images, a11y labels, highlight boxes, Mermaid SVG) are
+  upstream (#2743); `scripts/apply-rune-patches.sh` is a no-op and
+  `scripts/test-rune-patches.sh` runs the upstream feature tests.
 - **Do not** `[patch]` `rune` to a local copy and also consume it from crates.io; pick one source for all four
   Rune crates (git rev) and patch with path overrides in the same table.
 

@@ -11,9 +11,8 @@ use crate::fonts::fallback::{self, Route};
 use crate::fonts::{language, system_weight};
 use crate::raster::synthetic_bold;
 use crate::{
-    Entry, HIDDEN_SIZE, IMAGE_BOX, INLINE_BOX, Ink, InlineAlign, InlineBoxRun, Keep, OBJECT_REPLACEMENT, PILL_BARE,
-    PILL_BOX, PillChip, PillMetrics, SPAN_BOX, Span, SpanBoxRun, TextSystem, Trak, family_list, font_trak,
-    mono_tab_stops, named_list, shape_key,
+    Entry, HIDDEN_SIZE, INLINE_BOX, Ink, InlineAlign, InlineBoxRun, Keep, PILL_BARE, PILL_BOX, PillChip, PillMetrics,
+    SPAN_BOX, Span, SpanBoxRun, TextSystem, Trak, family_list, font_trak, mono_tab_stops, named_list, shape_key,
 };
 use rune_core::tok::{Family, OpticalSize, TextStyle};
 
@@ -102,8 +101,8 @@ impl TextSystem {
         struct ShapedPill {
             idx: usize,
             range: std::ops::Range<usize>,
-            lead: u32,
-            trail: u32,
+            lead: f32,
+            trail: f32,
             stands: Option<(f32, f32)>,
             bare_icon: bool,
         }
@@ -114,23 +113,27 @@ impl TextSystem {
                 let range = (p.start as usize).min(text.len())..(p.end as usize).min(text.len());
                 let replace = p.bare.as_ref().and_then(|b| b.replace);
                 let bare_icon = p.bare.is_some() && replace.is_none();
-                let (lead, trail) = match (&p.bare, replace) {
-                    (_, Some(r)) => (r.width, 0.0),
-                    (Some(b), None) => (b.size + b.gap, 0.0),
+                let (lead, trail, stands) = match (&p.bare, replace) {
+                    (_, Some(r)) => {
+                        let w = if r.width.is_finite() { (r.width * scale).clamp(0.0, 1e7) } else { 0.0 };
+                        let asc = if r.ascent.is_finite() { r.ascent.max(0.0) } else { 0.0 };
+                        let desc = if r.descent.is_finite() { r.descent.max(0.0) } else { 0.0 };
+                        let rise = if r.rise.is_finite() { r.rise } else { 0.0 };
+                        let h = ((asc + desc) * scale).clamp(0.0, 1e7);
+                        let base = ((asc + rise) * scale).clamp(-1e7, 1e7);
+                        (w, 0.0, Some((h, base)))
+                    }
+                    (Some(b), None) => (((b.size + b.gap) * scale).round().max(0.0), 0.0, None),
                     (None, None) => {
                         let m = pm.for_chip(p);
-                        (m.lead(p.has_lead_visual()), m.trail())
+                        (
+                            (m.lead(p.has_lead_visual()) * scale).round().max(0.0),
+                            (m.trail() * scale).round().max(0.0),
+                            None,
+                        )
                     }
                 };
-                let stands = replace.map(|r| (((r.ascent + r.descent) * scale).round(), (r.ascent * scale).round()));
-                ShapedPill {
-                    idx,
-                    range,
-                    lead: (lead * scale).round() as u32,
-                    trail: (trail * scale).round() as u32,
-                    stands,
-                    bare_icon,
-                }
+                ShapedPill { idx, range, lead, trail, stands, bare_icon }
             })
             .filter(|p| {
                 !p.range.is_empty()
@@ -153,21 +156,6 @@ impl TextSystem {
                     .then_some((i, r, lead, trail))
             })
             .collect();
-        // Each inline image's span index, its first placeholder's byte, its drawn room and its
-        // baseline in device px. Its box keeps the span's index in its id, as a pill's boxes
-        // keep the pill's. A span with no placeholder in the shaped text draws nothing: a cut
-        // or a paragraph's share of a span that holds none has no place to put the picture.
-        let images: Vec<(usize, usize, f32, f32, f32, f32)> = spans
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| {
-                let image = s.image.as_deref()?;
-                let (a, b) = ((s.start as usize).min(text.len()), (s.end as usize).min(text.len()));
-                let at = a + text.get(a..b)?.find(OBJECT_REPLACEMENT)?;
-                Some((i, at, image.width * scale, image.ascent * scale, image.descent * scale, s.rise * scale))
-            })
-            .collect();
-        let image_ranges = image_ranges(text, spans);
         let indented = has_indented_blocks || !pills.is_empty() || !padded_boxes.is_empty();
         let break_lines = |layout: &mut Layout<Ink>| {
             line_break::break_new(
@@ -214,12 +202,10 @@ impl TextSystem {
         let widen = if tabs.is_empty() { Vec::new() } else { self.mono_tab_widening(&tabs, spans, style, scale) };
         // Parley has no tab stops and fonts draw a tab as a missing glyph (or nothing): shape it
         // as a space, one byte like the tab, so every byte range still holds. Monospace tabs
-        // then widen to the next 4-column stop through word spacing. An image span's U+FFFC
-        // placeholders shape as zero-width spaces the same way, so its inline box is all the
-        // room it takes and no missing-glyph box shows through.
+        // then widen to the next 4-column stop through word spacing.
         let spaced;
-        let text = if text.contains('\t') || has_image_placeholder(text, &image_ranges) {
-            spaced = zeroize::Zeroizing::new(shape_text(text, &image_ranges));
+        let text = if text.contains('\t') {
+            spaced = zeroize::Zeroizing::new(text.replace('\t', " "));
             spaced.as_str()
         } else {
             text
@@ -515,9 +501,6 @@ impl TextSystem {
                 if let Some(v) = span_spacing[i] {
                     b.push(StyleProperty::LetterSpacing(v), r.clone());
                 }
-                if s.rise != 0.0 {
-                    b.push(StyleProperty::VerticalAlign(parley::VerticalAlign::length(s.rise)), r.clone());
-                }
             }
             for (range, w) in weights {
                 b.push(StyleProperty::FontWeight(FontWeight::new(*w)), range.clone());
@@ -567,7 +550,7 @@ impl TextSystem {
                         id: PILL_BOX | bare_bit | (p.idx as u64) << 1 | side,
                         kind: parley::InlineBoxKind::InFlow,
                         index,
-                        width: width as f32,
+                        width,
                         height,
                         baseline,
                         vertical_align: parley::VerticalAlign::BASELINE,
@@ -602,20 +585,6 @@ impl TextSystem {
                     height,
                     baseline,
                     vertical_align,
-                });
-            }
-            // An image's room: its box carries the picture's width and the room it asks above
-            // and below the baseline, so the picture sits on the text's baseline at its own
-            // size. A line breaks before or after a box, never inside it.
-            for (i, index, width, ascent, descent, rise) in &images {
-                b.push_inline_box(parley::InlineBox {
-                    id: IMAGE_BOX | *i as u64,
-                    kind: parley::InlineBoxKind::InFlow,
-                    index: *index,
-                    width: *width,
-                    height: *ascent + *descent,
-                    baseline: Some(*ascent),
-                    vertical_align: parley::VerticalAlign::length(*rise),
                 });
             }
             let mut layout: Layout<Ink> = b.build(text);
@@ -696,51 +665,4 @@ impl TextSystem {
         }
         l
     }
-}
-
-/// The byte ranges of `spans`' inline images in `text`, sorted and merged.
-fn image_ranges(text: &str, spans: &[Span]) -> Vec<(usize, usize)> {
-    let mut ranges: Vec<(usize, usize)> = spans
-        .iter()
-        .filter(|s| s.image.is_some())
-        .filter_map(|s| {
-            let (a, b) = ((s.start as usize).min(text.len()), (s.end as usize).min(text.len()));
-            (a < b).then_some((a, b))
-        })
-        .collect();
-    ranges.sort_unstable();
-    let mut out: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
-    for (a, b) in ranges {
-        match out.last_mut() {
-            Some(last) if a <= last.1 => last.1 = last.1.max(b),
-            _ => out.push((a, b)),
-        }
-    }
-    out
-}
-
-/// Whether any image range in `text` holds an [`OBJECT_REPLACEMENT`] placeholder.
-fn has_image_placeholder(text: &str, images: &[(usize, usize)]) -> bool {
-    images.iter().any(|&(a, b)| text.get(a..b).is_some_and(|s| s.contains(OBJECT_REPLACEMENT)))
-}
-
-/// `text` with tabs as spaces and each image range's [`OBJECT_REPLACEMENT`] placeholders as
-/// zero-width spaces. Every replacement keeps its bytes' length, so authored byte ranges and
-/// the layout's own still agree.
-fn shape_text(text: &str, images: &[(usize, usize)]) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut next = 0;
-    for (i, ch) in text.char_indices() {
-        while next < images.len() && images[next].1 <= i {
-            next += 1;
-        }
-        match ch {
-            '\t' => out.push(' '),
-            OBJECT_REPLACEMENT if images.get(next).is_some_and(|&(a, b)| a <= i && i + 3 <= b) => {
-                out.push('\u{200b}');
-            }
-            _ => out.push(ch),
-        }
-    }
-    out
 }

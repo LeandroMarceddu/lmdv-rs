@@ -484,8 +484,9 @@ pub fn move_line_strict(
 
 /// Line boxes (`(BoundingBox, line_idx)`) covering bytes `a..b` of `layout`. When `pill_boxes`
 /// is true, a selected pill's leading and trailing chip boxes are included in the highlight;
-/// when false (underlines, strikethroughs, link hit boxes), inline boxes are excluded so they
-/// never bleed into a neighbouring cluster's box.
+/// when false (highlights, underlines, strikethroughs, link hit boxes), regular chip/icon boxes
+/// are excluded while replaced inline-image boxes (`InlineImage`) are included with their own
+/// vertical extent so highlights and links cover the image instead of leaving a gap.
 #[doc(hidden)]
 pub fn range_boxes(layout: &Layout<Ink>, a: usize, b: usize, pill_boxes: bool) -> Vec<(parley::BoundingBox, usize)> {
     use parley::BreakReason;
@@ -520,83 +521,77 @@ pub fn range_boxes(layout: &Layout<Ink>, a: usize, b: usize, pill_boxes: bool) -
         } else {
             start + m.advance as f64
         };
-        // An inline image draws no glyph: its placeholder shapes as zero width and the picture is
-        // painted separately at the room its inline box reserved (see `Span::image`). A highlight
-        // covering the placeholder's byte paints that box, so a find match or a line highlight
-        // over a picture shows the picture's own extent instead of nothing. The picture's box may
-        // reach above and below the line, so it keeps its own vertical bounds.
-        let mut images: Vec<(f64, f64, f64, f64)> = Vec::new();
-        let mut intervals: Vec<(f64, f64)> = Vec::new();
+        let mut intervals: Vec<(f64, f64, f64, f64)> = Vec::new();
         if plain && a <= lr.start && lr.end <= b {
-            intervals.push((start, end));
+            intervals.push((start, end, line_min, line_max));
         } else {
             for run in line.runs() {
+                if is_hidden_size(run.font_size()) {
+                    continue;
+                }
                 let mut cx = (m.inline_min_coord
                     + run.visual_clusters().next().and_then(|c| c.visual_offset()).unwrap_or(m.offset))
                     as f64;
                 for cl in run.visual_clusters() {
                     let adv = cl.advance() as f64;
                     if range.contains(&cl.text_range().start) && adv > 0.0 {
-                        intervals.push((cx, cx + adv));
+                        intervals.push((cx, cx + adv, line_min, line_max));
                     }
                     cx += adv;
                 }
             }
-            if pill_boxes {
-                for item in line.items() {
-                    if let PositionedLayoutItem::InlineBox(ib) = item
-                        && ib.id & PILL_BOX != 0
-                        && ib.width > 0.0
-                        && layout.inline_boxes().find(|b| b.id == ib.id).is_some_and(|b| {
-                            if ib.id & 1 == 0 {
-                                range.contains(&b.index)
+            for item in line.items() {
+                if let PositionedLayoutItem::InlineBox(ib) = item
+                    && ib.id & PILL_BOX != 0
+                    && ib.width > 0.0
+                    && let Some(b_meta) = layout.inline_boxes().find(|b| b.id == ib.id)
+                {
+                    let replaced = ib.id & 1 == 0 && b_meta.baseline.is_some();
+                    if replaced {
+                        let end_idx =
+                            layout.inline_boxes().find(|t| t.id == (ib.id | 1)).map_or(b_meta.index + 1, |t| t.index);
+                        if b_meta.index < b && a < end_idx {
+                            let (y0, y1) = if pill_boxes {
+                                (line_min.min(ib.y as f64), line_max.max((ib.y + ib.height) as f64))
                             } else {
-                                b.index > 0 && range.contains(&(b.index - 1))
-                            }
-                        })
-                    {
-                        intervals.push((ib.x as f64, (ib.x + ib.width) as f64));
-                    }
-                }
-            }
-            if !pill_boxes {
-                for item in line.items() {
-                    let PositionedLayoutItem::InlineBox(ib) = item else { continue };
-                    if ib.id & IMAGE_BOX == 0 || ib.width <= 0.0 {
-                        continue;
-                    }
-                    let Some(b) = layout.inline_boxes().find(|b| b.id == ib.id) else { continue };
-                    if range.contains(&b.index) {
-                        images.push((ib.x as f64, (ib.x + ib.width) as f64, ib.y as f64, (ib.y + ib.height) as f64));
+                                (ib.y as f64, (ib.y + ib.height) as f64)
+                            };
+                            intervals.push((ib.x as f64, (ib.x + ib.width) as f64, y0, y1));
+                        }
+                    } else if pill_boxes {
+                        let covered = if ib.id & 1 == 0 {
+                            range.contains(&b_meta.index)
+                        } else {
+                            b_meta.index > 0 && range.contains(&(b_meta.index - 1))
+                        };
+                        if covered {
+                            intervals.push((ib.x as f64, (ib.x + ib.width) as f64, line_min, line_max));
+                        }
                     }
                 }
             }
         }
         if newline_ws > 0.0 {
-            intervals.push(if newline_rtl { (start - newline_ws, start) } else { (end, end + newline_ws) });
+            intervals.push(if newline_rtl {
+                (start - newline_ws, start, line_min, line_max)
+            } else {
+                (end, end + newline_ws, line_min, line_max)
+            });
         }
         intervals.sort_by(|p, q| p.0.total_cmp(&q.0));
-        let mut merged: Vec<(f64, f64, Option<(f64, f64)>)> = Vec::new();
-        for (x0, x1) in intervals {
+        let mut merged: Vec<(f64, f64, f64, f64)> = Vec::new();
+        for (x0, x1, y0, y1) in intervals {
             match merged.last_mut() {
-                Some(last) if x0 <= last.1 + 0.5 => last.1 = last.1.max(x1),
-                _ => merged.push((x0, x1, None)),
-            }
-        }
-        for (x0, x1, y0, y1) in images {
-            match merged.iter_mut().find(|(a, b, _)| x0 <= *b + 0.5 && *a <= x1 + 0.5) {
-                Some(slot) => {
-                    slot.0 = slot.0.min(x0);
-                    slot.1 = slot.1.max(x1);
-                    let (top, bottom) = slot.2.unwrap_or((line_min, line_max));
-                    slot.2 = Some((top.min(y0), bottom.max(y1)));
+                Some(last) if x0 <= last.1 + 0.5 => {
+                    last.1 = last.1.max(x1);
+                    last.2 = last.2.min(y0);
+                    last.3 = last.3.max(y1);
                 }
-                None => merged.push((x0, x1, Some((y0, y1)))),
+                _ => merged.push((x0, x1, y0, y1)),
             }
         }
-        for (x0, x1, vertical) in merged {
+        for (x0, x1, y0, y1) in merged {
             if x1 > x0 {
-                let (y0, y1) = vertical.unwrap_or((line_min, line_max));
                 rects.push((parley::BoundingBox::new(x0, y0, x1, y1), line_ix));
             }
         }

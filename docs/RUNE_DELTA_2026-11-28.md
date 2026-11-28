@@ -1,5 +1,8 @@
 # Rune delta and bump — 2026-11-28
 
+> All four patches were retired at Rune `07bf8c5d3` (#2743) — upstream
+> implemented the exact APIs below. `docs/STATUS.md` records the migration.
+
 Supersedes [`RUNE_DELTA_2026-11-25.md`](RUNE_DELTA_2026-11-25.md). Two
 read-only probes compared the current `dev` head with our pin; this file is the
 merged result and the record of the second port.
@@ -71,5 +74,5 @@ added upstream).
 ## Recommendation
 
 Keep this pin until another upstream wave justifies a bump. If one comes, the
-four patches are now cheap to re-port but still mandatory; the memory
-acceptance gate is the five-row RSS table above.
+four patches were retired at `07bf8c5d3`; the memory acceptance gate
+was the five-row RSS table above.

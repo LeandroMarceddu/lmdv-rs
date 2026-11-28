@@ -42,13 +42,9 @@
 //!
 //! let pixels = rune::Pixels::new();
 //! pixels.set(out.width, out.height, out.rgba);
-//! let image = rune::InlineImage::new(
-//!     pixels,
-//!     out.width as f32 / 2.0,
-//!     out.height as f32 / 2.0,
-//! )
-//! .ascent(out.ascent_pt)
-//! .descent(out.descent_pt);
+//! // Rune takes width, ascent and descent directly: the box's height is
+//! // `ascent + descent`, with fractional points preserved.
+//! let image = rune::InlineImage::new(pixels, out.width as f32 / 2.0, out.ascent_pt, out.descent_pt);
 //! ```
 
 #![forbid(unsafe_code)]

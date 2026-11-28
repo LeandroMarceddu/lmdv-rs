@@ -340,12 +340,6 @@ name = "measure_scope"
 name = "setup_measure"
 
 [[test]]
-name = "inline_image_layout"
-
-[[test]]
-name = "inline_image_scene"
-
-[[test]]
 name = "pixels_streaming"
 
 [[test]]

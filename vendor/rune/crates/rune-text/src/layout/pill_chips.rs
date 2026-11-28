@@ -1,32 +1,5 @@
-//! The chips drawn behind pill labels in a laid-out paragraph, inline icons and inline images.
+//! The chips drawn behind pill labels in a laid-out paragraph, and inline icons.
 use crate::*;
-
-/// Each inline image in `layout` (device px, at `origin`): its span's index in the layout's
-/// spans, the picture's top-left corner and its drawn size in px. The box the text reserved
-/// places it; the picture draws at its own size, scaled by `scale`.
-#[doc(hidden)]
-pub fn inline_images(
-    layout: &Layout<Ink>,
-    spans: &[Span],
-    scale: f32,
-    origin: [f32; 2],
-    out: &mut Vec<(usize, [f32; 2], (f32, f32))>,
-) {
-    if spans.iter().all(|s| s.image.is_none()) {
-        return;
-    }
-    for line in layout.lines() {
-        for item in line.items() {
-            let PositionedLayoutItem::InlineBox(b) = item else { continue };
-            if b.id & IMAGE_BOX == 0 {
-                continue;
-            }
-            let i = (b.id & !IMAGE_BOX) as usize;
-            let Some(image) = spans.get(i).and_then(|s| s.image.as_deref()) else { continue };
-            out.push((i, [origin[0] + b.x, origin[1] + b.y], (image.width * scale, image.height * scale)));
-        }
-    }
-}
 
 /// Each inline icon (a bare pill) in `layout` (device px, at `origin`): its pill's index, its
 /// box's top-left corner and its size in px. An icon is a square centred on the letters of the
@@ -52,7 +25,7 @@ pub fn bare_icons(
             let i = pill_index(b.id);
             let Some((pill, bare)) = pills.get(i).and_then(|p| Some((p, p.bare.as_deref()?))) else { continue };
             if bare.replace.is_some() {
-                out.push((i, [(origin[0] + b.x).round(), (origin[1] + b.y).round()], [b.width, b.height]));
+                out.push((i, [origin[0] + b.x, origin[1] + b.y], [b.width, b.height]));
                 continue;
             }
             let (mut asc, mut desc, mut gr_x1) = (0.0f32, 0.0f32, f32::NEG_INFINITY);

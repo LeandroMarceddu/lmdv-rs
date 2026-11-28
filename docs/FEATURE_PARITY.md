@@ -178,7 +178,7 @@ Counts are generated from the behavior spec by `scripts/gen-parity-checklist.py`
 | E-MULTI | Multi-cursor (`Ctrl+D`, add cursor above/below) | Single selection in v1; `Ctrl+D` selects next occurrence; full model needs a Rune caret-rect patch | **gap until P7** |
 | E-SPELL | WebView2 spellcheck follows the UI language | Spellbook (Hunspell) engine in `lmdv-edit`, system/user dictionaries, underline spans in both editor modes, toggle hidden without a dictionary; the right-click suggestion menu is still open (OI-174) | **implemented (Linux)** |
 | L-MEDIA | Video/audio playback in the document | Rune's `Player` fails on Linux; show a placeholder + “Open externally” | **substitute** |
-| X-SVG | Copy/save diagram SVG | `rune-mermaid` patch 0005 provides static SVG; the lightbox rasterizes 2×/4×/Save PNG and export embeds SVG/PNG | **implemented** |
+| X-SVG | Copy/save diagram SVG | Upstream `rune_mermaid::render_svg` / `Drawing::to_svg` (Rune `07bf8c5d3`) provide static SVG; the lightbox rasterizes 2×/4×/Save PNG and export embeds SVG/PNG | **implemented** |
 | S-RECENT | Windows Recent items + jump list | In-app recents; optional XDG recent-manager integration later | **substitute/gap** |
 | H-RATE | Store rating prompt | Not applicable on Linux | **n/a** |
 

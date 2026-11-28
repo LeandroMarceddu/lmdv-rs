@@ -312,7 +312,7 @@ impl NodePrint {
                                         b.gap.to_bits(),
                                         b.radius.to_bits(),
                                         b.image.as_ref().map(crate::pixels::Pixels::signature),
-                                        b.replace.map(|r| bits(&[r.width, r.ascent, r.descent, r.bleed])),
+                                        b.replace.map(|r| bits(&[r.width, r.ascent, r.descent, r.rise, r.bleed])),
                                         b.label.as_deref(),
                                         b.help.as_deref(),
                                     )

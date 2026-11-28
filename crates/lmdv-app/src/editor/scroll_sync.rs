@@ -226,8 +226,6 @@ fn clip_spans(spans: &[Span], start: usize, end: usize) -> Vec<Span> {
         let mut clipped = span.clone();
         clipped.start = (from - start) as u32;
         clipped.end = (to - start) as u32;
-        // The source has no inline images; a stray one would not measure.
-        clipped.image = None;
         out.push(clipped);
     }
     out

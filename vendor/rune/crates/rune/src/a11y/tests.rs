@@ -3,8 +3,7 @@
 use accesskit::{Action as Ak, ActionData, ActionRequest, Role, TreeId};
 use serde_json::Value;
 
-use crate::text::{InlineImage, OBJECT_REPLACEMENT, Span};
-use crate::{Cx, El, Env, GrowthSpec, LiveRegion, Pixels, Runtime, ScrollSpec, TextEdit, col, row, text, text_input};
+use crate::{Cx, El, Env, GrowthSpec, LiveRegion, Runtime, ScrollSpec, TextEdit, col, row, text, text_input};
 
 fn find<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     if v["key"] == key {
@@ -1327,71 +1326,4 @@ fn settings_notification_updates_reduced_transparency_and_queues_rebuild() {
     // Repeated settings notification with unchanged preference does not queue another rebuild.
     link.shared.push(|i| i.settings = true);
     assert!(!link.receive_core(rt.core_mut(), "Test"), "unchanged preference must not queue rebuild");
-}
-
-/// A 2 by 2 image: what it draws does not matter, only the room it takes.
-fn picture() -> Pixels {
-    let pixels = Pixels::new();
-    pixels.set(2, 2, vec![255; 16]);
-    pixels
-}
-
-/// No node's value or label holds the object marker, and the uninterrupted text reads `words`.
-fn assert_speaks(tree: &accesskit::TreeUpdate, words: &str) {
-    for (_, node) in &tree.nodes {
-        if let Some(value) = node.value() {
-            assert!(!value.contains(OBJECT_REPLACEMENT), "{:?} value holds the marker: {value:?}", node.role());
-        }
-        if let Some(label) = node.label() {
-            assert!(!label.contains(OBJECT_REPLACEMENT), "{:?} label holds the marker: {label:?}", node.role());
-        }
-    }
-    let runs: Vec<&str> =
-        tree.nodes.iter().filter(|(_, n)| n.role() == Role::TextRun).filter_map(|(_, n)| n.value()).collect();
-    assert_eq!(runs.concat(), words, "the words a reader hears");
-}
-
-/// A run's character lengths add up to its value, as AccessKit's text walks require.
-fn assert_lengths(node: &accesskit::Node) {
-    let value = node.value().expect("a text run");
-    let lengths: usize = node.character_lengths().iter().map(|&n| usize::from(n)).sum();
-    assert_eq!(lengths, value.len(), "character lengths add up to the value: {value:?}");
-    assert_eq!(node.character_positions().map_or(0, |p| p.len()), node.character_lengths().len());
-    assert_eq!(node.character_widths().map_or(0, |w| w.len()), node.character_lengths().len());
-}
-
-#[test]
-fn inline_images_speak_their_label() {
-    fn view(_: &(), _: &mut Cx<()>) -> El {
-        let content = format!("Before {OBJECT_REPLACEMENT} after");
-        let at = content.find(OBJECT_REPLACEMENT).expect("the placeholder");
-        let image = InlineImage::new(picture(), 8.0, 8.0).label("Math: E = mc²");
-        crate::rich(content, vec![Span::new(at, at + OBJECT_REPLACEMENT.len_utf8()).image(image)]).selectable(true)
-    }
-    let mut rt = Runtime::new((), view, (300.0, 100.0), Env::new(true, 1.0));
-    rt.frame(0.0);
-    let tree = rt.accessibility_tree();
-    assert_speaks(&tree, "Before Math: E = mc² after");
-    let (_, text) = tree.nodes.iter().find(|(_, n)| n.role() == Role::Label).expect("the text node");
-    assert_eq!(text.value(), Some("Before Math: E = mc² after"), "the text's own value speaks the formula");
-    let runs: Vec<_> = tree.nodes.iter().filter(|(_, n)| n.role() == Role::TextRun).map(|(_, n)| n).collect();
-    assert_eq!(runs.len(), 1, "one line");
-    assert_eq!(runs[0].value(), Some("Before Math: E = mc² after"));
-    assert_lengths(runs[0]);
-}
-
-#[test]
-fn inline_images_without_a_label_leave_the_placeholder_out() {
-    fn view(_: &(), _: &mut Cx<()>) -> El {
-        let content = format!("Before {OBJECT_REPLACEMENT} after");
-        let at = content.find(OBJECT_REPLACEMENT).expect("the placeholder");
-        let image = InlineImage::new(picture(), 8.0, 8.0);
-        crate::rich(content, vec![Span::new(at, at + OBJECT_REPLACEMENT.len_utf8()).image(image)]).selectable(true)
-    }
-    let mut rt = Runtime::new((), view, (300.0, 100.0), Env::new(true, 1.0));
-    rt.frame(0.0);
-    let tree = rt.accessibility_tree();
-    assert_speaks(&tree, "Before  after");
-    let (_, text) = tree.nodes.iter().find(|(_, n)| n.role() == Role::Label).expect("the text node");
-    assert_eq!(text.value(), Some("Before  after"), "an unlabelled image says nothing");
 }

@@ -7,10 +7,9 @@
 ## P0 — complete
 
 - Git repo and baseline commits.
-- Full pinned Rune vendored at `vendor/rune/` (`f4ec14e`, 2026-11-25, Rust 1.99.1); root repeats the eight `[patch.crates-io]` entries (including `naga`, `sctk-adwaita` and `accesskit_atspi_common`).
-- Patch 0001 (`0001-text-inline-object.patch`): `Span::image` + `Span::rise`, `InlineImage::label`, independent inline image size/ascent/descent, zero-width placeholders, drawing, caching and selection behavior. Layout and live-scene tests pass; the app's `--scene proof-math` draws an inline image on the text baseline.
-- Close veto is upstream as of Rune `f4ec14e`: `App::on_close_request -> CloseResponse` runs before hiding; programmatic closes stay force-close. lmdv carries no patch for it; `crates/lmdv-app/src/app.rs` returns `Defer` while a document is dirty.
-- Patch 0003 (`0003-a11y-inline-object.patch`): the accessibility text speaks an inline image's label instead of U+FFFC in node names, values and text runs, keeping character lengths and word starts consistent. Two Rune a11y tests and a renderer tree test pass; `scripts/test-rune-patches.sh` covers the other two patches.
+- Full pinned Rune vendored at `vendor/rune/` (`07bf8c5d3`, 2026-11-28, Rust 1.99.1); root repeats the eight `[patch.crates-io]` entries (including `naga`, `sctk-adwaita` and `accesskit_atspi_common`).
+- Rune `07bf8c5d3` provides fractional inline-image metrics, `rise`, `label`, a11y label substitution, inline-image highlight boxes and Mermaid SVG (upstream #2743). All four local patches are retired; `vendor/rune/patches/` is empty.
+- Close veto is upstream: `App::on_close_request -> CloseResponse` runs before hiding; programmatic closes stay force-close. `crates/lmdv-app/src/app.rs` returns `Defer` while a document is dirty.
 - `lmdv-core`: IDs, `SourceBuffer`, `Document`, `DocumentRegistry`, edit lease, prefs, nav/draft/session types; 53 tests pass.
 - `scripts/run-gates.sh` is green: parity checklist, vendor check, formatting (own crates only), workspace check/test/clippy. Vendor patch proof tests are separate (`scripts/test-rune-patches.sh`, after a vendor bump or patch edit) so the gate does not rebuild `vendor/rune/target` every time.
 - User-level handler scripts tested end-to-end in a temporary HOME: install, MIME default, wrapper launching the real binary, uninstall restore.
@@ -550,27 +549,22 @@
   pristine `f4ec14e`; it is outside the workspace gate.
 - Version 0.11.0; release notes in `docs/releases/v0.11.0.md`.
 
-## Rune af6b1fdd — memory fixes and second port (unreleased)
+## Rune 07bf8c5d3 — patches retired (unreleased)
 
-- Pin moved from `f4ec14e` to `af6b1fdd` (230 commits). The root still repeats
-  eight `[patch.crates-io]` entries; no new vendor patch entries were needed.
-- Upstream fixed the reported retention: #2396 drops last-commit text layouts
-  and compacts scene, paint, memo, node and a11y state at rest; #2403 makes
-  table-cell layouts uncached and shrinks per-node paint state; #2407 calls
-  `malloc_trim(0)` off-thread at rest on Linux/glibc (opt-outs:
-  `App::trim_heap_at_rest(false)` and `RUNE_MALLOC_TRIM=0`).
-- RSS verified on `developer-guide.md`: Wayland ~594 MB -> ~225 MB after rest;
-  X11 ~625 MB -> ~258 MB. A fresh simple-file app is ~220 MB, so the large
-  document returns to the normal baseline. The ~10 s idle delay is accepted;
-  no app-side trim exists in the tree (the experiment was reverted).
-- No patch was retired. 0004 and 0005 apply unchanged; 0001 and 0003 were
-  re-ported (~4-7 h total). New traps handled: `IMAGE_BOX` moved to `1 << 58`
-  because upstream took `1 << 59` for `PILL_BARE`, and `layout_attr_key()`
-  now includes image/rise so paragraph-key reuse cannot serve a stale layout.
-- Applying all four patches to a pristine formatted `af6b1fdd` reproduces
-  `vendor/rune` exactly; 21 patch tests and the full gate are green.
-- No app-side memory code was needed. No tag for this bump; version remains
-  0.11.0.
+- Pin moved from `af6b1fdd` to `07bf8c5d3` (8 commits). Upstream #2743
+  implemented exactly the four behaviors we carried as patches: fractional
+  `InlineImage` metrics and `rise`/`label`, a11y label substitution,
+  inline-image highlight boxes and static Mermaid SVG export.
+- `vendor/rune/patches/` is empty. lmdv-render now attaches images with
+  `El::inline_image` and exposes `MathImage` to the math resolver; the app no
+  longer depends on `Span::image`/`Span::rise`.
+- `scripts/test-rune-patches.sh` now runs the upstream feature tests:
+  8 cursor, 16 pill, 145 a11y, 160 Mermaid and 1 kit-Mermaid test pass.
+- Full gate, Windows `--all-targets` check and the headless proof-math/tree
+  evidence are green. The retained memory fix from `af6b1fdd` remains.
+- Residual: Sub/Sup no longer shifts the baseline vertically (only font size);
+  recorded as OI-200, an accepted substitute. No tag for this bump; version
+  remains 0.11.0.
 
 ## Worker batch — parity and polish — complete
 

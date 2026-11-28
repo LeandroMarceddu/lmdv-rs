@@ -151,8 +151,6 @@ pub use layout::ltr_units::ltr_units;
 #[doc(hidden)]
 pub use layout::pill_chips::bare_icons;
 #[doc(hidden)]
-pub use layout::pill_chips::inline_images;
-#[doc(hidden)]
 pub use layout::pill_chips::pill_chips;
 #[doc(hidden)]
 pub use layout::pill_chips::pill_chips_with_images;
@@ -173,10 +171,8 @@ pub use layout::span::InlineAlign;
 pub use layout::span::InlineBox;
 #[doc(hidden)]
 pub use layout::span::InlineBoxRun;
-pub use layout::span::InlineImage;
 pub use layout::span::Link;
 pub use layout::span::LinkPaint;
-pub use layout::span::OBJECT_REPLACEMENT;
 #[doc(hidden)]
 pub use layout::span::PillChip;
 #[doc(hidden)]
@@ -190,6 +186,10 @@ pub use layout::span::SpanBoxRun;
 pub use layout::span::TextHighlight;
 #[doc(hidden)]
 pub use layout::span::flatten_spans;
+#[doc(hidden)]
+pub use layout::span::is_hidden_size;
+#[doc(hidden)]
+pub use layout::span::replaced_pill_index;
 #[doc(hidden)]
 pub use layout::tabular::TabularGlyphs;
 #[doc(hidden)]
@@ -215,6 +215,8 @@ pub use measure::line_starts;
 pub use measure::measure;
 pub use measure::measure_inline;
 pub use measure::measure_inline_with;
+#[doc(hidden)]
+pub use measure::measure_lines;
 pub use measure::measure_with;
 #[doc(hidden)]
 pub use measure::primary_extents;
@@ -281,7 +283,7 @@ use layout::cache::{Cache, Entry};
 use layout::decorations::Decoration;
 use layout::id::LayoutIds;
 use layout::rich::mono_tab_stops;
-use layout::span::{HIDDEN_SIZE, IMAGE_BOX, PILL_BARE, PILL_BOX, SPAN_BOX, is_hidden_size, pill_index};
+use layout::span::{HIDDEN_SIZE, PILL_BARE, PILL_BOX, SPAN_BOX, pill_index};
 use layout::{cursor, hash, line_break, line_metrics, span};
 use raster::{macos, support, windfoil, windows};
 
