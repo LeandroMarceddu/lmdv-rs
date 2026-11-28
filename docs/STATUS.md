@@ -600,7 +600,7 @@
 3. Decide the two shared residuals: OI-061 needs a live bounded syntax-tree source for format-bar/slash state, and OI-102 needs an owned layout callback after virtual remount. Then take the remaining 12 OIs in bounded slices.
 4. P7 packaging: Authenticode/AppImage signatures and reproducible builds; rDNS, homepage, installer icon, LICENSE and signed SHA256SUMS are done. Windows runtime is implemented but needs the manual checklist in OI-155.
 
-**Known flake (task queue):** `tasks_tests::a_conflict_with_a_queued_tick_reverts_every_optimistic_byte` failed 2 of 4 aggregate `tasks_tests::` runs with “the task conflict never happened” but passes in isolation and in the full gate. Recorded, not masked; investigate before treating the queue path as settled.
+**Fixed flake (task queue):** `tasks_tests::a_conflict_with_a_queued_tick_reverts_every_optimistic_byte` used to change disk after both toggles, so the save could finish first and no conflict occurred. It now changes disk while the first save is in flight and before the second toggle; 12/12 stress runs and the full gate pass.
 
 **Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on pristine `af6b1fdd` too, and an unrelated macOS Rune smoothing test fails on Linux.
 

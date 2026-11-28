@@ -806,8 +806,13 @@ fn a_conflict_with_a_queued_tick_reverts_every_optimistic_byte() {
     let doc = state.active_tab().and_then(Tab::document).cloned().expect("document");
 
     state.toggle_task(&first);
-    state.toggle_task(&second);
+    assert_eq!(state.tasks.pending(), 1, "the first save is in flight");
+    // Change disk while that save is provably in flight, before the queued
+    // tick is added. Otherwise the save can finish first and no conflict
+    // happens (the race this test used to flake on).
     std::fs::write(&path, "- [ ] theirs\n").unwrap();
+    state.toggle_task(&second);
+    assert_eq!(state.tasks.queued(doc.id), 1, "the second tick was queued");
     poll_until(&mut state, "the task conflict", |state| matches!(state.prompt(), Some(Prompt::TaskConflict { .. })));
     assert_eq!(doc.text().text(), original, "neither optimistic byte is left behind");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "- [ ] theirs\n", "the disk version wins");
