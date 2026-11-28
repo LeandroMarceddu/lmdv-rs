@@ -1029,6 +1029,7 @@ mod tests {
             line: Some(7),
             new_window: true,
             cwd: PathBuf::from(r"C:\notes"),
+            ..Launch::default()
         };
         let ack = forward(&paths, &LaunchRequest::new(launch.clone())).unwrap();
         assert!(ack.ok);
