@@ -603,7 +603,7 @@
 
 **Fixed flake (task queue):** `tasks_tests::a_conflict_with_a_queued_tick_reverts_every_optimistic_byte` used to change disk after both toggles, so the save could finish first and no conflict occurred. It now changes disk while the first save is in flight and before the second toggle; 12/12 stress runs and the full gate pass.
 
-**Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on pristine `af6b1fdd` too, and an unrelated macOS Rune smoothing test fails on Linux.
+**Known-failing:** none in the workspace gate. Outside it, the vendored `rune-text` suite fails `rtl_mirrors_positive_and_negative_indent_to_inline_start_edge` on a pristine pinned vendor tree too, and an unrelated macOS Rune smoothing test fails on Linux.
 
 **Known flake:** CI run 44821493750 failed once in `reading::tests::a_viewer_find_hit_over_an_inline_image_paints_its_box` with Rune's debug assertion `text_spec.rs:245: a text changed after its shape key was taken`; the rerun and eight local full-suite runs passed. Record any repeat with the run id.
 
