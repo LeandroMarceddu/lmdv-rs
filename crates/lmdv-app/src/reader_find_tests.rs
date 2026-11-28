@@ -1,13 +1,14 @@
 //! Reading find: matching, prefill, the per-tab bar, `--line` paint and the
 //! renderer reveal key (R-10, R-16–R-19, F-16).
 
+use lmdv_md::match_ranges;
 use lmdv_render::{HighlightKind, highlight_key};
 use rune::{ElementInfo, Key, KeyEvent, Mods, Runtime, Tx};
 use tempfile::TempDir;
 
 use crate::reader_find::{
-    FindBand, FindReveal, READER_FIND_BAND, ReaderFind, find_in_document, find_reveal, match_ranges,
-    reader_find_prefill, refresh_tab, selection_in_article,
+    FindBand, FindReveal, READER_FIND_BAND, ReaderFind, find_in_document, find_reveal, reader_find_prefill,
+    refresh_tab, selection_in_article,
 };
 use crate::section::{SECTION_LINE_HEIGHT, SectionLineFrame, SectionSegment};
 use crate::test_support;
@@ -74,6 +75,21 @@ fn matching_is_case_insensitive_plain_and_in_document_order() {
     assert!(find_in_document(&accented, "beyonce").is_empty(), "no accent folding");
     assert_eq!(find_in_document(&accented, "BEYONCÉ").len(), 1, "case-insensitive non-ASCII");
     assert!(find_in_document(&doc, "").is_empty(), "an empty query matches nothing");
+}
+
+#[test]
+fn the_reader_and_the_parser_agree_on_the_same_hits() {
+    // OI-024: the app asks `MdDoc::find`; there is only one matching rule.
+    let source = "# Alpha\n\nAlpha **alpha**.\n\n```\nalpha\n```\n";
+    let doc = lmdv_md::parse(source);
+    let expected = doc.find("alpha");
+    assert_eq!(find_in_document(&doc, "alpha"), expected);
+
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Find", source);
+    state.show_reader_find("alpha");
+    assert_eq!(active_tab(&state).view.reader_find.matches, expected);
 }
 
 #[test]

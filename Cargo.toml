@@ -16,6 +16,7 @@ rune = { path = "vendor/rune/crates/rune", default-features = false, features = 
     "accessibility",
     "dbus",
     "svg",
+    "wayland-csd-title",
     "native-file-dialog",
     # Release builds keep `--snap`/`--tree`/`--script`; debug builds have it regardless.
     "tooling",

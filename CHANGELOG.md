@@ -39,9 +39,26 @@ release has them. "Unreleased" is on `main` but not yet tagged.
 - Queued task-conflict test made deterministic; Windows-only `Launch` test
   literal given defaults for the new fields.
 
+### Added
+
+- Linux CSD via Rune's `App::titlebar` (ADR-028), focusable localized pane
+  grips, lone-tab window drag, browser-key navigation, and a real external-open
+  confirmation dialog. Upstream #2744/#2745 APIs replaced the remaining
+  substitutes: clipboard write acknowledgement, built-in field-menu spelling
+  suggestions and multi-caret editing.
+
+### Fixed
+
+- C-12 palette ARIA, OI-001/OI-049 startup/image probe jobs, OI-024 parser
+  find, OI-051 modal confirmation, OI-061 syntax cache, OI-102 row measurement,
+  OI-108 clipboard ack, OI-174 field menu, OI-176 locale test seam, OI-179 pane
+  grips and the flaky task-conflict test.
+
 ### Accepted substitutes
 
 - Sub/Sup no longer shifts the baseline vertically (font size only), OI-200.
+- OI-044's document-level proxy scrollbar and OI-054's incremental-scroll
+  budget remain partial; OI-155 Windows runtime checks are manual.
 
 ## [0.11.0] — 2026-11-25
 

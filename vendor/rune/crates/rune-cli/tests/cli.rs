@@ -50,7 +50,7 @@ fn svec(items: &[&str]) -> Vec<String> {
 
 #[test]
 fn args_parse_all_commands_and_cargo_subcommand_prefix() {
-    let cmd = parse(&svec(&["rune", "new", "my-app", "--rev", "abc1234", "--no-git"])).unwrap();
+    let cmd = parse(&svec(&["rune", "new", "my-app", "--rev", "abc1234", "--no-git", "--no-lockfile"])).unwrap();
     assert_eq!(
         cmd,
         Command::New(NewArgs {
@@ -61,6 +61,7 @@ fn args_parse_all_commands_and_cargo_subcommand_prefix() {
             rune_path: None,
             force: false,
             no_git: true,
+            no_lockfile: true,
         })
     );
 
@@ -218,6 +219,7 @@ fn rune_new_scaffolds_valid_pinned_project_and_passes_pin_checks() {
         rune_path: None,
         force: false,
         no_git: true,
+        no_lockfile: true,
     })
     .unwrap();
 
@@ -250,6 +252,7 @@ fn rune_new_scaffolds_valid_pinned_project_and_passes_pin_checks() {
             rune_path: None,
             force: false,
             no_git: true,
+            no_lockfile: true,
         })
         .is_err()
     );
@@ -491,7 +494,7 @@ fn rune_binary_new_check_and_doctor_work_end_to_end() {
     assert!(String::from_utf8_lossy(&ver.stdout).starts_with("rune "));
 
     let created = std::process::Command::new(exe)
-        .args(["new", app_dir.to_str().unwrap(), "--rev", rev, "--no-git"])
+        .args(["new", app_dir.to_str().unwrap(), "--rev", rev, "--no-git", "--no-lockfile"])
         .output()
         .unwrap();
     assert!(created.status.success(), "rune new failed: {}", String::from_utf8_lossy(&created.stderr));

@@ -1045,6 +1045,62 @@ fn another_modal_closes_it() {
 
 // ---- accessibility (C-12) ------------------------------------------------
 
+/// Find the accessibility node with this element key, however deeply nested.
+fn a11y_node<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    match value {
+        serde_json::Value::Array(items) => items.iter().find_map(|item| a11y_node(item, key)),
+        serde_json::Value::Object(fields) => {
+            if fields.get("key").and_then(|key| key.as_str()) == Some(key) {
+                return Some(value);
+            }
+            fields.values().find_map(|field| a11y_node(field, key))
+        }
+        _ => None,
+    }
+}
+
+/// C-12/OI-148: the field says it filters a popup list and names that list in
+/// the accessibility tree, on top of the roles and localized labels it had.
+#[test]
+fn the_input_advertises_list_autocomplete_and_controls_the_list() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    with_notes(&mut state);
+    let _tx = opened(&mut state, "read");
+    let mut runtime = Runtime::new(state, crate::view::view, (1100.0, 760.0), Env::new(true, 2.0));
+    runtime.frame(0.0);
+    let json = runtime.accessibility_json();
+    let input = a11y_node(&json, PALETTE_INPUT_KEY).expect("the field is in the a11y tree");
+    // The JSON dump names AccessKit's roles, so the editable combobox is
+    // "editable-combo-box" and the listbox is "list-box".
+    assert_eq!(input["role"].as_str(), Some("editable-combo-box"));
+    assert_eq!(input["name"].as_str(), Some("Command palette"));
+    assert_eq!(input["autoComplete"].as_str(), Some("list"), "the input filters a popup list");
+    assert_eq!(input["controls"], serde_json::json!([PALETTE_LIST_KEY]), "the input names the results list");
+    let list = a11y_node(&json, PALETTE_LIST_KEY).expect("the list is in the a11y tree");
+    assert_eq!(list["role"].as_str(), Some("list-box"));
+    assert_eq!(list["name"].as_str(), Some("Results"));
+}
+
+/// With no list drawn there is no `aria-controls` target, just as there is no
+/// expanded state; the autocomplete mode still describes the field's behavior.
+#[test]
+fn an_empty_palette_does_not_name_a_missing_list() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    with_notes(&mut state);
+    let _tx = opened(&mut state, "");
+    // No group and no search row: the palette draws its empty state, not a list.
+    state.palette.shown.clear();
+    let mut runtime = Runtime::new(state, crate::view::view, (1100.0, 760.0), Env::new(true, 2.0));
+    runtime.frame(0.0);
+    let json = runtime.accessibility_json();
+    let input = a11y_node(&json, PALETTE_INPUT_KEY).expect("the field is in the a11y tree");
+    assert_eq!(input["autoComplete"].as_str(), Some("list"));
+    assert!(input.get("controls").is_none(), "no listbox to control");
+    assert!(a11y_node(&json, PALETTE_LIST_KEY).is_none(), "the empty state drew no list");
+}
+
 #[test]
 fn the_input_and_list_carry_the_combobox_roles() {
     let temp = TempDir::new().unwrap();

@@ -15,8 +15,9 @@
 use std::ops::Range;
 
 use lmdv_edit::{
-    BlockEditKind, BlockKind, EditorSession, LinePrefix, delete_line, duplicate_line, goto_line, insert_link,
-    move_line_down, move_line_up, select_line, set_heading, toggle_comment, toggle_line_prefix, toggle_wrap,
+    BlockEditKind, BlockKind, EditorSession, LinePrefix, MarkdownContext, cached_markdown_context, delete_line,
+    duplicate_line, goto_line, insert_link, move_line_down, move_line_up, select_line, set_heading, toggle_comment,
+    toggle_line_prefix, toggle_wrap,
 };
 use rune::{Key, KeyEvent, TextEdit, TextStyle, Tx};
 
@@ -406,23 +407,32 @@ pub fn slash_items(query: &str) -> Vec<SlashItem> {
 }
 
 /// The format bar's state for a tab.
+///
+/// The inline markers are selection-local and stay lexical; the `code` button
+/// reads the bounded syntax tree so a caret inside a fence, an indented block
+/// or an inline span shows as code without a per-frame whole-document parse
+/// (OI-061). The tree is cached by the field's revision, so an edit cannot
+/// leave the pressed state behind the caret.
 pub fn format_state(tab: &Tab) -> FormatState {
     let Some(editor) = tab.view.editor.as_ref() else { return FormatState::default() };
-    let (text, selection) = match format_context(editor) {
+    let (field, selection) = match format_context(editor) {
         Some(context) => context,
         None => return FormatState::default(),
     };
+    let text = &field.text;
     let (from, to) = (selection.start.min(text.len()), selection.end.min(text.len()));
     let (from, to) = if from <= to { (from, to) } else { (to, from) };
     let line_start = text[..from].rfind('\n').map_or(0, |offset| offset + 1);
     let line_end = text[from..].find('\n').map_or(text.len(), |offset| from + offset);
     let line = &text[line_start..line_end];
+    let context = cached_markdown_context(editor.revision(), text, from);
+    let probe = syntax_probe(from, text.len());
 
     let mut state = FormatState {
         bold: marker_active(text, from, to, "**"),
         italic: marker_active(text, from, to, "*"),
         strike: marker_active(text, from, to, "~~"),
-        code: marker_active(text, from, to, "`"),
+        code: marker_active(text, from, to, "`") || context.in_code(probe),
         heading: heading_level(text, line_start, line_end),
         ..FormatState::default()
     };
@@ -437,17 +447,24 @@ pub fn format_state(tab: &Tab) -> FormatState {
     state
 }
 
-/// The block's text and selection for the format bar: the block field in block
-/// mode, the single field otherwise.
-fn format_context(editor: &EditorSession) -> Option<(&str, Range<usize>)> {
+/// The block's field and selection for the format bar: the block field in
+/// block mode, the single field otherwise. The field's identity and the
+/// session revision key the cached syntax tree.
+fn format_context(editor: &EditorSession) -> Option<(&TextEdit, Range<usize>)> {
     if let Some(block) = editor.block_editor() {
         let index = editor.active_block().unwrap_or(0);
         let block = block.block(index)?;
         let (from, to) = block.edit.range();
-        return Some((&block.edit.text, from..to));
+        return Some((&block.edit, from..to));
     }
     let (from, to) = editor.edit.range();
-    Some((&editor.edit.text, from..to))
+    Some((&editor.edit, from..to))
+}
+
+/// A caret byte for a context query. A caret at the very end of the field has
+/// to probe the last byte, which still belongs to the block it just left.
+fn syntax_probe(caret: usize, len: usize) -> usize {
+    if caret >= len { len.saturating_sub(1) } else { caret }
 }
 
 /// Runs one format action on a field.
@@ -812,28 +829,138 @@ impl WindowState {
         EditorMetrics::for_reader(self.shared().prefs().reader.size)
     }
 
-    /// `Ctrl+D`: select the word at the caret, then its next occurrence (E-29).
-    ///
-    /// The pinned Rune field has one selection, so this moves that selection
-    /// instead of adding a cursor; `Ctrl+Alt+↑/↓` (add cursor) needs Rune's
-    /// multi-cursor model and is recorded as a gap.
+    /// `Ctrl+D` (E-29): select the word under the caret, then add a selection
+    /// on each following occurrence. Rune owns the caret set, the edits across
+    /// carets and the painting; lmdv only forwards the key and reveals the
+    /// primary selection. The first press is a selection-only change, so it is
+    /// not an undo step and does not dirty the document.
     pub(crate) fn select_next_occurrence_cmd(&mut self, tx: &mut Tx) -> bool {
         let found = {
             let Some(editor) = self.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()) else { return false };
+            let apply = |edit: &mut TextEdit| edit.add_next_occurrence();
             if editor.block_mode_active() {
                 let Some(index) = editor.active_block() else { return false };
-                editor
-                    .block_editor_mut()
-                    .and_then(|blocks| blocks.block_mut(index))
-                    .is_some_and(lmdv_edit::select_next_occurrence)
+                editor.block_editor_mut().and_then(|blocks| blocks.block_mut(index)).is_some_and(apply)
             } else {
-                lmdv_edit::select_next_occurrence(&mut editor.edit)
+                apply(&mut editor.edit)
             }
         };
         if found {
             self.scroll_to_editor_selection(tx);
+            tx.instant();
         }
         found
+    }
+
+    /// `Ctrl+Alt+↑/↓` (E-29): add a caret one visual line above/below the edge
+    /// caret. No text changes, so nothing is journalled or committed; Rune
+    /// paints the secondary caret and applies later typing/backspace/undo at
+    /// every caret. `None` uses Rune's logical newline-column step, which is
+    /// exact for unwrapped source lines.
+    pub(crate) fn add_caret_cmd(&mut self, down: bool, tx: &mut Tx) -> bool {
+        let changed = {
+            let Some(editor) = self.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()) else { return false };
+            let apply = |edit: &mut TextEdit| {
+                if down { edit.add_caret_below(None) } else { edit.add_caret_above(None) }
+            };
+            if editor.block_mode_active() {
+                let Some(index) = editor.active_block() else { return false };
+                editor.block_editor_mut().and_then(|blocks| blocks.block_mut(index)).is_some_and(apply)
+            } else {
+                apply(&mut editor.edit)
+            }
+        };
+        if changed {
+            tx.instant();
+        }
+        changed
+    }
+
+    /// The lmdv-spelled word at a field byte offset, as a field-local range and
+    /// its text. Rune's spell checker is a stub on Linux, so the field menu's
+    /// [`rune::FieldMenuContext::misspelled_word`] is empty; the worker-checked
+    /// ranges in [`crate::editor::SpellCheck`] (whole-source bytes) are the
+    /// source of truth. Returns `None` for a stale revision or a correct word.
+    ///
+    /// Wired by view.rs' `El::field_menu` hook; the `allow` keeps the crate
+    fn spell_menu_word_at(&self, byte: usize) -> Option<(usize, usize, String)> {
+        let tab = self.active_tab()?;
+        let editor = tab.view.editor.as_ref()?;
+        let check = self.editor.spell.check_for(tab.id)?;
+        if check.revision != editor.revision() {
+            return None;
+        }
+        let (field_text, base) = if editor.block_mode_active() {
+            let index = editor.active_block()?;
+            let block = editor.block_editor()?.block(index)?;
+            (block.edit.text.as_str(), block.range.start)
+        } else {
+            (editor.text(), 0)
+        };
+        let target = base + byte;
+        let range = check.ranges.iter().find(|range| range.start <= target && target <= range.end)?;
+        let start = range.start.checked_sub(base)?;
+        let end = range.end.checked_sub(base)?;
+        Some((start, end, field_text.get(start..end)?.to_owned()))
+    }
+
+    /// Appends lmdv's Hunspell suggestions to Rune's built-in field menu,
+    /// keeping Cut/Copy/Paste/Select All and any suggestions Rune already
+    /// supplied. `at` is the field byte offset under the secondary press (or
+    /// the caret for a keyboard menu). The ids are `lmdv-suggest-{n}` so Rune
+    /// routes their picks to [`Self::pick_spell_field_menu`] instead of its own
+    /// built-ins.
+    ///
+    /// The view wires `El::field_menu` as:
+    /// `|state, ctx, menu| state.build_spell_field_menu(ctx.hit_offset().unwrap_or(ctx.caret()), menu)`
+    /// and the pick closure passes the same offset.
+    pub(crate) fn build_spell_field_menu(&self, at: usize, menu: rune::PopupMenu) -> rune::PopupMenu {
+        if !self.shared().prefs().editor.spellcheck {
+            return menu;
+        }
+        let Some(dictionary) = self.shared().spell_dictionary() else { return menu };
+        let Some((_, _, word)) = self.spell_menu_word_at(at) else { return menu };
+        let suggestions = dictionary.suggest(&word);
+        if suggestions.is_empty() {
+            return menu;
+        }
+        menu.separator().items(
+            suggestions
+                .into_iter()
+                .enumerate()
+                .map(|(n, suggestion)| rune::PopupItem::new(format!("lmdv-suggest-{n}"), suggestion)),
+        )
+    }
+
+    /// Replaces the misspelled word at `at` with the picked lmdv suggestion as
+    /// one undo step, then syncs the shared document. Returns whether the id
+    /// was one of ours.
+    pub(crate) fn pick_spell_field_menu(&mut self, id: &str, at: usize, tx: &mut Tx) -> bool {
+        let Some(n) = id.strip_prefix("lmdv-suggest-").and_then(|n| n.parse::<usize>().ok()) else {
+            return false;
+        };
+        let Some(dictionary) = self.shared().spell_dictionary() else { return true };
+        let Some((start, end, word)) = self.spell_menu_word_at(at) else { return true };
+        let Some(suggestion) = dictionary.suggest(&word).into_iter().nth(n) else { return true };
+        let replace = |edit: &mut TextEdit| {
+            edit.set_selection(start, end);
+            edit.paste(&suggestion);
+        };
+        let changed = {
+            let Some(editor) = self.active_tab_mut().and_then(|tab| tab.view.editor.as_mut()) else { return true };
+            if editor.block_mode_active() {
+                let Some(index) = editor.active_block() else { return true };
+                editor.apply_block(index, lmdv_edit::BlockEditKind::Discrete, replace).is_some()
+            } else {
+                replace(&mut editor.edit);
+                true
+            }
+        };
+        if changed {
+            self.editor_changed();
+        }
+        tx.instant();
+        true
     }
 
     /// Applies one format action and syncs the document.
@@ -858,7 +985,13 @@ impl WindowState {
         let Some(tab) = self.active_tab() else { return };
         let Some(editor) = tab.view.editor.as_ref() else { return };
         let selection = editor.selection();
-        let found = if selection.is_empty() { slash_query_at(editor.text(), selection.end) } else { None };
+        let found = if selection.is_empty() {
+            let text = editor.text();
+            let context = cached_markdown_context(editor.revision(), text, selection.end);
+            slash_query_at_in(text, selection.end, &context)
+        } else {
+            None
+        };
         let Some((start, query)) = found else {
             if let Some(tab) = self.active_tab_mut() {
                 tab.view.slash_menu = SlashMenu::default();
@@ -1161,6 +1294,11 @@ impl WindowState {
         if event.is_command('d') && !event.mods.alt && !event.mods.shift {
             return self.select_next_occurrence_cmd(tx);
         }
+        // E-29: Ctrl+Alt (not plain Alt, which moves/duplicates lines) adds a
+        // caret on the neighbouring line. Rune owns the caret set and paints it.
+        if event.mods.ctrl && event.mods.alt && !event.mods.shift && matches!(event.key, Key::Up | Key::Down) {
+            return self.add_caret_cmd(event.key == Key::Down, tx);
+        }
         if event.key == Key::Function(3) {
             if event.mods.shift {
                 self.find_prev_cmd(tx);
@@ -1224,6 +1362,9 @@ impl WindowState {
         }
         if event.is_command('d') && !event.mods.alt && !event.mods.shift {
             return self.select_next_occurrence_cmd(tx);
+        }
+        if event.mods.ctrl && event.mods.alt && !event.mods.shift && matches!(event.key, Key::Up | Key::Down) {
+            return self.add_caret_cmd(event.key == Key::Down, tx);
         }
         if event.key == Key::Function(3) {
             if event.mods.shift {
@@ -1329,7 +1470,18 @@ fn is_format_chord(event: &KeyEvent) -> bool {
 
 /// Matches `/query` at the start of the caret's line, outside fenced and
 /// indented code and HTML blocks (E-28).
+///
+/// The gating reads a bounded [`MarkdownContext`] instead of walking every
+/// line before the caret: a frame cannot afford a whole-document scan, and a
+/// stale `MdDoc` would lag the caret (OI-061). `refresh_slash_menu` passes the
+/// revision-cached tree; tests pass a freshly built one.
+#[cfg(test)]
 fn slash_query_at(text: &str, caret: usize) -> Option<(usize, String)> {
+    let context = lmdv_edit::markdown_context(text, caret, lmdv_edit::CONTEXT_WINDOW_BYTES);
+    slash_query_at_in(text, caret, &context)
+}
+
+fn slash_query_at_in(text: &str, caret: usize, context: &MarkdownContext) -> Option<(usize, String)> {
     let caret = caret.min(text.len());
     let line_start = text[..caret].rfind('\n').map_or(0, |offset| offset + 1);
     let before = &text[line_start..caret];
@@ -1346,34 +1498,11 @@ fn slash_query_at(text: &str, caret: usize) -> Option<(usize, String)> {
     if line.trim_start().starts_with('<') {
         return None;
     }
-    let mut fence: Option<(char, usize)> = None;
-    for previous in text[..line_start].split('\n') {
-        let trimmed = previous.trim_start();
-        if let Some((marker, run)) = fence {
-            let closing = trimmed.chars().take_while(|&ch| ch == marker).count();
-            if closing >= run && trimmed[closing..].trim().is_empty() {
-                fence = None;
-            }
-        } else if let Some(open) = fence_open(trimmed) {
-            fence = Some(open);
-        }
-    }
-    if fence.is_some() {
+    let probe = syntax_probe(caret, text.len());
+    if context.in_code(probe) || context.in_html(probe) {
         return None;
     }
     Some((line_start + indent, query.to_owned()))
-}
-
-fn fence_open(trimmed: &str) -> Option<(char, usize)> {
-    let marker = trimmed.chars().next()?;
-    if marker != '`' && marker != '~' {
-        return None;
-    }
-    let run = trimmed.chars().take_while(|&ch| ch == marker).count();
-    if run < 3 {
-        return None;
-    }
-    Some((marker, run))
 }
 
 fn plain_line_number(spec: &str) -> Option<usize> {

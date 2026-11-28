@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -16,14 +16,14 @@ use lmdv_edit::spell::{Availability, Spell};
 use lmdv_io::instance::{InstanceServer, LaunchRequest};
 use lmdv_io::store::{
     PositionTable, RECENTS_MAX, Recent, SessionSnapshot, StateFile, StoreHandle, StoreIssue, StorePatch, UiPrefs,
-    WindowSession, load_positions_reported, load_prefs_reported, load_recents_reported, load_ui_reported,
+    WindowSession,
 };
 use lmdv_io::watch::{DocWatcher, FileEvent};
 use lmdv_io::{AppDirs, DirsIssue, Launch, ReadError};
 use lmdv_md::MdDoc;
 use rune::{Waker, WindowPlacement};
 
-use crate::jobs::{JobHub, WorkerMailbox};
+use crate::jobs::{JobHub, StartupState, WorkerMailbox};
 use crate::transfer::{TransferMsg, TransferToken};
 use crate::windows::{
     OpenedWindow, RouteAction, RouteDecision, RouteQuery, WakeSet, WindowEntry, WindowHandles, WindowKind,
@@ -157,6 +157,9 @@ pub struct AppShared {
     draft_checked: RefCell<BTreeSet<DocumentId>>,
     /// Startup fallbacks and ignored state files; the first window shows them.
     startup: RefCell<StartupWarnings>,
+    /// The one-shot worker result for prefs/positions/recents/ui (OI-001).
+    /// Taken by [`Self::wait_startup`] before the first frame; `None` afterwards.
+    startup_rx: RefCell<Option<Receiver<StartupState>>>,
     /// The document watcher's setup error is shown once, not every frame (OI-073).
     watch_error_shown: Cell<bool>,
     /// Documents whose large-document warning has already been shown (OI-010).
@@ -209,42 +212,44 @@ struct StartupWarnings {
 }
 
 impl AppShared {
-    /// Loads preferences and recents and starts the store writer.
+    /// Loads preferences, recents, positions and UI state and starts the store
+    /// writer.
     ///
-    /// This runs before the first frame, not in a handler or a view. All
-    /// subsequent disk work goes through `crate::jobs`. A directory that
-    /// cannot be created degrades the app to a session without persistence; it
-    /// never fails startup.
+    /// The state reads run on a worker ([`JobHub::load_startup`]) and this
+    /// constructor waits for them, so every caller sees the fully loaded values
+    /// before the first frame. The real entry point uses
+    /// [`Self::start_reported`] plus [`Self::wait_startup`] so the launch's other
+    /// setup overlaps the reads. A directory that cannot be created degrades
+    /// the app to a session without persistence; it never fails startup.
     pub fn start(dirs: AppDirs) -> Rc<Self> {
-        Self::start_reported(dirs, Vec::new())
+        let shared = Self::start_reported(dirs, Vec::new());
+        shared.wait_startup();
+        shared
     }
 
     /// [`Self::start`] with the folder-resolution issues the launch saw.
     ///
-    /// The reported loaders keep a future-schema or foreign-app state file on
-    /// disk: the writer starts with those files read-only, and the first
-    /// window shows one notice for every fallback or ignored file (OI-007,
-    /// OI-012).
+    /// Starts the startup IO job but leaves the in-memory state at its defaults
+    /// until [`Self::wait_startup`] lands the result. The reported loaders keep
+    /// a future-schema or foreign-app state file on disk: the writer is told
+    /// about those files when the result lands, before any patch is queued,
+    /// and the first window shows one notice for every fallback or ignored
+    /// file (OI-007, OI-012).
     pub fn start_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>) -> Rc<Self> {
-        let prefs = load_prefs_reported(&dirs);
-        let recents = load_recents_reported(&dirs);
-        let positions = load_positions_reported(&dirs);
-        let ui = load_ui_reported(&dirs);
-        let store_issues: Vec<StoreIssue> =
-            [prefs.issue, recents.issue, positions.issue, ui.issue].into_iter().flatten().collect();
-        let (store, store_error) = match StoreHandle::start_with(dirs.clone(), &store_issues) {
+        let startup_rx = JobHub::new().load_startup(dirs.clone());
+        let (store, store_error) = match StoreHandle::start(dirs.clone()) {
             Ok(store) => (Some(store), None),
             Err(error) => (None, Some(format!("settings cannot be saved: {error}"))),
         };
         Rc::new(Self {
             dirs,
-            prefs: RefCell::new(prefs.value),
-            ui: RefCell::new(ui.value),
+            prefs: RefCell::new(Prefs::default()),
+            ui: RefCell::new(UiPrefs::default()),
             docs: RefCell::new(DocumentRegistry::new()),
             windows: RefCell::new(WindowRegistry::new()),
-            recents: RefCell::new(recents.value),
+            recents: RefCell::new(Vec::new()),
             recents_swept: Cell::new(None),
-            positions: RefCell::new(positions.value),
+            positions: RefCell::new(PositionTable::default()),
             parse: RefCell::new(ParseCache::default()),
             store,
             store_error,
@@ -277,11 +282,46 @@ impl AppShared {
             watch_counts: RefCell::new(BTreeMap::new()),
             watch_inbox: Arc::new(FileEventInbox::default()),
             draft_checked: RefCell::new(BTreeSet::new()),
-            startup: RefCell::new(StartupWarnings { dirs: dirs_issues, store: store_issues, shown: false }),
+            startup: RefCell::new(StartupWarnings { dirs: dirs_issues, store: Vec::new(), shown: false }),
+            startup_rx: RefCell::new(Some(startup_rx)),
             watch_error_shown: Cell::new(false),
             large_warned: RefCell::new(BTreeSet::new()),
             spell: RefCell::new(SpellRuntime::default()),
         })
+    }
+
+    /// Lands the startup IO result, if it has not been applied yet.
+    ///
+    /// The real entry point calls this after the launch's other setup, and
+    /// [`Self::start`] calls it immediately. Everything the first frame reads —
+    /// preferences (including the locale), recents, remembered positions and
+    /// the file-browser state — is installed here, and the state files the
+    /// loaders flagged are protected in the writer before its first patch.
+    /// Returns whether a result was applied.
+    pub fn wait_startup(&self) -> bool {
+        let Some(rx) = self.startup_rx.borrow_mut().take() else { return false };
+        let loaded = rx.recv_timeout(Duration::from_secs(10)).unwrap_or_default();
+
+        *self.prefs.borrow_mut() = loaded.prefs;
+        *self.ui.borrow_mut() = loaded.ui;
+        *self.recents.borrow_mut() = loaded.recents;
+        self.recents_swept.set(None);
+        *self.positions.borrow_mut() = loaded.positions;
+
+        if !loaded.issues.is_empty() {
+            {
+                let mut startup = self.startup.borrow_mut();
+                for issue in &loaded.issues {
+                    if !startup.store.contains(issue) {
+                        startup.store.push(issue.clone());
+                    }
+                }
+            }
+            // No patch can have been queued before the first frame, so the
+            // writer sees the protection first (OI-007).
+            self.protect_store_files(&loaded.issues);
+        }
+        true
     }
 
     /// Marks this process as Rune's headless tooling.
@@ -2035,6 +2075,7 @@ mod tests {
             reason: "read-only file system".to_owned(),
         };
         let shared = AppShared::start_reported(test_support::dirs(&temp), vec![issue]);
+        assert!(shared.wait_startup(), "the startup job answered once");
 
         let notices = shared.take_startup_notices();
         assert_eq!(notices.len(), 1);
@@ -2068,6 +2109,57 @@ mod tests {
             future,
             "the newer version's file is untouched"
         );
+    }
+
+    #[test]
+    fn startup_state_is_loaded_on_a_worker_and_applied_once() {
+        let temp = TempDir::new().unwrap();
+        let dirs = test_support::dirs(&temp);
+        let path = PathBuf::from("/tmp/startup-fixture.md");
+        let mut prefs = Prefs::default();
+        prefs.reader.size = 20;
+        let ui = UiPrefs { tree_root: Some(PathBuf::from("/tmp/startup-tree")), ..UiPrefs::default() };
+        let mut positions = PositionTable::new();
+        positions.remember(&path, &ScrollAnchor { id: "heading".to_owned(), offset: 64.0 }, 7);
+
+        let handle = StoreHandle::start(dirs.clone()).unwrap();
+        handle.patch(StorePatch::Prefs(prefs.clone()));
+        handle.patch(StorePatch::Ui(ui.clone()));
+        handle.patch(StorePatch::Recents(vec![Recent::new(path.clone(), 42)]));
+        handle.patch(StorePatch::Positions(positions.clone()));
+        assert!(handle.flush(Duration::from_secs(2)));
+        drop(handle);
+
+        let shared = AppShared::start_reported(dirs, Vec::new());
+        assert_eq!(shared.prefs().reader.size, 16, "the defaults stand until the worker answers");
+        assert!(shared.recents().is_empty());
+        assert!(shared.wait_startup(), "the startup job landed");
+        assert_eq!(shared.prefs().reader.size, 20);
+        assert_eq!(shared.ui().tree_root.as_deref(), Some(std::path::Path::new("/tmp/startup-tree")));
+        assert_eq!(shared.recents()[0].path, path);
+        assert_eq!(shared.position_for(&path).map(|anchor| anchor.offset), Some(64.0));
+        assert!(!shared.wait_startup(), "the one-shot result is consumed once");
+    }
+
+    #[test]
+    fn a_future_schema_file_is_protected_when_the_worker_answer_lands() {
+        let temp = TempDir::new().unwrap();
+        let dirs = test_support::dirs(&temp);
+        std::fs::create_dir_all(&dirs.config).unwrap();
+        let future = r#"{"schema": 99, "app": "lmdv", "data": {"theme": "dark"}}"#;
+        std::fs::write(dirs.prefs_path(), future).unwrap();
+
+        let shared = AppShared::start_reported(dirs, Vec::new());
+        assert!(shared.wait_startup());
+        assert!(
+            shared.take_startup_notices().iter().any(|notice| notice.contains("prefs.json")),
+            "the worker reported the ignored file"
+        );
+        let mut prefs = shared.prefs().clone();
+        prefs.print_break_h1 = true;
+        assert!(shared.set_prefs(prefs));
+        assert!(shared.flush_store(Duration::from_secs(2)));
+        assert_eq!(std::fs::read_to_string(shared.dirs().prefs_path()).unwrap(), future);
     }
 
     fn spell_fixture() -> Availability {

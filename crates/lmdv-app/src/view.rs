@@ -94,6 +94,12 @@ pub(crate) fn view(state: &WindowState, cx: &mut Cx<WindowState>) -> El {
         .titlebar_inset(cx.titlebar_inset())
         .frame_inset(8.0)
         .toolbar_in_panel()
+        // F-20/OI-179: the current kit grips are real Tab stops with a visible
+        // focus ring; plain arrows step 16 pt, Shift+arrows 64 pt. Their names
+        // come from the six catalogs rather than the kit's English defaults.
+        .grip_tab_stop(true)
+        .grip_step(16.0, 64.0)
+        .grip_labels(lmdv_i18n::t!("pane.resizeTree"), lmdv_i18n::t!("pane.resizeToc"))
         .hide_sidebar_toggle()
         // F-19: a folded pane peeks over the text instead of docking.
         .sidebar_peek(SidebarPeek::new())
@@ -486,6 +492,13 @@ fn share_menu(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) -> El {
 
 fn toolbar(state: &WindowState, cx: &Cx<WindowState>, share: El, kit: &Kit) -> Toolbar {
     let c = &kit.c;
+    // CSD (ADR-028): Rune draws the caption buttons over this band on
+    // GNOME/Wayland. Both fields are zero where the native frame stays and in
+    // headless Linux, so this reserves nothing there and keeps today's content
+    // geometry intact. `titlebar_inset()` clears macOS' traffic lights, which
+    // SplitView already handles, so only the difference is ours to reserve.
+    let insets = cx.chrome_insets();
+    let lights = cx.titlebar_inset();
     let title = state.active_tab().map(Tab::full_title).unwrap_or_else(|| "lmdv".to_owned());
     let open = IconButton::new(&icons::FOLDER)
         .variant(IconButtonVariant::GhostMuted)
@@ -626,7 +639,15 @@ fn toolbar(state: &WindowState, cx: &Cx<WindowState>, share: El, kit: &Kit) -> T
     // fixed-width slot pinned across the band (the kit has no flexible middle),
     // so a narrow window drops it rather than let it run under the controls;
     // the native frame still names the document (W-09).
-    let mut bar = Toolbar::new().leading(text("lmdv").font(TextStyle::new(14.0, 600.0)).color(c.text_muted));
+    let mut bar = Toolbar::new();
+    // A desktop `button-layout` that puts Close/Max/Min on the left needs room
+    // at the band's leading edge, keeping the tree button and centred title
+    // clear of the caption cluster. 4 pt is the leading row's gap.
+    if insets.leading > lights {
+        bar =
+            bar.leading(el().key("csd-leading-inset").w((insets.leading - lights - 4.0).max(0.0)).h(1.0).a11y_hidden());
+    }
+    bar = bar.leading(text("lmdv").font(TextStyle::new(14.0, 600.0)).color(c.text_muted));
     if separators {
         bar = bar.title(title);
     }
@@ -651,6 +672,14 @@ fn toolbar(state: &WindowState, cx: &Cx<WindowState>, share: El, kit: &Kit) -> T
     }
     if state.saved_flash() {
         bar = bar.trailing(text(lmdv_i18n::t!("msg.saved")).font(kit.ty.small).color(c.success.fg).key("saved-flash"));
+    }
+    // CSD: Rune's caption buttons are drawn over the window's trailing edge.
+    // The kit's Toolbar reserves only its 12 pt PAD; reserve the rest so
+    // Settings, Outline, Help, Aa, Save, Share and Open keep their own presses
+    // and never sit under a caption button. 16 = PAD (12) + the row's gap (4).
+    // The bare spacer stays part of the `.window_drag()` band.
+    if insets.trailing > 16.0 {
+        bar = bar.trailing(el().key("csd-trailing-inset").w(insets.trailing - 16.0).h(1.0).a11y_hidden());
     }
     bar
 }
@@ -745,6 +774,13 @@ fn tab_band(state: &WindowState, cx: &Cx<WindowState>, kit: &Kit, layer: &mut Ve
             } else {
                 None
             });
+            // W-05 (ADR-028): with one reading tab the strip's slot is part of
+            // the window's drag region, so pressing it moves the window and a
+            // double click zooms. The kit keeps the close button, hover, focus
+            // and context menu; an editor, several tabs and a pinned export
+            // keep the tab's own click/reorder/tear handlers instead.
+            let item =
+                item.window_drag(one_tab && tab.view.mode == Mode::Viewer && state.export_pinned_document().is_none());
             let item = if let Some(pulse) = pulse { item.pulse(pulse.seq) } else { item };
             // T-03: after a save the tab's leading mark is a check for the
             // flash's 1.4 s; typing takes it away at once (the dirty dot). The
@@ -1365,6 +1401,16 @@ fn source_editor(
         state.editor_spans(tab, &editor.edit, &theme, None, spell_underline)
     };
     state.publish_editor_top(cx, &measured_spans, source_font);
+    // OI-102: leave the row's live `on_layout` callback everything it needs to
+    // re-measure a newly visible block after a virtual remount, in the frame
+    // Rune deliberately skips `view`. All are copy values; the viewport's y only
+    // changes on resize, which already re-runs the view.
+    state.editor.row_probe.set(block_mode.then_some(crate::editor::scroll_sync::RowProbe {
+        font: source_font,
+        theme,
+        underline: spell_underline,
+        viewport_y: cx.layout(SOURCE_SCROLL_KEY).map_or(0.0, |view| view[1]),
+    }));
     let field = if block_mode {
         el()
     } else {
@@ -1377,6 +1423,15 @@ fn source_editor(
             .on_edit(|state: &mut WindowState| state.active_editor_edit())
             .on_input_change(|state: &mut WindowState, _| state.editor_changed())
             .on_input_key(|state: &mut WindowState, event, tx| state.editor_key(event, tx))
+            // OI-174: append spelling suggestions to Rune's built-in field menu.
+            .field_menu(
+                |state: &mut WindowState, ctx, menu| {
+                    state.build_spell_field_menu(ctx.hit_offset().unwrap_or(ctx.caret()), menu)
+                },
+                |state: &mut WindowState, id, ctx, tx| {
+                    state.pick_spell_field_menu(id, ctx.hit_offset().unwrap_or(ctx.caret()), tx);
+                },
+            )
             // E-36: a picture on the clipboard saves into `assets/`; text
             // falls through to the field's own paste.
             .on_input_paste(|state: &mut WindowState, content, tx| state.editor_paste_content(content, tx))
@@ -1575,8 +1630,24 @@ fn block_field_row(
         .w_full()
         .spans(spans)
         .pb(crate::block_ui::BLOCK_ROW_GAP)
+        // OI-102: measure the row where layout put it, including after a
+        // virtual remount in a commit that skips `view`. `live_only` keeps this
+        // from re-running the view on every scroll frame.
+        .on_layout_tx(move |state: &mut WindowState, rect, tx| {
+            state.note_block_row_layout(index, rect);
+            tx.live_only();
+        })
         .on_edit(move |state: &mut WindowState| state.active_block_edit(index))
         .on_input_change(move |state: &mut WindowState, tx| state.block_changed(index, tx))
+        // OI-174: spelling suggestions in block mode too.
+        .field_menu(
+            |state: &mut WindowState, ctx, menu| {
+                state.build_spell_field_menu(ctx.hit_offset().unwrap_or(ctx.caret()), menu)
+            },
+            |state: &mut WindowState, id, ctx, tx| {
+                state.pick_spell_field_menu(id, ctx.hit_offset().unwrap_or(ctx.caret()), tx);
+            },
+        )
         .on_input_key(move |state: &mut WindowState, event, tx| {
             state.block_key(index, event, tx) || state.editor_key(event, tx)
         })
@@ -2057,6 +2128,11 @@ fn editor_dialog(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
         crate::editor::Prompt::LeaseHeld { holder } => {
             lmdv_i18n::t!("prompt.leaseBody", "n" => holder.window.0)
         }
+        // OI-051: L-07's honest "not a Markdown document" question, now as a
+        // modal. The full path is shown so the hand-off is explicit.
+        crate::editor::Prompt::OpenExternal { path } => {
+            crate::links::external_open_question(&path.display().to_string())
+        }
     };
     let mut actions = row().key("prompt-actions").w_full().gap(8.0).justify_end();
     match prompt {
@@ -2184,6 +2260,17 @@ fn editor_dialog(state: &WindowState, kit: &Kit, layer: &mut Vec<El>) {
         crate::editor::Prompt::LeaseHeld { .. } => {
             actions = actions.child(
                 Button::new(lmdv_i18n::t!("prompt.ok"))
+                    .variant(ButtonVariant::Contrast)
+                    .on_press_tx(|state: &mut WindowState, tx: &mut Tx| state.prompt_primary(tx))
+                    .build(kit)
+                    .key("prompt-primary"),
+            );
+        }
+        crate::editor::Prompt::OpenExternal { .. } => {
+            // The only hand-off is this explicit Open; Cancel, Escape and the
+            // backdrop all run `prompt_cancel` and leave the file untouched.
+            actions = actions.child(
+                Button::new(lmdv_i18n::t!("msg.openFile"))
                     .variant(ButtonVariant::Contrast)
                     .on_press_tx(|state: &mut WindowState, tx: &mut Tx| state.prompt_primary(tx))
                     .build(kit)
@@ -3023,6 +3110,14 @@ pub fn scene_reader(state: &mut WindowState) {
     state.outline_filter.replace_text("");
     state.ui.notice = None;
     state.ui.help = None;
+}
+
+/// OI-051's modal ask before a non-Markdown local link is handed to the
+/// desktop. The path is synthetic: a scene never touches the filesystem.
+pub fn scene_external_open(state: &mut WindowState) {
+    scene_reader(state);
+    state.editor.prompt =
+        Some(crate::editor::Prompt::OpenExternal { path: std::path::PathBuf::from("/home/you/Documents/manual.pdf") });
 }
 
 /// The reader in the sepia palette (J-01): the scheme reaches the chrome, the
@@ -4458,5 +4553,94 @@ mod tests {
             a11y(&tree, &key).and_then(|node| node.get("description")).and_then(|value| value.as_str()),
             Some("Needs attention")
         );
+    }
+
+    // ---- Window chrome and the final modal (ADR-028, W-05, OI-051) --------
+
+    #[test]
+    fn the_pane_grips_are_focusable_with_localized_names() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        let elements = runtime.elements();
+        for (key, label) in
+            [("sidebar-grip", lmdv_i18n::t!("pane.resizeTree")), ("inspector-grip", lmdv_i18n::t!("pane.resizeToc"))]
+        {
+            let grip = by_key(&elements, key);
+            assert_eq!(grip.role, "separator", "{key} keeps its separator role");
+            assert!(grip.focusable, "{key} is a Tab stop");
+            assert!((grip.opacity - 1.0).abs() < 0.001, "{key} keeps a visible ring, no opacity dim");
+            assert_eq!(grip.label.as_deref(), Some(label), "{key} uses the app's catalog name");
+        }
+    }
+
+    #[test]
+    fn a_lone_reading_tab_drags_the_window_but_multiple_tabs_keep_selecting() {
+        let temp = TempDir::new().unwrap();
+
+        let mut state = window(&temp);
+        scene_reader(&mut state);
+        let lone = format!("t-{}", tab_key(state.active_tab().expect("a tab").id));
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let (x, y) = runtime.find(&lone).expect("the lone tab slot");
+        runtime.pointer_move(x, y);
+        runtime.pointer_down(x, y);
+        runtime.frame(0.0);
+        runtime.pointer_move(x + 12.0, y);
+        runtime.frame(0.0);
+        assert_eq!(
+            runtime.take_titlebar_action(),
+            Some(rune::TitlebarAction::Drag),
+            "the only reading tab moves the window"
+        );
+        runtime.pointer_up(x + 12.0, y);
+        runtime.frame(0.0);
+
+        let mut state = window(&temp);
+        scene_tabs(&mut state);
+        let front = state.active_tab().map(|tab| tab.id).expect("a front tab");
+        let behind = state.tabs().iter().find(|tab| tab.id != front).expect("another tab").id;
+        let key = format!("t-{}", tab_key(behind));
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let (x, y) = runtime.find(&key).expect("a background tab slot");
+        runtime.pointer_move(x, y);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert_eq!(runtime.take_titlebar_action(), None, "several tabs do not drag the window");
+        assert_eq!(runtime.state.active_tab().map(|tab| tab.id), Some(behind), "the tab still selects");
+    }
+
+    #[test]
+    fn the_external_open_dialog_asks_before_the_hand_off() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        scene_external_open(&mut state);
+        let title = state.prompt().expect("the prompt").title().to_owned();
+        let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(true, 1.0));
+        runtime.frame(0.0);
+        runtime.frame(0.0);
+        let tree = runtime.accessibility_json();
+        let dialog = a11y(&tree, "editor-dialog").expect("the modal dialog");
+        assert_eq!(dialog["role"], "dialog");
+        assert_eq!(dialog["name"].as_str(), Some(title.as_str()));
+        let body = dialog["description"].as_str().expect("the dialog's body");
+        assert!(body.contains("manual.pdf"), "the body names the file: {body}");
+        assert!(body.contains("Open externally?"), "OI-051 asks before handing off: {body}");
+        assert_eq!(a11y(&tree, "prompt-primary").and_then(|node| node["name"].as_str()), Some("Open"));
+        assert_eq!(a11y(&tree, "prompt-cancel").and_then(|node| node["name"].as_str()), Some("Cancel"));
+
+        let (x, y) = runtime.find("prompt-cancel").expect("the Cancel button");
+        runtime.pointer_move(x, y);
+        runtime.pointer_down(x, y);
+        runtime.pointer_up(x, y);
+        runtime.frame(0.0);
+        assert!(runtime.state.prompt().is_none(), "Cancel closes the ask without a hand-off");
     }
 }

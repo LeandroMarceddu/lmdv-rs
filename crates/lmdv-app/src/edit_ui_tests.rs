@@ -1,6 +1,9 @@
 //! P3-03 integration: the find/replace bar, format bar, `/` menu, go-to-line
 //! and the editor keymap.
 
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
 use rune::{ElementInfo, Env, Key, KeyEvent, Mods, Runtime, Tx};
 use tempfile::TempDir;
 
@@ -438,8 +441,12 @@ fn the_slash_panel_anchors_below_the_caret() {
     assert!((menu.rect[3] - 1.0) > 0.0);
 }
 
+fn caret_list(state: &WindowState) -> Vec<rune::Caret> {
+    state.active_tab().and_then(|tab| tab.view.editor.as_ref()).map(|editor| editor.edit.carets()).unwrap_or_default()
+}
+
 #[test]
-fn ctrl_d_selects_the_word_then_the_next_occurrence() {
+fn ctrl_d_selects_the_word_then_adds_the_next_occurrence() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
     state.open_synthetic("Next", "one budget two budget three\n");
@@ -448,9 +455,88 @@ fn ctrl_d_selects_the_word_then_the_next_occurrence() {
     state.active_editor_edit().set_caret(6);
     assert!(state.editor_key(&command('d'), &mut tx));
     assert_eq!(selection(&state), 4..10, "the caret's word");
+    assert_eq!(caret_list(&state).len(), 1);
     assert!(state.editor_key(&command('d'), &mut tx));
-    assert_eq!(selection(&state), 15..21, "the next occurrence");
+    assert_eq!(selection(&state), 4..10, "the primary selection stays put");
+    let found = caret_list(&state);
+    assert_eq!(found.len(), 2, "E-29: the next occurrence is a second selection");
+    assert_eq!(found[1].range(), (15, 21));
     assert_eq!(text(&state), "one budget two budget three\n", "a selection-only command");
+}
+
+#[test]
+fn ctrl_alt_up_down_adds_carets_without_editing_text() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Carets", "alpha\nbeta\ngamma\n");
+    enter_editor(&mut state);
+    let mut tx = Tx::default();
+    state.active_editor_edit().set_caret(2); // inside `alpha`
+    let down = KeyEvent { key: Key::Down, mods: Mods { ctrl: true, alt: true, ..Mods::default() } };
+    assert!(state.editor_key(&down, &mut tx));
+    let found = caret_list(&state);
+    assert_eq!(found.len(), 2, "one secondary caret below");
+    assert!(found[1].is_empty(), "a collapsed caret");
+    assert!(found[1].focus >= 6 && found[1].focus <= 11, "on the `beta` line");
+    // A second press extends to the third line; Escape's single-caret leave
+    // gesture is unaffected because no text changed.
+    assert!(state.editor_key(&down, &mut tx));
+    assert_eq!(caret_list(&state).len(), 3);
+    assert_eq!(text(&state), "alpha\nbeta\ngamma\n");
+    assert!(!state.active_tab().expect("the tab").view.dirty, "carets alone do not dirty the document");
+}
+
+#[test]
+fn the_field_menu_appends_lmdv_spelling_suggestions_and_replaces_the_word() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/spell/system");
+    let availability = lmdv_edit::spell::Availability {
+        files: lmdv_edit::spell::DictionaryFiles {
+            language: "en_US".to_owned(),
+            aff: root.join("en_US.aff"),
+            dic: root.join("en_US.dic"),
+        },
+        fallback: false,
+    };
+    let dictionary = Arc::new(lmdv_edit::spell::Spell::open(&availability.files).expect("the fixture dictionary"));
+    state.shared().seed_spell(Some(availability), Some(dictionary));
+    state.open_synthetic("Spell", "hello wrld\n");
+    enter_editor(&mut state);
+    let tab = state.active_tab().expect("the tab").id;
+    let mut tx = Tx::default();
+    state.poll(0.0, &mut tx);
+    state.poll(1.0, &mut tx);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while state.editor.spell.ranges(tab).is_none_or(|ranges| ranges.is_empty()) {
+        assert!(Instant::now() < deadline, "the spelling check never answered");
+        state.poll(1.0, &mut tx);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        state.editor.spell.ranges(tab).and_then(|ranges| ranges.first()),
+        Some(&(6..10)),
+        "`wrld` is misspelled"
+    );
+
+    // Rune's built-in items are kept; ours are appended with stable ids.
+    let menu = state.build_spell_field_menu(
+        8,
+        rune::PopupMenu::new()
+            .item(rune::PopupItem::new("cut", "Cut"))
+            .item(rune::PopupItem::new("copy", "Copy"))
+            .item(rune::PopupItem::new("paste", "Paste")),
+    );
+    assert!(menu.find("cut").is_some() && menu.find("copy").is_some() && menu.find("paste").is_some());
+    let picked = (0..8)
+        .map(|n| format!("lmdv-suggest-{n}"))
+        .find(|id| menu.find(id).is_some())
+        .expect("at least one suggestion");
+    assert_eq!(menu.find(&picked).expect("the item").title(), "world");
+
+    assert!(state.pick_spell_field_menu(&picked, 8, &mut tx));
+    assert_eq!(text(&state), "hello world\n", "the pick replaces the word");
+    assert!(!state.pick_spell_field_menu("cut", 8, &mut tx), "native ids are not ours");
 }
 
 #[test]
@@ -756,4 +842,81 @@ fn find_fields_are_single_line_and_the_replace_row_follows_ctrl_h() {
     assert!(
         elements.iter().any(|element| { element.key.as_deref() == Some("find-replace") && element.role == "textbox" })
     );
+}
+
+/// OI-061 proof: the slash gate and the format bar's `code` button read the
+/// same revision-keyed bounded tree. Editing the fence around a fixed `/ta`
+/// line flips both states on the very next refresh; moving the caret into the
+/// fenced body flips the pressed state without any edit at all.
+#[test]
+fn the_syntax_cache_tracks_an_edited_fence_without_lagging_the_caret() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    // "```md\n" at 7..13; the blank fenced line starts at 13; the closing
+    // fence is at 17..21 and "after" starts at 22.
+    state.open_synthetic("Fence", "intro\n\n```md\n\n```\nafter\n");
+    enter_editor(&mut state);
+
+    // A `/ta` typed inside an open fence is not a slash command, and the code
+    // button is pressed at the caret.
+    state.active_editor_edit().set_caret(13);
+    type_source(&mut state, "/ta");
+    assert!(state.slash_menu().is_none(), "the slash menu is gated inside the fence");
+    let inside = crate::edit_ui::format_state(state.active_tab().expect("tab"));
+    assert!(inside.code, "the caret inside a fence reads as code");
+    let inside_text = text(&state);
+
+    // Remove the opening fence line. The very same `/ta` is now plain text:
+    // a refresh must open the menu and release the code button.
+    state.active_editor_edit().set_selection(7, 13);
+    state.active_editor_edit().insert("");
+    state.active_editor_edit().set_caret(10); // just after the `/ta` on the now-plain line
+    state.editor_changed();
+    assert!(state.slash_menu().is_some(), "removing the opener ungates the slash menu");
+    let outside = crate::edit_ui::format_state(state.active_tab().expect("tab"));
+    assert!(!outside.code, "the caret outside the fence is no longer code");
+    let outside_menu = state.slash_menu().is_some();
+    let outside_text = text(&state);
+
+    // Re-open a fence before the line: both states flip back immediately.
+    state.active_editor_edit().set_selection(7, 7);
+    type_source(&mut state, "```md\n");
+    state.active_editor_edit().set_caret(16); // just after the `/ta` inside the fence again
+    state.editor_changed();
+    assert!(state.slash_menu().is_none(), "the re-opened fence gates the menu again");
+    let reopened = crate::edit_ui::format_state(state.active_tab().expect("tab"));
+    assert!(reopened.code, "the re-opened fence presses code again");
+    let reopened_menu = state.slash_menu().is_some();
+    let reopened_text = text(&state);
+
+    let proof = serde_json::json!({
+        "item": "OI-061",
+        "field_revision_keyed": true,
+        "observations": [
+            {
+                "step": "slash_typed_inside_open_fence",
+                "text": inside_text,
+                "slash_menu_open": false,
+                "format_code": inside.code,
+                "format_heading": inside.heading,
+            },
+            {
+                "step": "after_removing_the_opening_fence",
+                "text": outside_text,
+                "slash_menu_open": outside_menu,
+                "format_code": outside.code,
+                "format_heading": outside.heading,
+            },
+            {
+                "step": "after_reopening_the_fence",
+                "text": reopened_text,
+                "slash_menu_open": reopened_menu,
+                "format_code": reopened.code,
+                "format_heading": reopened.heading,
+            },
+        ],
+    });
+    let dir = std::path::Path::new("/tmp/opencode/syntax-cache");
+    std::fs::create_dir_all(dir).expect("proof directory");
+    std::fs::write(dir.join("proof.json"), serde_json::to_string_pretty(&proof).expect("proof json")).expect("proof");
 }

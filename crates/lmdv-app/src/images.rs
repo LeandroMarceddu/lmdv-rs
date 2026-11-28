@@ -14,12 +14,16 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use lmdv_io::PathPolicy;
 use lmdv_render::ImageResolver;
 use rune::Image;
 use rune::Waker;
+
+use crate::jobs::{ImageProbe, ImageProbeKey, JobHub};
 
 /// The most resolved sources remembered per window.
 pub const RESOLVED_CACHE: usize = 512;
@@ -30,6 +34,126 @@ pub const HANDLE_CACHE: usize = 256;
 /// `(document folder, source, outside allowed, source is a URL path)`.
 type ResolveKey = (PathBuf, String, bool, bool);
 
+/// One answered path-policy probe keeps the flags a waiting view needs to
+/// know that it should rebuild and the waker that schedules that poll.
+type ProbeWaiter = (Arc<AtomicBool>, Waker);
+
+/// Process-wide image path probes (OI-049).
+///
+/// `PathPolicy::resolve_asset` stats and canonicalizes files, so the first
+/// resolution of a picture must not happen in the view. Only the real entry
+/// point enables the worker path ([`enable_worker_probes`]); unit tests and
+/// headless scenes (which already block on `Image::wait`) keep the inline
+/// probe, so their single frame stays deterministic.
+/// Set once by the real entry point; tests and headless runs leave it false so
+/// their resolutions stay inline and deterministic.
+static USE_WORKER_PROBES: AtomicBool = AtomicBool::new(false);
+
+#[derive(Default)]
+struct ProbeHub {
+    jobs: JobHub,
+    tx: Option<Sender<ImageProbe>>,
+    rx: Option<Receiver<ImageProbe>>,
+    /// Every probe's answer, including a `None` for a refused or missing file.
+    answered: HashMap<ImageProbeKey, Option<PathBuf>>,
+    /// Keys in flight and the views waiting on each of them.
+    pending: HashMap<ImageProbeKey, Vec<ProbeWaiter>>,
+}
+
+fn probes() -> &'static Mutex<ProbeHub> {
+    static PROBES: OnceLock<Mutex<ProbeHub>> = OnceLock::new();
+    PROBES.get_or_init(|| Mutex::new(ProbeHub::default()))
+}
+
+/// Switches interactive runs to worker-side path probing. Called once, by the
+/// real entry point; tests and headless runs never call it.
+pub(crate) fn enable_worker_probes() {
+    let mut hub = probes().lock().unwrap_or_else(|error| error.into_inner());
+    if hub.tx.is_none() {
+        let (tx, rx) = channel();
+        hub.tx = Some(tx);
+        hub.rx = Some(rx);
+    }
+    USE_WORKER_PROBES.store(true, Ordering::Relaxed);
+}
+
+/// The uncached path policy check, used by headless scenes and tests.
+fn inline_probe(root: &Path, source: &str, allow_outside: bool) -> Option<PathBuf> {
+    PathPolicy::new(root).with_allow_outside(allow_outside).resolve_asset(Path::new(source)).ok().map(|file| file.path)
+}
+
+/// Looks up a normalized source, starting one worker probe on a miss.
+///
+/// A miss answers `None` for this frame; the waiter's flag and waker are
+/// recorded so `poll_probes` can make the view rebuild when the answer lands.
+fn probe_path(
+    root: &Path,
+    source: &str,
+    allow_outside: bool,
+    url_path: bool,
+    dirty: Arc<AtomicBool>,
+    waker: Waker,
+) -> Option<PathBuf> {
+    let mut hub = probes().lock().unwrap_or_else(|error| error.into_inner());
+    // The channel is created on first use, so a test that opts one cache into
+    // worker probing needs no global setup (and cannot change other tests).
+    if hub.tx.is_none() {
+        let (tx, rx) = channel();
+        hub.tx = Some(tx);
+        hub.rx = Some(rx);
+    }
+    let key = ImageProbeKey { root: root.to_path_buf(), source: source.to_owned(), allow_outside, url_path };
+    if let Some(path) = hub.answered.get(&key) {
+        return path.clone();
+    }
+    let waiter = (dirty, waker);
+    if let Some(waiters) = hub.pending.get_mut(&key) {
+        waiters.push(waiter);
+        return None;
+    }
+    // A spawn failure posts an empty answer, so this waiter is always woken.
+    if let Some(tx) = hub.tx.clone() {
+        hub.jobs.probe_image(tx, key.clone());
+    }
+    hub.pending.insert(key, vec![waiter]);
+    None
+}
+
+/// Drains worker answers on the UI thread and wakes the views that asked.
+///
+/// Returns whether an answer landed, so `app::poll` rebuilds at least the
+/// polling window even if its waker was detached.
+pub(crate) fn poll_probes() -> bool {
+    let mut landed = false;
+    loop {
+        let message = {
+            let hub = probes().lock().unwrap_or_else(|error| error.into_inner());
+            match hub.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+                Some(message) => message,
+                None => break,
+            }
+        };
+        let mut hub = probes().lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(waiters) = hub.pending.remove(&message.key) {
+            for (dirty, waker) in waiters {
+                dirty.store(true, Ordering::Relaxed);
+                waker();
+            }
+        }
+        hub.answered.insert(message.key, message.path);
+        landed = true;
+    }
+    landed
+}
+
+/// Forgets every worker answer, so a document or policy change re-probes and a
+/// picture that appeared or disappeared since the first frame is seen again.
+fn clear_probes() {
+    let mut hub = probes().lock().unwrap_or_else(|error| error.into_inner());
+    hub.answered.clear();
+    hub.pending.clear();
+}
+
 /// One window's image state.
 pub struct ImageCacheState {
     cache: rune::ImageCache,
@@ -39,6 +163,14 @@ pub struct ImageCacheState {
     handles: RefCell<HashMap<PathBuf, Image>>,
     /// `(ready, failed)` at the last `refresh`.
     settled: Cell<(usize, usize)>,
+    /// Set by a worker probe that this view asked for; `refresh` turns it into
+    /// a view rebuild, so the resolved path is picked up on the next frame.
+    dirty: Arc<AtomicBool>,
+    /// The same UI waker the decoder uses, for the path probe's answer.
+    waker: Waker,
+    /// Whether path policy checks go to a worker. Off in tests and headless
+    /// scenes, so a single-frame gate never depends on a probe landing.
+    worker_probes: bool,
     /// Block until a picture decodes: headless gates that capture one frame.
     wait: bool,
 }
@@ -49,10 +181,13 @@ impl ImageCacheState {
     /// is only for deterministic headless scenes.
     pub fn new(waker: Waker, wait: bool) -> Self {
         Self {
-            cache: rune::ImageCache::new(waker),
+            cache: rune::ImageCache::new(waker.clone()),
             resolved: RefCell::new(HashMap::new()),
             handles: RefCell::new(HashMap::new()),
             settled: Cell::new((0, 0)),
+            dirty: Arc::new(AtomicBool::new(false)),
+            waker,
+            worker_probes: !wait && USE_WORKER_PROBES.load(Ordering::Relaxed),
             wait,
         }
     }
@@ -105,15 +240,28 @@ impl ImageCacheState {
         let cached = self.resolved.borrow().get(&key).cloned();
         let path = match cached {
             Some(path) => path,
-            None => {
-                let policy = PathPolicy::new(root).with_allow_outside(allow_outside);
-                let path = policy.resolve_asset(Path::new(src)).ok().map(|file| file.path);
+            None if self.wait || !self.worker_probes => {
+                // Headless scenes and tests need the answer in this frame, so
+                // the stat stays inline (headless then blocks on `Image::wait`).
+                let path = inline_probe(root, src, allow_outside);
                 let mut resolved = self.resolved.borrow_mut();
                 if resolved.len() >= RESOLVED_CACHE {
                     resolved.clear();
                 }
                 resolved.insert(key, path.clone());
                 path
+            }
+            None => {
+                // Interactive windows never stat in the view. A miss here is
+                // "not answered yet": do not cache it, or the rebuild after the
+                // worker answers would keep drawing the placeholder.
+                let path = probe_path(root, src, allow_outside, url_path, Arc::clone(&self.dirty), self.waker.clone())?;
+                let mut resolved = self.resolved.borrow_mut();
+                if resolved.len() >= RESOLVED_CACHE {
+                    resolved.clear();
+                }
+                resolved.insert(key, Some(path.clone()));
+                Some(path)
             }
         };
         let path = path?;
@@ -135,6 +283,12 @@ impl ImageCacheState {
     /// Whether a picture became ready or failed since the last call; the view
     /// must rebuild to draw it at its real size or swap in the placeholder.
     pub fn refresh(&self) -> bool {
+        // OI-049: a path policy answer landed while the view was drawing. The
+        // next frame resolves again (now from the worker's cache) and binds the
+        // picture instead of holding the placeholder.
+        if self.dirty.swap(false, Ordering::Relaxed) {
+            return true;
+        }
         let handles = self.handles.borrow();
         let ready = handles.values().filter(|image| image.is_ready()).count();
         let failed = handles.values().filter(|image| image.error().is_some()).count();
@@ -156,10 +310,15 @@ impl ImageCacheState {
     }
 
     /// Forgets every path and handle, for a document or policy change.
+    ///
+    /// The worker answers go too: a picture that appeared, disappeared or
+    /// moved since the first frame must be re-probed under the current policy.
     pub fn clear(&self) {
         self.resolved.borrow_mut().clear();
         self.handles.borrow_mut().clear();
         self.settled.set((0, 0));
+        self.dirty.store(false, Ordering::Relaxed);
+        clear_probes();
     }
 }
 
@@ -229,6 +388,7 @@ pub fn quiet_waker() -> Waker {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::time::{Duration, Instant};
 
     use tempfile::TempDir;
 
@@ -375,5 +535,73 @@ mod tests {
         assert!(images.resolve(temp.path(), "a.png", 32.0, 2.0).is_some());
         assert!(images.resolve(temp.path(), "a.png", 32.0, 2.0).is_some());
         assert_eq!(images.resolved.borrow().len(), 1);
+    }
+
+    /// Waits for *this view's* dirty flag; `poll_probes` is process-wide and
+    /// another test may drain an unrelated answer first.
+    fn wait_for_refresh(images: &mut ImageCacheState) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !images.refresh() {
+            assert!(Instant::now() < deadline, "the probe never woke this view");
+            poll_probes();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn a_worker_probe_answers_off_the_view_and_is_reused_then_invalidated() {
+        let temp = TempDir::new().unwrap();
+        let picture = temp.path().join("a.png");
+        fs::write(&picture, PNG).unwrap();
+        let mut images = state();
+        images.worker_probes = true;
+
+        // The first view frame does not stat: it asks for a probe and draws no
+        // picture yet. A miss is deliberately not cached locally.
+        assert!(images.resolve(temp.path(), "a.png", 32.0, 2.0).is_none());
+        assert!(images.resolved.borrow().is_empty(), "an unanswered probe is not a cached miss");
+
+        wait_for_refresh(&mut images);
+        let image = images.resolve(temp.path(), "a.png", 32.0, 2.0).expect("the worker's path");
+        image.wait().expect("decodes");
+        assert_eq!(images.resolved.borrow().len(), 1);
+
+        // A second view with the same document folder reuses the worker answer
+        // without spawning another probe.
+        let mut second = state();
+        second.worker_probes = true;
+        assert!(second.resolve(temp.path(), "a.png", 32.0, 2.0).is_some());
+
+        // A document/policy change drops the worker answers, so a picture that
+        // appeared since the first frame is picked up on the next one.
+        images.clear();
+        fs::write(&picture, PNG).unwrap();
+        assert!(images.resolve(temp.path(), "a.png", 32.0, 2.0).is_none(), "clearing forces a fresh probe");
+        wait_for_refresh(&mut images);
+        assert!(images.resolve(temp.path(), "a.png", 32.0, 2.0).is_some());
+    }
+
+    #[test]
+    fn a_worker_probe_keeps_the_path_policy() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("docs");
+        fs::create_dir_all(&root).unwrap();
+        // The probe hub is process-wide; make these keys unique so a parallel
+        // test cannot have already cached the same refusal.
+        let id = temp.path().file_name().unwrap().to_string_lossy();
+        let local = format!("../secret-{id}.png");
+        let url = format!("https://example-{id}.test/a.png");
+        let file = format!("file:///etc/passwd-{id}");
+        fs::write(temp.path().join(format!("secret-{id}.png")), PNG).unwrap();
+        let mut images = state();
+        images.worker_probes = true;
+
+        for src in [&local, &url, &file] {
+            assert!(images.resolve(&root, src, 32.0, 2.0).is_none(), "{src} must be refused");
+        }
+        wait_for_refresh(&mut images);
+        for src in [&local, &url, &file] {
+            assert!(images.resolve(&root, src, 32.0, 2.0).is_none(), "{src} stays refused on the cached answer");
+        }
     }
 }

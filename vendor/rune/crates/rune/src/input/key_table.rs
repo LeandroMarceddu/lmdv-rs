@@ -251,6 +251,24 @@ pub(crate) const NAMED_KEYS: &[NamedKeySpec] = &[
         "⏪",
         "Rewind",
     ),
+    NamedKeySpec::new(
+        ChordKey::BrowserBack,
+        Key::BrowserBack,
+        NamedKey::BrowserBack,
+        "BrowserBack",
+        &["browserback"],
+        "Back",
+        "Back",
+    ),
+    NamedKeySpec::new(
+        ChordKey::BrowserForward,
+        Key::BrowserForward,
+        NamedKey::BrowserForward,
+        "BrowserForward",
+        &["browserforward"],
+        "Forward",
+        "Forward",
+    ),
 ];
 
 const WINIT_FUNCTION_KEYS: &[NamedKey] = &[

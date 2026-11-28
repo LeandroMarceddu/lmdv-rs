@@ -33,6 +33,7 @@ use lmdv_render::{DetailsState, LinkWire, heading_key};
 use rune::{Mods, PointerButton, PointerPress, Tx};
 
 use crate::commands::MARKDOWN_EXTENSIONS;
+use crate::editor::Prompt;
 use crate::window::{NOTICE_SECONDS, NoticeAction, NoticeKind, TabView, WindowState};
 use crate::windows::{WindowKind, WindowOpenRequest};
 
@@ -353,7 +354,7 @@ impl WindowState {
                     None => dest.clone(),
                 };
                 if !(is_image_path(&path) && self.open_image_link(path.clone(), opener, tx)) {
-                    self.show_non_markdown_notice(&path);
+                    self.confirm_external_open(&path);
                 }
             }
             // L-05: a link resolving to a directory roots the file pane there
@@ -379,8 +380,43 @@ impl WindowState {
         self.show_notice(lmdv_i18n::t!("msg.pastedLink").to_owned(), NoticeKind::Info, action, NOTICE_SECONDS);
     }
 
-    /// L-07's notice for an existing file that is not a Markdown document.
-    pub(crate) fn show_non_markdown_notice(&mut self, path: &Path) {
+    /// OI-051: a local link that resolved to a non-Markdown file asks in a
+    /// **modal** before handing it to the desktop's handler. A whitelisted
+    /// document, picture, archive or web page opens
+    /// [`Prompt::OpenExternal { path }`](crate::editor::Prompt::OpenExternal),
+    /// whose primary action calls `AppShared::open_external` on a worker. The
+    /// prompt does not touch the disk or spawn a process on its own. Cancel
+    /// (Esc, the dialog's × or Cancel) restores L-07's plain notice.
+    ///
+    /// A program or script is never offered as an external open at all: it
+    /// keeps a reveal-only notice, so untrusted Markdown cannot run one.
+    pub(crate) fn confirm_external_open(&mut self, path: &Path) {
+        if can_open_externally(path) {
+            self.editor.prompt = Some(Prompt::OpenExternal { path: path.to_path_buf() });
+        } else {
+            // A program or script is never passed to a handler: revealing its
+            // folder shows it without running anything. Keep the honest
+            // question-only notice; no modal Open button is shown.
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let folder = path.parent().map_or_else(|| path.to_path_buf(), Path::to_path_buf);
+            self.show_notice(
+                external_open_question(&name),
+                NoticeKind::Warning,
+                Some(NoticeAction::ShowInFolder(folder)),
+                NOTICE_SECONDS,
+            );
+        }
+    }
+
+    /// L-07's plain notice for an existing file that is not a Markdown
+    /// document: “not a Markdown document” with an Open (whitelisted) or Show
+    /// in folder (script/program) action. Cancelling OI-051's modal restores
+    /// exactly this notice, so the user still learns why the link did not
+    /// open as text.
+    pub(crate) fn non_markdown_notice(&mut self, path: &Path) {
         let name = path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -388,8 +424,6 @@ impl WindowState {
         let action = if can_open_externally(path) {
             NoticeAction::OpenFile(path.to_path_buf())
         } else {
-            // A program or script is never passed to a handler: revealing its
-            // folder shows it without running anything.
             NoticeAction::ShowInFolder(path.parent().map_or_else(|| path.to_path_buf(), Path::to_path_buf))
         };
         self.show_notice(
@@ -398,6 +432,13 @@ impl WindowState {
             Some(action),
             NOTICE_SECONDS,
         );
+    }
+
+    /// The lightbox caller's L-07 path: same confirmation as a plain
+    /// non-Markdown link, so no handler is handed a file the user has not
+    /// approved.
+    pub(crate) fn show_non_markdown_notice(&mut self, path: &Path) {
+        self.confirm_external_open(path);
     }
 
     /// Applies a click placement to an opened Markdown document.
@@ -596,6 +637,16 @@ pub(crate) fn is_network_spelling(dest: &str) -> bool {
     (dest.starts_with("//") && !dest.starts_with("///")) || dest.starts_with(r"\\")
 }
 
+/// L-07's notice, phrased as OI-051's **Open externally?** confirmation.
+///
+/// It keeps the honest “not a Markdown document” fact and adds the question so
+/// the notice's **Open** button is unambiguously a user-approved external
+/// hand-off. Composed from catalog strings rather than a hardcoded sentence,
+/// so every locale asks in its own words.
+pub fn external_open_question(name: &str) -> String {
+    format!("{} {}?", lmdv_i18n::t!("msg.notMarkdown", "name" => name), lmdv_i18n::t!("render.openExternally"))
+}
+
 /// The extensions L-07's notice may hand to the desktop: documents, media,
 /// archives and web pages. A program or script is never on this list, so it is
 /// only ever revealed in the file manager.
@@ -750,9 +801,17 @@ mod tests {
             LinkTarget::Local { path: drawing.clone(), markdown: false, fragment: None }
         );
         state.open_link("drawing.png", &mut Tx::default());
-        poll_until(&mut state, "the non-Markdown folder attempt", |state| {
-            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown document"))
+        poll_until(&mut state, "the external-open prompt", |state| {
+            matches!(state.prompt(), Some(Prompt::OpenExternal { .. }))
         });
+        assert_eq!(
+            state.prompt(),
+            Some(&Prompt::OpenExternal { path: canonical(&drawing) }),
+            "OI-051: an openable non-Markdown file asks in a modal"
+        );
+        // Cancelling falls back to L-07's honest notice.
+        state.prompt_cancel();
+        assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown document")));
         assert!(state.browser.root().is_some(), "a file that is not a folder says so and goes back");
     }
 
@@ -1191,41 +1250,61 @@ mod tests {
         open_file(&mut state, index.clone());
 
         let mut tx = Tx::default();
-        state.open_link("manual.pdf", &mut tx);
-        poll_until(&mut state, "the PDF notice", |state| {
-            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("is not a Markdown"))
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        state.shared().set_external_sink({
+            let seen = Rc::clone(&seen);
+            Box::new(move |path: &Path| seen.borrow_mut().push(path.to_path_buf()))
         });
-        let notice = state.ui.notice.clone().expect("the notice");
+
+        state.open_link("manual.pdf", &mut tx);
+        poll_until(&mut state, "the external-open prompt", |state| {
+            matches!(state.prompt(), Some(Prompt::OpenExternal { .. }))
+        });
+        assert_eq!(
+            state.prompt(),
+            Some(&Prompt::OpenExternal { path: canonical(&temp.path().join("manual.pdf")) }),
+            "OI-051: a modal asks before the hand-off"
+        );
+        assert!(state.ui.notice.is_none(), "the explicit-question notice is gone");
+        assert!(!shows(&state, &temp.path().join("manual.pdf")), "it never opens as text");
+        assert!(seen.borrow().is_empty(), "OI-051: the prompt alone does not open anything");
+
+        // The primary action hands the path to the desktop (test sink here).
+        state.prompt_primary(&mut tx);
+        assert!(state.prompt().is_none(), "the modal closed");
+        assert_eq!(seen.borrow().as_slice(), [canonical(&temp.path().join("manual.pdf"))]);
+
+        // Cancel restores L-07's plain notice, whose Open action still works.
+        seen.borrow_mut().clear();
+        state.open_link("manual.pdf", &mut tx);
+        poll_until(&mut state, "the prompt again", |state| matches!(state.prompt(), Some(Prompt::OpenExternal { .. })));
+        state.prompt_cancel();
+        assert!(state.prompt().is_none());
+        let notice = state.ui.notice.clone().expect("L-07's restored notice");
         assert_eq!(notice.text, lmdv_i18n::t!("msg.notMarkdown", "name" => "manual.pdf"));
         assert_eq!(
             notice.action,
             Some(NoticeAction::OpenFile(canonical(&temp.path().join("manual.pdf")))),
             "L-07: a whitelisted document offers Open"
         );
-        assert!(!shows(&state, &temp.path().join("manual.pdf")), "it never opens as text");
-
-        // Pressing Open hands the file to the desktop's handler.
-        let seen = Rc::new(RefCell::new(Vec::new()));
-        state.shared().set_external_sink({
-            let seen = Rc::clone(&seen);
-            Box::new(move |path: &Path| seen.borrow_mut().push(path.to_path_buf()))
-        });
         state.run_notice_action();
         assert_eq!(seen.borrow().as_slice(), [canonical(&temp.path().join("manual.pdf"))]);
 
+        // A script keeps the reveal-only notice; no modal Open is offered.
+        seen.borrow_mut().clear();
         state.activate_tab(state.active_tab().expect("the tab").id);
-        let mut tx = Tx::default();
         state.open_link("build.sh", &mut tx);
         poll_until(&mut state, "the script notice", |state| {
             state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("build.sh"))
         });
+        assert!(state.prompt().is_none(), "a script is never offered in the external-open modal");
         let notice = state.ui.notice.clone().expect("the notice");
         assert_eq!(
             notice.action,
             Some(NoticeAction::ShowInFolder(canonical(temp.path()))),
             "L-07: a script is only ever revealed, never run"
         );
-        assert_eq!(notice.text, lmdv_i18n::t!("msg.notMarkdown", "name" => "build.sh"));
+        assert_eq!(notice.text, super::external_open_question("build.sh"));
         // The reveal opens the folder, never the script itself.
         seen.borrow_mut().clear();
         state.run_notice_action();
@@ -1393,9 +1472,11 @@ mod tests {
         state.close_lightbox();
 
         state.open_link("broken.png", &mut tx);
-        poll_until(&mut state, "the broken-image notice", |state| {
-            state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown"))
+        poll_until(&mut state, "the broken-image prompt", |state| {
+            matches!(state.prompt(), Some(Prompt::OpenExternal { .. }))
         });
+        state.prompt_cancel();
+        assert!(state.ui.notice.as_ref().is_some_and(|notice| notice.text.contains("not a Markdown")));
         assert!(state.lightbox().is_none(), "a picture that cannot decode never stays open");
 
         state.dismiss_notice();

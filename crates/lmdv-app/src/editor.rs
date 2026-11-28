@@ -32,7 +32,7 @@ use crate::windows::{CloseDoc, close_title};
 
 pub(crate) mod scroll_sync;
 
-use scroll_sync::{ENTRY_SUPPRESS, EditorTop, PreviewGeometry, PreviewSync, VisualCache};
+use scroll_sync::{ENTRY_SUPPRESS, EditorTop, PreviewGeometry, PreviewSync, RowLayout, RowProbe, VisualCache};
 
 /// How long after the last keystroke the preview parses (E-05).
 pub const PREVIEW_DEBOUNCE: f64 = 0.2;
@@ -97,6 +97,12 @@ pub enum Prompt {
     LeaseHeld { holder: EditLease },
     /// Quit with unsaved documents in one or more windows (P4-02a).
     Quit,
+    /// OI-051: a local link resolved to a non-Markdown file the desktop may
+    /// open. The primary action hands `path` to `AppShared::open_external` on a
+    /// worker; Cancel falls back to L-07's plain notice (`msg.notMarkdown`).
+    /// Scripts and programs never reach this prompt — they keep a reveal-only
+    /// notice, so untrusted Markdown cannot run one.
+    OpenExternal { path: PathBuf },
 }
 
 impl Prompt {
@@ -113,6 +119,7 @@ impl Prompt {
             Self::Draft { .. } => lmdv_i18n::t!("prompt.draftTitle"),
             Self::LeaseHeld { .. } => lmdv_i18n::t!("prompt.leaseTitle"),
             Self::Quit => lmdv_i18n::t!("prompt.quitTitle"),
+            Self::OpenExternal { .. } => lmdv_i18n::t!("render.openExternally"),
         }
     }
 }
@@ -201,7 +208,7 @@ pub struct SpellState {
 }
 
 impl SpellState {
-    fn check_for(&self, tab: TabId) -> Option<&SpellCheck> {
+    pub(crate) fn check_for(&self, tab: TabId) -> Option<&SpellCheck> {
         self.checks.get(&tab)
     }
 
@@ -392,6 +399,17 @@ pub struct EditorState {
     pub preview: RefCell<PreviewGeometry>,
     /// The virtual rows the block-mode source is showing.
     pub visible_blocks: Option<Range<usize>>,
+    /// OI-102: the recipe the source view leaves so a row's live layout callback
+    /// can re-measure a newly visible block without re-running the view.
+    pub row_probe: Cell<Option<RowProbe>>,
+    /// OI-102: each block row's live layout report, keyed by block index, so a
+    /// first-row crossing can measure the row after a virtual remount without a
+    /// view pass. Bounded by the rows the virtual window has mounted.
+    pub row_layouts: RefCell<HashMap<usize, RowLayout>>,
+    /// OI-102 (tests): first-row crossings that had no live measurement and so
+    /// had to ask for a view pass; tests compare its delta across a scroll.
+    #[cfg(test)]
+    pub view_pass_requests: Cell<u32>,
     /// The last source offset `poll` synced from.
     pub last_offset: Option<f32>,
     /// The line the caret was on at the last sync.
@@ -460,6 +478,10 @@ impl Default for EditorState {
             visual: RefCell::new(VisualCache::default()),
             preview: RefCell::new(PreviewGeometry::default()),
             visible_blocks: None,
+            row_probe: Cell::new(None),
+            row_layouts: RefCell::new(HashMap::new()),
+            #[cfg(test)]
+            view_pass_requests: Cell::new(0),
             last_offset: None,
             last_caret: None,
             last_sync: None,
@@ -661,6 +683,8 @@ impl WindowState {
         self.editor.visual.borrow_mut().clear();
         *self.editor.preview.borrow_mut() = PreviewGeometry::default();
         self.editor.visible_blocks = None;
+        self.editor.row_probe.set(None);
+        self.editor.row_layouts.borrow_mut().clear();
         self.editor.last_offset = None;
         self.editor.last_caret = None;
         self.editor.last_sync = None;
@@ -2507,6 +2531,13 @@ impl WindowState {
             Prompt::LeaseHeld { .. } => {
                 self.editor.prompt = None;
             }
+            Prompt::OpenExternal { path } => {
+                self.editor.prompt = None;
+                // L-07/OI-051: the desktop handler runs on a worker only after
+                // the user pressed Open in the modal. A test sink receives the
+                // path instead of a process spawn.
+                self.shared.open_external(self.worker().clone(), path);
+            }
         }
     }
 
@@ -2564,15 +2595,27 @@ impl WindowState {
             Prompt::LeaseHeld { .. } => {
                 self.editor.prompt = None;
             }
+            Prompt::OpenExternal { path } => {
+                // Same as Cancel: the user declined the hand-off, so leave
+                // L-07's honest notice (with its own Open/reveal action).
+                self.editor.prompt = None;
+                self.non_markdown_notice(&path);
+            }
         }
     }
 
     /// Cancel: nothing changes. Dismissing a draft offer deletes the draft,
-    /// as the original does (E-17).
+    /// as the original does (E-17). Cancelling OI-051's external-open prompt
+    /// restores L-07's plain non-Markdown notice.
     pub(crate) fn prompt_cancel(&mut self) {
-        if let Some(Prompt::Draft { key, .. }) = self.editor.prompt.take() {
-            self.shared.queue_store(StorePatch::RemoveDraft(key));
-        }
+        let declined = match self.editor.prompt.take() {
+            Some(Prompt::Draft { key, .. }) => {
+                self.shared.queue_store(StorePatch::RemoveDraft(key));
+                None
+            }
+            Some(Prompt::OpenExternal { path }) => Some(path),
+            _ => None,
+        };
         self.editor.prompt = None;
         // T-23: Cancel stops a close-others/right sequence.
         self.cancel_close_batch();
@@ -2582,6 +2625,9 @@ impl WindowState {
         // A cancelled close prompt makes this window a routing target again.
         self.shared.set_window_closing(self.id(), false);
         self.sync_registry();
+        if let Some(path) = declined {
+            self.non_markdown_notice(&path);
+        }
     }
 
     /// Closes a tab without the dirty guard (after Save or Don't save).

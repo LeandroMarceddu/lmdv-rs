@@ -27,6 +27,7 @@ mod text;
 pub use blocks::{parse, parse_with_revision};
 pub use heading::{heading_slug, legacy_slug};
 pub use model::*;
+pub use text::match_ranges;
 
 /// Run only the math pre-pass, for tests and diagnostics.
 ///

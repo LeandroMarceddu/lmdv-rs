@@ -41,23 +41,23 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 27 | 3 | 0 | 0 | 0 |
-| Tabs and windows | 35 | 26 | 7 | 2 | 0 | 0 |
-| Editor | 40 | 36 | 2 | 1 | 0 | 1 |
+| Tabs and windows | 35 | 27 | 6 | 2 | 0 | 0 |
+| Editor | 40 | 37 | 2 | 0 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 18 | 0 | 0 | 0 | 0 |
 | Share, print and export | 16 | 14 | 2 | 0 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
 | Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
-| Command palette | 13 | 11 | 2 | 0 | 0 | 0 |
+| Command palette | 13 | 12 | 1 | 0 | 0 | 0 |
 | Links and media | 15 | 13 | 0 | 1 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
-| Window chrome | 10 | 3 | 3 | 0 | 0 | 4 |
-| Drag and drop | 8 | 5 | 2 | 1 | 0 | 0 |
+| Window chrome | 10 | 6 | 0 | 0 | 0 | 4 |
+| Drag and drop | 8 | 6 | 1 | 1 | 0 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
 | Accessibility | 15 | 14 | 1 | 0 | 0 | 0 |
 | Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **263** | **54** | **7** | **0** | **18** |
+| **All** | **342** | **270** | **48** | **6** | **0** | **18** |
 
 ## R — Reading and viewer (30)
 
@@ -114,7 +114,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **T-18** Tab context menu (P1 · F-TABS) — done
 - [x] **T-19** Tab drag reorder (P0 · F-DRAG) — done
 - [x] **T-20** Tab tear-off (P1 · F-DRAG) — substitute
-- [x] **T-21** Drag only tab → window (P1 · F-DRAG) — substitute
+- [x] **T-21** Drag only tab → window (P1 · F-DRAG) — done
 - [x] **T-22** Drop tab onto another window (P1 · F-DRAG) — substitute
 - [x] **T-23** Close others / right (P1 · F-TABS) — done
 - [x] **T-24** Window close question (P0 · F-TABS) — done
@@ -160,7 +160,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **E-26** List/quote toggles (P0 · F-EDIT) — done
 - [x] **E-27** Block inserts (P1 · F-EDIT) — done
 - [x] **E-28** Slash menu (P1 · F-EDIT) — done
-- [~] **E-29** Line commands (P1 · F-EDIT) — partial
+- [x] **E-29** Line commands (P1 · F-EDIT) — done
 - [x] **E-30** Comment line (P1 · F-EDIT) — done
 - [x] **E-31** Go to line (P1 · F-EDIT) — done
 - [x] **E-32** Spellcheck (P1 · F-EDIT) — substitute
@@ -306,7 +306,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [x] **C-09** Modal key trapping (P1 · F-PALETTE) — done
 - [x] **C-10** Focus/selection restoration (P1 · F-PALETTE) — done
 - [x] **C-11** Command coverage (P0 · F-PALETTE) — done
-- [x] **C-12** Accessibility (P1 · F-A11Y) — substitute
+- [x] **C-12** Accessibility (P1 · F-A11Y) — done
 - [x] **C-13** Loading and closing triggers (P1 · F-PALETTE) — substitute
 
 ## L — Links and media (15)
@@ -359,10 +359,10 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 
 ## W — Window chrome (10)
 
-- [x] **W-01** Draggable toolbar (P0 · Drag empty toolbar moves window; double-click maximizes.) — substitute
-- [x] **W-02** Caption buttons (P0 · Buttons match native placement; X prompts.) — substitute
+- [x] **W-01** Draggable toolbar (P0 · Drag empty toolbar moves window; double-click maximizes.) — done
+- [x] **W-02** Caption buttons (P0 · Buttons match native placement; X prompts.) — done
 - [x] **W-03** Snap layouts (P2 · Hover Maximize shows Snap flyout on Win11.) — n/a
-- [x] **W-04** Max/Restore state (P1 · Maximize: icon becomes restore.) — substitute
+- [x] **W-04** Max/Restore state (P1 · Maximize: icon becomes restore.) — done
 - [x] **W-05** Window system menu (P2 · Right-click title bar: native menu.) — n/a
 - [x] **W-06** Inactive window look (P2 · Unfocused window caption grey.) — n/a
 - [x] **W-07** Always on top (P1 · Pin keeps window above others; restart unpinned.) — done
@@ -378,7 +378,7 @@ update the audit, then regenerate. Evidence is cited per row in the audit.
 - [~] **D-04** Tab drag (P0 · Reorder and tear-off.) — partial
 - [x] **D-05** Cross-window ghost (P1 · Ghost follows pointer over other window.) — substitute
 - [x] **D-06** Drag-to-scroll (P1 · Middle-drag scrolls.) — done
-- [x] **D-07** Window drag by sole tab (P2 · Sole tab drag moves window.) — substitute
+- [x] **D-07** Window drag by sole tab (P2 · Sole tab drag moves window.) — done
 - [x] **D-08** Drag cancel (P1 · Esc mid-drag restores order.) — done
 
 ## H — Help, start page, notices, rating (13)

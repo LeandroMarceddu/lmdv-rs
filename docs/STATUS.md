@@ -1,7 +1,7 @@
 # Status
 
 **Updated:** 2026-11-25
-**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (263 done, 54 substitutes, 7 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 6 P0 partials (kit patches or small Rune patches), the OI-061/OI-102 shared-design residuals, reproducible builds/platform signatures and the held/blocked items.
+**Phase:** P6 command/tab, reading polish, both i18n sweeps, tab quick wins, P6-SAFE batch 4, Linux spellcheck, the math a11y patch, P6 batch 5, the lightbox/tab-menu/overflow batches and the P5 export extras are complete. The 342-row parity audit is current (270 done, 48 substitutes, 6 partial, 0 missing, 18 n/a), the app-side P0s and the broad P1/P2 batch are implemented, the diagram/AVIF export path and bounded Windows runtime are in, the default Markdown handler covers Windows and Linux, and v0.11.0 is released. Remaining: 6 P0 partials (kit patches or small Rune patches), the OI-190 kit gaps, OI-044/OI-054 residuals, the Windows manual checklist (OI-155), reproducible builds/platform signatures and the held/blocked items.
 **Implementation:** P0, P1, P2 parser/render/math, P3 editor core + app edit mode + editor UX + block mode, and P5 HTML/DOCX/PDF export are complete and committed.
 
 ## P0 — complete
@@ -258,7 +258,7 @@
 - Platform wording: `file.reveal` is “Show in folder”, reveal failures and start-page tips use file manager; File Explorer/Store-only passages removed from all six help pages and the Windows section rewritten as desktop integration. P6-I18N-B completed the full help-dialog integration.
 - OI-033 relative times use `rel.justNow` and plural units; OI-083/109/118/137 command, rich-copy, window/tab and table notices are keyed.
 - OI-152 settings strings keyed; reset keeps `print_break_h1`; E-37 editor scaling verified intact. Spellcheck and the test-only locale skip remain.
-- OI-148 palette footer uses `Keybind` keycaps, heading cap 20,000, page step measures the list area. Rune still lacks `aria-autocomplete`/`aria-controls`.
+- OI-148 palette footer uses `Keybind` keycaps, heading cap 20,000, page step measures the list area; autocomplete/controls are now in the a11y tree.
 - Evidence `/tmp/opencode/p6-i18n-a/` (palette English/Italian, settings Italian); full gate green on 2026-11-17: app **754**, i18n **18**, all workspace tests/clippy.
 - Remaining: OI-093 buffer Undo, OI-148 Rune a11y/NFKD/recents, OI-152 spellcheck/test locale, OI-037, OI-104.
 
@@ -412,7 +412,7 @@
 - OI-138: the reader passes the column width to tables, so a table wider than the 760 pt column scrolls inside it instead of overflowing.
 - OI-162: footnote and back-reference jumps use the heading glide and landing when the target is on screen.
 - OI-128/129/130: persisted pane visibility, auto-fold plus `SidebarPeek` overlay, widths with keyboard/palette commands, shared-vs-per-window browser state with broadcast, visible-only watchers, watch-limit notices, and the search→viewer-find regression test.
-- OI-148: full NFKD folding table, real-store palette recents; Rune still has no `aria-autocomplete`/`aria-controls`.
+- OI-148: full NFKD folding table, real-store palette recents; the a11y autocomplete/controls half is done.
 - OI-169/170: draft diagnostics and protection in `lmdv-io` plus the app wiring; portable roots are checked for write access before selection.
 - Four Rune patches; 617 i18n keys; full gate and patch proof tests green. New follow-ups: OI-178 (inotify overflow), OI-179 (pane grip arrows, accepted substitute).
 
@@ -527,7 +527,7 @@
 - Windows runtime (bounded): named-mutex + named-pipe single instance, `ShellExecuteW` external open, volume-serial/file-index identity, current-user DACLs; compile-checked only. OI-155 remains open for the manual Windows checklist.
 - UI: reader drag-to-scroll with autoscroll, toolbar breakpoints + Save/Aa, background-tab pulse, localized palette keycaps, right-click link menu. D-06/R-28/T-34/W-10/T-15/I-07/OI-195 menu closed; L-12 keeps only inline SVG vector shape drawing.
 - Table preview floors now grow past 360 and scroll; A-01 four-theme contrast (Light accent darkened); I-08 palette keyword test. OI-194 fixed.
-- Audit: **263 done, 54 substitute, 7 partial, 0 missing, 18 n/a; 6 P0 gaps**; 12 open OIs. v0.11.0.
+- Audit: **270 done, 48 substitute, 6 partial, 0 missing, 18 n/a; 6 P0 gaps**; 4 open OIs. v0.11.0.
 
 ## Rune f4ec14e — ported (v0.11.0)
 
@@ -590,6 +590,22 @@
   release (no mid-drag ghost).
 - Applying the four Rune patches still reproduces `vendor/rune` from pristine.
   Full gate green; no tag for this batch.
+
+
+## Final adoption batch — Rune 86df731b (unreleased)
+
+- Pin moved to `86df731b` (3 commits): upstream merged #2745 (kit shell hooks)
+  and #2744 (browser keys, copy ack, field-menu hook, multi-caret).
+- Linux CSD shipped (ADR-028): `App::titlebar(Titlebar::new(48))` on Linux only,
+  insets reserved in the toolbar, native frame preserved elsewhere. Focusable
+  localized grips and lone-tab window drag use the new kit hooks; browser keys
+  navigate like Alt+arrows. Desktop GNOME verification is still due.
+- OI-051 is a real modal Open/Cancel prompt; OI-108 rich/plain copy uses
+  `copy_then`/`copy_rich_then`; OI-174 appends spelling suggestions to Rune's
+  built-in field menu; OI-179 is fixed; E-29 multi-caret uses upstream
+  `TextEdit` carets.
+- Golden corpus regenerated for the +9 pt headless inset shift; full gate and
+  Windows `--all-targets` check are green. No tag for this batch.
 
 
 ## Next up

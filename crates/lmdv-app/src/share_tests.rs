@@ -11,7 +11,7 @@ use tempfile::TempDir;
 use super::*;
 use crate::commands::lookup_command;
 use crate::share::{
-    ExportJob, PdfExport, RichCopyJob, SHARE_ITEMS, export_title, is_print_temp, medium_date_at, pdf_export,
+    ExportJob, PdfExport, RichCopy, RichCopyJob, SHARE_ITEMS, export_title, is_print_temp, medium_date_at, pdf_export,
     pdf_export_at, print_temp_path, remove_print_temp,
 };
 use crate::test_support;
@@ -556,6 +556,26 @@ fn wait_for_clipboard(runtime: &mut rune::Runtime<WindowState>, board: &rune::cl
     }
 }
 
+/// Rune delivers a `copy_then`/`copy_rich_then` ack on a later frame, after
+/// the clipboard write itself (OI-108).
+fn wait_for_notice(runtime: &mut rune::Runtime<WindowState>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while runtime.state.ui.notice.is_none() {
+        assert!(Instant::now() < deadline, "no clipboard notice arrived");
+        runtime.frame(0.0);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn wait_for_share_flash(runtime: &mut rune::Runtime<WindowState>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !runtime.state.share.flashing() {
+        assert!(Instant::now() < deadline, "the clipboard ack never flashed the Share check");
+        runtime.frame(0.0);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 #[test]
 fn rich_copy_puts_markdown_and_html_on_the_clipboard() {
     let temp = TempDir::new().unwrap();
@@ -578,10 +598,15 @@ fn rich_copy_puts_markdown_and_html_on_the_clipboard() {
     assert!(html.contains('\u{2611}'), "tasks are visible symbols");
     assert!(!html.contains("<style"), "inline styles only");
 
-    assert!(runtime.state.share.flashing(), "the Share button flashes (X-13)");
+    // OI-108: the check and the notice are earned by the clipboard's ack, not
+    // by the export job finishing. Both land on a frame after the write.
+    wait_for_share_flash(&mut runtime);
+    wait_for_notice(&mut runtime);
     assert!(!runtime.state.share.copy_busy());
     let notice = runtime.state.ui.notice.as_ref().expect("a localized success notice");
+    assert_eq!(notice.kind, NoticeKind::Success);
     assert_eq!(notice.text, "Copied the document as rich text.");
+    eprintln!("clipboard-ack success notice: {}", notice.text);
 }
 
 #[test]
@@ -614,6 +639,7 @@ fn a_selection_copy_writes_the_selected_blocks_as_rich_text() {
     assert!(!html.contains("Title"), "the unselected heading is not");
     assert!(!html.contains("<style") && !html.contains("<script"), "inline styles only");
 
+    runtime.frame(0.0); // let the `copy_rich_then` ack land
     assert!(!runtime.state.share.copy_busy());
     assert!(!runtime.state.share.flashing(), "Ctrl+C is not the Share action (X-13)");
     assert!(runtime.state.ui.notice.is_none(), "an ordinary copy is quiet");
@@ -667,6 +693,7 @@ fn a_selection_with_no_export_block_falls_back_to_plain_text() {
     let copied = board.content().expect("the fallback reached the clipboard");
     assert!(copied.html().is_none(), "plain only");
     assert_eq!(copied.text(), "No block");
+    runtime.frame(0.0); // the `copy_then` ack lands on a later frame
     assert!(runtime.state.ui.notice.is_none(), "the fallback is quiet");
 }
 
@@ -796,6 +823,69 @@ fn a_failed_rich_copy_shows_an_error_notice_and_no_flash() {
         ),
         "a duplicate completion changes nothing"
     );
+}
+
+#[test]
+fn a_rejected_clipboard_write_shows_an_error_notice_and_no_flash() {
+    // OI-108: a job that finished is not proof the OS write landed. The memory
+    // clipboard can refuse a write exactly as a locked OS clipboard would.
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Notes\n\nBody.\n");
+    let (mut runtime, board) = clipboard_runtime(state);
+    board.fail_writes(Some("clipboard busy"));
+
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+        assert!(state.run_command("share.copy-rich", tx), "the command is enabled");
+    });
+    wait_for_notice(&mut runtime);
+
+    let notice = runtime.state.ui.notice.as_ref().expect("the failure is shown");
+    assert_eq!(notice.kind, NoticeKind::Error);
+    assert!(notice.text.starts_with("Copy failed:"), "{}", notice.text);
+    assert!(notice.text.contains("clipboard busy"), "{}", notice.text);
+    eprintln!("clipboard-ack failure notice: {}", notice.text);
+    assert!(!runtime.state.share.flashing(), "a refused write earns no success check");
+    assert!(!runtime.state.share.copy_busy());
+    assert!(board.content().is_none(), "a refused write leaves the clipboard untouched");
+    board.fail_writes(None);
+}
+
+#[test]
+fn a_superseded_clipboard_write_shows_an_error_notice() {
+    // Two writes asked in one handler: Rune supersedes the first callback with
+    // `CopyError::Superseded`. The selection copy is quiet when it succeeds, so
+    // the only notice left is the superseded one (OI-108).
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("Notes", "# Notes\n");
+    let doc = state.active_document_id().expect("the document");
+    let (mut runtime, board) = clipboard_runtime(state);
+
+    runtime.update(|state: &mut WindowState, tx: &mut Tx| {
+        state.share.copy_in_flight = Some(RichCopyJob { job: 81, doc, selection: true });
+        assert!(state.handle_rich_copied(
+            81,
+            doc,
+            Ok(RichCopy { markdown: "first".to_owned(), html: "<b>first</b>".to_owned() }),
+            tx
+        ));
+        state.share.copy_in_flight = Some(RichCopyJob { job: 82, doc, selection: true });
+        assert!(state.handle_rich_copied(
+            82,
+            doc,
+            Ok(RichCopy { markdown: "second".to_owned(), html: "<b>second</b>".to_owned() }),
+            tx
+        ));
+    });
+    wait_for_notice(&mut runtime);
+
+    let notice = runtime.state.ui.notice.as_ref().expect("the superseded write is reported");
+    assert_eq!(notice.kind, NoticeKind::Error);
+    assert!(notice.text.contains("superseded"), "{}", notice.text);
+    eprintln!("clipboard-ack superseded notice: {}", notice.text);
+    assert!(!runtime.state.share.flashing(), "no success check for a superseded write");
+    assert_eq!(board.content().expect("the newer write landed").text(), "second");
 }
 
 #[test]

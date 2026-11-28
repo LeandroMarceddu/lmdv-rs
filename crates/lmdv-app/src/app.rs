@@ -20,6 +20,22 @@ use crate::windows::{WindowHandles, WindowKind};
 pub const WINDOW_SIZE: (f32, f32) = (1200.0, 860.0);
 /// The smallest content size a window can be resized to (S-12).
 pub const WINDOW_MIN_SIZE: (f32, f32) = (480.0, 480.0);
+
+/// Linux CSD (ADR-028): the rune-kit toolbar band is the window's title bar.
+/// The helper is cfg-gated so Windows and macOS keep exactly the chrome they
+/// have today; every window goes through [`window_spec`], so the choice is
+/// applied consistently to the launch window and to later factory windows.
+fn linux_csd<S: 'static>(app: rune::App<S>) -> rune::App<S> {
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
+    {
+        app.titlebar(rune::Titlebar::new(rune_kit::shell::TOOLBAR_HEIGHT))
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    {
+        app
+    }
+}
+
 /// Headless two-window gate: the primary window's frame, in physical pixels.
 const TEST_PRIMARY_POSITION: (i32, i32) = (80, 80);
 /// Headless two-window gate: the second window's frame, in physical pixels.
@@ -63,6 +79,7 @@ pub const SCENES: &[(&str, Scene)] = &[
     ("settings", crate::settings_ui::scene_settings),
     ("tab-notice", scene_tab_notice),
     ("version", scene_version),
+    ("external-open", view::scene_external_open),
 ];
 
 /// T-26: two documents, the second in front, while the first keeps its own
@@ -117,9 +134,6 @@ fn run_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>, launch: Launch) {
     shared.set_startup_activation_token(
         launch.activation_token.clone().or_else(lmdv_io::launch::activation_token_from_env),
     );
-    // The saved language (or the OS's, for Auto) is process-wide and must be in
-    // place before the first window builds its strings.
-    crate::settings::apply_locale(&shared.prefs());
     // A headless Rune run (`--snap`, `--tree`, `--script`, ...) is a tool
     // invocation, not a desktop launch: it must never be forwarded to a
     // running window and must not steal the single-instance socket. It also
@@ -132,9 +146,20 @@ fn run_reported(dirs: AppDirs, dirs_issues: Vec<DirsIssue>, launch: Launch) {
     // Only the real entry point installs the native opener; a unit test never
     // reaches `rune::open_window` unless it installs its own recorder.
     shared.set_window_opener(crate::windows::open_runtime_window);
+    // OI-049: interactive windows resolve image paths on a worker. Headless
+    // scenes keep the inline path (`wait`), so their first frame stays exact.
+    crate::images::enable_worker_probes();
     if !headless && let Err(error) = claim_instance(&shared, &launch) {
         eprintln!("lmdv: single-instance service unavailable: {error}");
     }
+    // OI-001: the four state files were read on a worker while the launch did
+    // the work above. Land them now, before the locale and the first frame, so
+    // headless scenes and interactive windows see identical prefs, recents,
+    // positions and ui state.
+    shared.wait_startup();
+    // The saved language (or the OS's, for Auto) is process-wide and must be in
+    // place before the first window builds its strings.
+    crate::settings::apply_locale(&shared.prefs());
     let factory_shared = Rc::clone(&shared);
     let factory_launch = launch.clone();
     rune::run_windows(move |displays| {
@@ -387,11 +412,13 @@ pub(crate) fn window_spec(
 ) -> rune::WindowSpec<WindowState> {
     let id = state.id();
     let shared = state.shared_rc();
-    let app = rune::App::new(app_spec())
-        .on_close_request(close_request)
-        .on_close(window_closed)
-        .on_quit(app_quit)
-        .on_focus(focus_changed);
+    let app = linux_csd(
+        rune::App::new(app_spec())
+            .on_close_request(close_request)
+            .on_close(window_closed)
+            .on_quit(app_quit)
+            .on_focus(focus_changed),
+    );
     let mut spec = rune::WindowSpec::from_app(key, app).state(state).on_modifiers(crate::window::modifiers_changed);
     if let Some(position) = frame.position {
         spec.options.position = Some(position);
@@ -500,8 +527,14 @@ fn focus_changed(state: &mut WindowState, focused: bool, _: &mut Tx) {
 }
 
 /// Drains mailboxes and timers; true when the view must rebuild.
+///
+/// Image path probes (OI-049) answer on a worker and land in a process-wide
+/// hub. Draining them here, on the UI thread, is what lets the waiting window
+/// rebuild with the resolved path; the headless path never queues a probe.
 fn poll(state: &mut WindowState, now: f64, tx: &mut Tx) -> bool {
-    state.poll(now, tx)
+    let mut changed = crate::images::poll_probes();
+    changed |= state.poll(now, tx);
+    changed
 }
 
 /// Global shortcuts. The palette holds the keyboard while it shows (C-09), its
@@ -577,6 +610,19 @@ pub(crate) fn on_key(state: &mut WindowState, event: &KeyEvent, tx: &mut Tx) -> 
         state.dismiss_notice();
         return true;
     }
+    // O-14: Rune's dedicated history keys (`XF86Back`/`XF86Forward`, DOM
+    // `BrowserBack`/`BrowserForward`) are not chords, so the command table's
+    // `Alt+Left`/`Alt+Right` bindings never see them. Text fields ignore these
+    // keys upstream, and every modal above has already had its say, so route
+    // them to the same nav commands rather than adding second handlers.
+    let history_command = match event.key {
+        Key::BrowserBack => Some("nav.back"),
+        Key::BrowserForward => Some("nav.forward"),
+        _ => None,
+    };
+    if let Some(id) = history_command {
+        return dispatch_command(state, id, tx);
+    }
     let Some(command) = command_for_key_in(state, event) else { return false };
     dispatch_command(state, command.id, tx)
 }
@@ -610,6 +656,7 @@ mod tests {
 
     use super::*;
     use crate::test_support;
+    use lmdv_core::{Place, ScrollAnchor};
     use lmdv_io::store::load_session;
 
     fn window(temp: &TempDir) -> WindowState {
@@ -711,6 +758,27 @@ mod tests {
         let mut tx = Tx::default();
         assert_eq!(close_request(&mut state, &mut tx), rune::CloseResponse::Close);
         assert!(state.ui.notice.is_none());
+    }
+
+    #[test]
+    fn browser_history_keys_navigate_like_the_alt_arrows() {
+        let temp = TempDir::new().unwrap();
+        let mut state = window(&temp);
+        let first = state.open_synthetic("First", "# First\n");
+        let second = state.open_synthetic("Second", "# Second\n");
+        let document = state.tab(first).and_then(crate::window::Tab::document).expect("a document");
+        let key = WindowState::place_key(document).expect("a place key");
+        if let Some(tab) = state.tabs.iter_mut().find(|tab| tab.id == second) {
+            tab.view.nav.record(Place::new(key, ScrollAnchor { id: "first".to_owned(), offset: 36.0 }));
+        }
+
+        let mut tx = Tx::default();
+        let back = KeyEvent { key: Key::BrowserBack, mods: rune::Mods::default() };
+        assert!(on_key(&mut state, &back, &mut tx), "BrowserBack runs nav.back");
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(first));
+        let forward = KeyEvent { key: Key::BrowserForward, mods: rune::Mods::default() };
+        assert!(on_key(&mut state, &forward, &mut tx), "BrowserForward runs nav.forward");
+        assert_eq!(state.active_tab().map(|tab| tab.id), Some(second));
     }
 
     #[test]

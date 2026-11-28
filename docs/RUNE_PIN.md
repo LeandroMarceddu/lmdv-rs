@@ -1,13 +1,12 @@
 # Rune pin
 
 - Repository: https://github.com/anomalyco/rune
-- Snapshot commit: `07bf8c5d3b04d2291f5493392aee8e0694096ce5`
+- Snapshot commit: `86df731b7171f52c9918f288784dda6ed0327289`
 - Branch: `dev`
 - Snapshot date: 2026-11-28
-- Upstream head checked 2026-11-28: `07bf8c5d3b04d2291f5493392aee8e0694096ce5`
-  (same as the pin; `dev` is the default branch and there is no `main`;
-  this rev includes the rest/heap-trim fixes and the inline-image/a11y/
-  highlight/Mermaid-SVG features that retired all four local patches)
+- Upstream head checked 2026-11-28: `86df731b7171f52c9918f288784dda6ed0327289`
+  (same as the pin; includes the #2745 kit hooks and #2744 core input/
+  clipboard/field-menu/multi-caret APIs)
 - License: MIT
 - Toolchain pinned by upstream: Rust `1.99.1` (`rust-toolchain.toml`)
 

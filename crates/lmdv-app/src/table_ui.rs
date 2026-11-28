@@ -12,13 +12,19 @@
 //! at the left when the table overflows (V-11), a debounced filter with match
 //! highlights and a live count (V-13), sortable headers (V-15), and its own
 //! copy and close buttons. `Esc` empties the filter first, then closes (V-14).
+//!
+//! The scroller carries pinned scroll bars (OI-044): the kit's `ScrollBar`
+//! tracks are children of the scroll *area*, not of the scrolling content, and
+//! their thumbs follow the scroll offset through live values. A scroll moves
+//! the grid under a bar that stays glued to the viewport's edge, so the wide
+//! table's horizontal position is always visible while its columns scroll.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use lmdv_render::{TableRef, TableWire};
 use rune::{Cursor, Cx, El, Key, KeyEvent, Link, Span, TextStyle, Tx, col, el, rich, row, text, text_input};
-use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, SortDir};
+use rune_kit::{ControlSize, IconButton, IconButtonVariant, Kit, ScrollBar, ScrollBarStyle, SortDir};
 
 use crate::icons;
 use crate::tables::{
@@ -262,6 +268,12 @@ fn preview_grid(preview: &TablePreview, kit: &Kit) -> El {
     let words = Rc::new(preview.words());
     let rows = preview.shown.len();
     let row_height = preview.row_height();
+    // OI-044: the bars are pinned to the viewport edges. `always_visible`
+    // keeps them attached whenever the axis overflows (a wide table always
+    // has a horizontal bar), and the kit drives both thumbs from live scroll
+    // values, so scrolling commits no view and never moves the bars.
+    let bar = ScrollBarStyle::from_kit(kit).always_visible().width(8.0).hover_width(12.0).track_inset(6.0);
+    let (vertical, horizontal) = (bar, bar.horizontal());
     let kit = kit.clone();
     content = content.child(col().key("table-preview-rows").w(width).growth(rune::GrowthSpec::default()).virtual_rows(
         rows,
@@ -289,6 +301,7 @@ fn preview_grid(preview: &TablePreview, kit: &Kit) -> El {
         // Rune's scrolling.
         .on_wheel(|state: &mut WindowState, event: rune::WheelEvent, tx: &mut Tx| state.table_preview_wheel(&event, tx))
         .child(content)
+        .scroll_bars_xy_styled(vertical, horizontal)
 }
 
 /// One header cell: sortable by click or Enter, with its sort direction.

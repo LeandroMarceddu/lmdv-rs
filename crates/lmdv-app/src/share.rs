@@ -39,7 +39,7 @@ use std::sync::{Arc, OnceLock};
 use lmdv_core::{DocStatus, Document, DocumentId, JobId};
 use lmdv_export::{ExportOptions, PdfFont};
 use lmdv_md::MdDoc;
-use rune::{ClipboardContent, FileDialogOptions, Tx};
+use rune::{ClipboardContent, CopyError, FileDialogOptions, Tx};
 
 use crate::shared::unix_millis;
 use crate::window::{NoticeAction, NoticeKind, WindowState};
@@ -505,7 +505,8 @@ impl WindowState {
     }
 
     /// Handles a rich-copy completion: writes both clipboard forms from the UI
-    /// handler, flashes the Share check and shows a localized notice.
+    /// handler and waits for Rune's clipboard ack before showing the Share
+    /// check. A finished job alone is not proof the OS write landed (OI-108).
     pub(crate) fn handle_rich_copied(
         &mut self,
         job: JobId,
@@ -528,21 +529,51 @@ impl WindowState {
                     // touches no export block (the generated TOC, a separator)
                     // has no HTML form, so it falls back to plain text.
                     if copy.html.is_empty() {
-                        tx.copy(copy.markdown);
+                        tx.copy_then(copy.markdown, move |state: &mut WindowState, result, _| {
+                            state.rich_copy_ack(selection, result);
+                        });
                     } else {
-                        tx.copy_rich(ClipboardContent::new(copy.markdown).with_html(copy.html));
+                        tx.copy_rich_then(
+                            ClipboardContent::new(copy.markdown).with_html(copy.html),
+                            move |state: &mut WindowState, result, _| state.rich_copy_ack(selection, result),
+                        );
                     }
                     return true;
                 }
-                self.share.flash_until = Some(self.ui.last_now + SHARE_FLASH_SECONDS);
-                self.share.flash_armed = false;
-                tx.copy_rich(ClipboardContent::new(copy.markdown).with_html(copy.html));
-                self.show_share_notice(lmdv_i18n::t!("msg.copiedRich"), None, NoticeKind::Success);
+                tx.copy_rich_then(
+                    ClipboardContent::new(copy.markdown).with_html(copy.html),
+                    move |state: &mut WindowState, result, _| state.rich_copy_ack(selection, result),
+                );
                 true
             }
             Err(error) => {
                 self.show_share_notice(lmdv_i18n::t!("msg.copyFailed", "err" => error), None, NoticeKind::Error);
                 true
+            }
+        }
+    }
+
+    /// Applies the clipboard write's ack on a later frame (OI-108).
+    ///
+    /// Only an accepted write earns the Share check and the "copied rich text"
+    /// notice; a superseded or rejected one reports an error instead. A
+    /// selection copy stays quiet when it succeeds (X-03/R-26), but a real
+    /// write failure is still worth reporting.
+    ///
+    /// On Linux `Ok(())` means the clipboard backend accepted the payload; it
+    /// does not promise durable selection ownership if another app claims the
+    /// selection later (upstream #523).
+    fn rich_copy_ack(&mut self, selection: bool, result: Result<(), CopyError>) {
+        match result {
+            Ok(()) if selection => {}
+            Ok(()) => {
+                self.share.flash_until = Some(self.ui.last_now + SHARE_FLASH_SECONDS);
+                self.share.flash_armed = false;
+                self.show_share_notice(lmdv_i18n::t!("msg.copiedRich"), None, NoticeKind::Success);
+            }
+            Err(error) => {
+                let err = error.to_string();
+                self.show_share_notice(lmdv_i18n::t!("msg.copyFailed", "err" => err), None, NoticeKind::Error);
             }
         }
     }

@@ -13,16 +13,20 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::Range;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use lmdv_core::{DocumentId, Draft, Eol, FileMeta, JobId, TabId, WindowId};
+use lmdv_core::{DocumentId, Draft, Eol, FileMeta, JobId, Prefs, TabId, WindowId};
 use lmdv_edit::spell::{Availability, DictionaryFiles, Spell};
 use lmdv_io::AppDirs;
-use lmdv_io::store::{DraftIssue, StoreHandle, load_draft_reported};
-use lmdv_io::{ReadError, SaveOutcome, WriteError, read_document, save_document};
+use lmdv_io::store::{
+    DraftIssue, PositionTable, Recent, StoreHandle, StoreIssue, UiPrefs, load_draft_reported, load_positions_reported,
+    load_prefs_reported, load_recents_reported, load_ui_reported,
+};
+use lmdv_io::{PathPolicy, ReadError, SaveOutcome, WriteError, read_document, save_document};
 use lmdv_md::MdDoc;
 use rune::Waker;
 
@@ -85,6 +89,43 @@ pub enum JobMsg {
         placement: crate::links::LinkPlacement,
         result: Result<Option<lmdv_io::LinkResolution>, String>,
     },
+}
+
+/// The four state files read once at startup, on a worker (OI-001).
+///
+/// The UI thread starts this job before the first frame and waits for it at the
+/// point where the saved locale must be applied, so headless scenes and the
+/// first interactive frame see exactly the values the synchronous loader used
+/// to provide. Only the file reads move off the thread.
+#[derive(Debug, Default)]
+pub struct StartupState {
+    pub prefs: Prefs,
+    pub ui: UiPrefs,
+    pub recents: Vec<Recent>,
+    pub positions: PositionTable,
+    /// Corrupt/quarantined and future-schema/foreign files the writer must
+    /// respect, in the loader's original order.
+    pub issues: Vec<StoreIssue>,
+}
+
+/// What one image path-policy probe asked for and found (OI-049).
+///
+/// The key is the normalized source the view also uses, so a hit is exact and
+/// never re-runs `PathPolicy`'s stat/canonicalize on the UI thread.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ImageProbeKey {
+    pub(crate) root: PathBuf,
+    pub(crate) source: String,
+    pub(crate) allow_outside: bool,
+    pub(crate) url_path: bool,
+}
+
+/// The answer to one [`ImageProbeKey`], posted by the worker to
+/// `crate::images`' probe hub.
+#[derive(Debug)]
+pub(crate) struct ImageProbe {
+    pub(crate) key: ImageProbeKey,
+    pub(crate) path: Option<PathBuf>,
 }
 
 /// One window's worker→UI mailbox.
@@ -275,6 +316,62 @@ impl JobHub {
     /// Reserves the next process-wide job id.
     pub fn allocate(&self) -> JobId {
         self.next.fetch_add(1, Ordering::Relaxed).saturating_add(1)
+    }
+
+    /// Reads the four startup state files on a worker and returns a one-shot
+    /// receiver for the result (OI-001).
+    ///
+    /// The reported loaders do quarantine and schema checks too, so keeping
+    /// them together here means the UI thread never stats a state file. A
+    /// worker that cannot start sends a default value, so waiting always ends.
+    pub fn load_startup(&self, dirs: AppDirs) -> Receiver<StartupState> {
+        let (tx, rx) = channel();
+        let worker_tx = tx.clone();
+        let spawned = rune::task::spawn("lmdv-startup", move || {
+            let prefs = load_prefs_reported(&dirs);
+            let recents = load_recents_reported(&dirs);
+            let positions = load_positions_reported(&dirs);
+            let ui = load_ui_reported(&dirs);
+            let issues = [prefs.issue, recents.issue, positions.issue, ui.issue].into_iter().flatten().collect();
+            let _ = worker_tx.send(StartupState {
+                prefs: prefs.value,
+                ui: ui.value,
+                recents: recents.value,
+                positions: positions.value,
+                issues,
+            });
+        });
+        if spawned.is_err() {
+            // Match the other job helpers: a spawn failure is an empty answer,
+            // never a hang. The app degrades to a fresh session.
+            let _ = tx.send(StartupState::default());
+        }
+        rx
+    }
+
+    /// Resolves one image path on a worker and sends its answer to `tx`
+    /// (OI-049).
+    ///
+    /// The view has already applied URL/fragment/scheme policy to `key.source`;
+    /// this worker only runs `PathPolicy`'s metadata probe and canonicalize,
+    /// which are the expensive part. `None` is a valid answer (missing,
+    /// refused or too large) and still completes the waiter.
+    pub(crate) fn probe_image(&self, tx: Sender<ImageProbe>, key: ImageProbeKey) -> JobId {
+        let job = self.allocate();
+        let worker_tx = tx.clone();
+        let worker_key = key.clone();
+        let spawned = rune::task::spawn("lmdv-image-probe", move || {
+            let path = PathPolicy::new(&worker_key.root)
+                .with_allow_outside(worker_key.allow_outside)
+                .resolve_asset(Path::new(&worker_key.source))
+                .ok()
+                .map(|file| file.path);
+            let _ = worker_tx.send(ImageProbe { key: worker_key, path });
+        });
+        if spawned.is_err() {
+            let _ = tx.send(ImageProbe { key, path: None });
+        }
+        job
     }
 
     /// Reads `path` and posts [`JobMsg::Loaded`] to `mailbox`.
@@ -773,6 +870,36 @@ mod tests {
         let model = result.expect("the fixture parses");
         assert_eq!(model.revision, 9);
         assert_eq!(model.headings[0].text, "Hi");
+    }
+
+    #[test]
+    fn an_image_probe_resolves_and_refuses_paths_on_the_worker() {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().join("docs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.png"), b"not decoded here").unwrap();
+        std::fs::write(temp.path().join("secret.png"), b"outside").unwrap();
+        let (tx, rx) = channel();
+        let hub = JobHub::new();
+
+        hub.probe_image(
+            tx.clone(),
+            ImageProbeKey { root: root.clone(), source: "a.png".to_owned(), allow_outside: false, url_path: true },
+        );
+        let answer = rx.recv_timeout(Duration::from_secs(5)).expect("the probe answered");
+        assert_eq!(answer.path, Some(root.join("a.png")));
+
+        hub.probe_image(
+            tx,
+            ImageProbeKey {
+                root: root.clone(),
+                source: "../secret.png".to_owned(),
+                allow_outside: false,
+                url_path: true,
+            },
+        );
+        let answer = rx.recv_timeout(Duration::from_secs(5)).expect("the refused probe answered");
+        assert_eq!(answer.path, None, "the path policy still refuses files outside the root");
     }
 
     #[test]

@@ -1747,3 +1747,62 @@ fn details_body_after_a_blank_line_stays_in_the_card() {
     assert!(node.attr("open").is_some(), "the open state is kept");
     assert!(node.text().contains("Body text"), "the card owns its body");
 }
+
+// ---- OI-024: source-range find belongs to the parser ----------------------
+
+#[test]
+fn find_matches_drawn_text_as_source_ranges_in_document_order() {
+    let doc = doc(
+        "# Alpha Title\n\nAlpha and **alpha**.\n\n| Field | Value |\n| --- | --- |\n| Alpha | x |\n\n```rust\nlet alpha = 1;\n```\n",
+    );
+    let hits = doc.find("alpha");
+    assert_eq!(hits.len(), 5, "heading, two paragraph hits, cell and code: {hits:?}");
+    for hit in &hits {
+        assert_eq!(doc.source[hit.clone()].to_lowercase(), "alpha", "a hit names drawn text, not a marker");
+    }
+    assert!(hits.windows(2).all(|pair| pair[0].start < pair[1].start), "document order");
+    assert!(doc.find("").is_empty(), "an empty query matches nothing");
+    assert!(doc.find("rust").is_empty(), "a code fence's language is not drawn text");
+}
+
+#[test]
+fn find_folds_case_without_regex_or_accent_folding() {
+    let doc = doc("Beyoncé BEYONCÉ\n\nAkeneo and akeneo.\n");
+    assert_eq!(doc.find("beyoncé").len(), 2, "case folding covers non-ASCII");
+    assert!(doc.find("beyonce").is_empty(), "no accent folding (R-18)");
+    assert_eq!(doc.find("AKENEO").len(), 2);
+    assert!(doc.find("Akeneo|akeneo").is_empty(), "no regex");
+    assert!(doc.find("a.*o").is_empty(), "no regex");
+}
+
+#[test]
+fn find_keeps_byte_offsets_through_multibyte_lowercasing() {
+    // `İ` lowercases to two characters; the hit still covers the original char.
+    assert_eq!(crate::match_ranges("İstanbul", "i\u{307}stanbul"), vec![0..9]);
+    assert_eq!(crate::match_ranges("AKENEO akeneo", "akeneo"), vec![0..6, 7..13]);
+    let doc = doc("İstanbul\n");
+    assert_eq!(doc.find("i\u{307}stanbul"), vec![0..9]);
+}
+
+#[test]
+fn find_marks_and_link_destinations_are_not_searchable() {
+    let doc = doc("[**Alpha**](https://example.com/secret)\n\n`alpha`\n\n> alpha\n\n- alpha\n");
+    let hits = doc.find("alpha");
+    assert_eq!(hits.len(), 4, "link text, code span, quote and list item: {hits:?}");
+    for hit in &hits {
+        assert_eq!(doc.source[hit.clone()].to_lowercase(), "alpha");
+    }
+    assert!(doc.find("secret").is_empty(), "a destination is not drawn text");
+    assert!(doc.find("https").is_empty());
+}
+
+#[test]
+fn find_walks_footnote_definitions_and_nested_blocks() {
+    let doc = doc("Alpha[^1]\n\n[^1]: alpha in the footnote\n    - nested alpha\n");
+    let hits = doc.find("alpha");
+    assert_eq!(hits.len(), 3, "reference, definition text and nested list: {hits:?}");
+    assert!(hits.iter().any(|hit| hit.start > 10), "the definition body is searched too: {hits:?}");
+    for hit in &hits {
+        assert_eq!(doc.source[hit.clone()].to_lowercase(), "alpha");
+    }
+}

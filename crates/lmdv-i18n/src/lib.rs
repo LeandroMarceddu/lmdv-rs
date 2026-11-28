@@ -32,12 +32,19 @@
 //! * The language picker: [`locales`] (id, BCP 47 tag, native label), then
 //!   [`set_locale`] with the chosen id.
 //!
+//! [`with_locale`] and [`with_isolated_locale`] run a closure with a separate
+//! translator bound to the calling thread. Inside such a scope every lookup
+//! and [`set_locale`] use that translator, so a test can switch the interface
+//! language in-process and return to the global one on exit. Production code
+//! never enters a scope.
+//!
 //! The six full help pages live in `locales/help/<id>.html`; [`help_page`]
 //! embeds them at build time and falls back to English for an unknown id.
 
 #![forbid(unsafe_code)]
 
 use core::fmt::Display;
+use std::cell::Cell;
 
 use rune_i18n::I18n;
 pub use rune_i18n::{Key, LocaleInfo, PluralCategory, PluralKey};
@@ -48,6 +55,30 @@ include!(concat!(env!("OUT_DIR"), "/i18n.rs"));
 /// The process-wide translator. Every window shares it; the current locale is
 /// an atomic, so a change is visible to the next lookup in every tab.
 pub static I18N: I18n = I18n::new(&CATALOG);
+
+thread_local! {
+    /// A second translator, created only for a thread that enters a scope.
+    static SCOPED_I18N: I18n = I18n::new(&CATALOG);
+    /// Whether this thread's lookups use `SCOPED_I18N` instead of `I18N`.
+    static SCOPED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Runs `f` against this thread's active translator.
+fn with_i18n<R>(f: impl FnOnce(&I18n) -> R) -> R {
+    if SCOPED.with(Cell::get) { SCOPED_I18N.with(f) } else { f(&I18N) }
+}
+
+fn active_locale() -> usize {
+    with_i18n(I18n::locale)
+}
+
+/// Whether this thread currently has an isolated translator.
+///
+/// Production is always `false`. Settings uses this to keep a test that did
+/// not open a scope from changing the locale other tests read.
+pub fn is_isolated() -> bool {
+    SCOPED.with(Cell::get)
+}
 
 /// Resolves an English key name to a [`Key`], for use in a `const` initializer.
 ///
@@ -75,7 +106,7 @@ pub const fn plural_key(name: &str) -> PluralKey {
 
 /// The current locale's message for `key`, or English when it has none.
 pub fn text(key: Key) -> &'static str {
-    I18N.text(key)
+    with_i18n(|translator| translator.text(key))
 }
 
 /// `key`'s message in `locale` (an index into [`locales`]), or English when
@@ -87,7 +118,7 @@ pub fn text_in(locale: usize, key: Key) -> &'static str {
 /// The current locale's message with its `{name}` placeholders filled from
 /// `args`; unknown placeholders stay as written.
 pub fn format(key: Key, args: &[(&str, &dyn Display)]) -> String {
-    render(I18N.text(key), args)
+    render(text(key), args)
 }
 
 /// [`format()`] in an explicit locale (an index into [`locales`]).
@@ -98,42 +129,92 @@ pub fn format_in(locale: usize, key: Key, args: &[(&str, &dyn Display)]) -> Stri
 /// The current locale's message for plural base `key` and `count`'s CLDR
 /// category, with `other` as the fallback. Placeholders are not filled.
 pub fn plural(key: PluralKey, count: u64) -> &'static str {
-    I18N.plural(key, count)
+    with_i18n(|translator| translator.plural(key, count))
 }
 
 /// [`plural`] with `{count}` and `args` filled in.
 pub fn plural_format(key: PluralKey, count: u64, args: &[(&str, &dyn Display)]) -> String {
     let mut all: Vec<(&str, &dyn Display)> = args.to_vec();
     all.push(("count", &count));
-    render(I18N.plural(key, count), &all)
+    render(plural(key, count), &all)
 }
 
 /// The CLDR plural category (`one`, `other`, …) of `count` in the current
 /// locale; what [`plural`] selects on.
 pub fn plural_category(count: u64) -> PluralCategory {
-    I18N.plural_category(count)
+    with_i18n(|translator| translator.plural_category(count))
 }
 
 /// Makes the locale with `id` (`"en"`, `"zh-CN"`, …) current.
 ///
-/// Returns whether `id` is a supported locale; an unknown id leaves the current
-/// locale unchanged and returns `false`.
+/// With no active scope this changes the process-wide translator. Inside a
+/// [`with_locale`]/[`with_isolated_locale`] scope it changes only that thread's
+/// translator. Returns whether `id` is a supported locale; an unknown id leaves
+/// the current locale unchanged and returns `false`.
 pub fn set_locale(id: &str) -> bool {
     let Some(index) = I18N.find_locale(id) else {
         return false;
     };
-    I18N.set_locale(index);
+    with_i18n(|translator| {
+        translator.set_locale(index);
+    });
     true
 }
 
 /// The current locale's index into [`locales`]; `0` is English.
 pub fn locale() -> usize {
-    I18N.locale()
+    with_i18n(I18n::locale)
 }
 
 /// The current locale's id (`"en"`, `"zh-CN"`, …).
 pub fn locale_id() -> &'static str {
-    I18N.info().id()
+    with_i18n(|translator| translator.info()).id()
+}
+
+struct RestoreScope {
+    isolated: bool,
+    locale: usize,
+}
+
+impl Drop for RestoreScope {
+    fn drop(&mut self) {
+        SCOPED.with(|cell| cell.set(self.isolated));
+        SCOPED_I18N.with(|translator| {
+            translator.set_locale(self.locale);
+        });
+    }
+}
+
+/// Enters an isolated scope seeded at `index`, saving whatever was active.
+fn enter_scope(index: usize) -> RestoreScope {
+    let previous = RestoreScope { isolated: is_isolated(), locale: active_locale() };
+    SCOPED.with(|cell| cell.set(true));
+    SCOPED_I18N.with(|translator| {
+        translator.set_locale(index);
+    });
+    previous
+}
+
+/// Runs `f` with a translator isolated to this thread, seeded at locale `id`.
+///
+/// Every lookup and [`set_locale`] inside `f` uses the isolated translator; the
+/// process-wide locale is never touched. The previous scope (or the global
+/// translator) is restored when `f` returns or unwinds. An unknown `id` keeps
+/// the locale that is currently active.
+pub fn with_locale<R>(id: &str, f: impl FnOnce() -> R) -> R {
+    let index = I18N.find_locale(id).unwrap_or_else(active_locale);
+    let _scope = enter_scope(index);
+    f()
+}
+
+/// [`with_locale`] seeded at the currently active locale.
+///
+/// Use this when a test wants to switch away from and back to the locale it
+/// started with without knowing which one it is.
+pub fn with_isolated_locale<R>(f: impl FnOnce() -> R) -> R {
+    let index = active_locale();
+    let _scope = enter_scope(index);
+    f()
 }
 
 /// The full help page for `locale_id` (an id such as `"en"` or `"zh-CN"`).
@@ -161,7 +242,7 @@ const HELP_ZH_CN: &str = include_str!("../../../locales/help/zh-CN.html");
 
 /// The current locale: id, BCP 47 tag, native label and `rtl`.
 pub fn locale_info() -> LocaleInfo {
-    I18N.info()
+    with_i18n(I18n::info)
 }
 
 /// Every supported locale, English first. The language picker iterates this.
@@ -197,19 +278,19 @@ pub fn negotiate_system() -> usize {
 
 /// `n` with the current locale's grouping (`1,234`, `1.234`, `1 234`).
 pub fn number(n: i64) -> String {
-    I18N.integer(n)
+    with_i18n(|translator| translator.integer(n))
 }
 
 /// `n` with at most `max_fraction` fraction digits in the current locale
 /// (`3.5`, `3,5`).
 pub fn decimal(n: f64, max_fraction: u8) -> String {
-    I18N.decimal(n, max_fraction)
+    with_i18n(|translator| translator.decimal(n, max_fraction))
 }
 
 /// `items` joined as the current locale's long conjunction (`a, b, and c`,
 /// `a, b und c`).
 pub fn list<S: AsRef<str>>(items: &[S]) -> String {
-    I18N.list(items)
+    with_i18n(|translator| translator.list(items))
 }
 
 /// Fills single-brace `{name}` placeholders in `template` from `args`.
@@ -488,6 +569,54 @@ mod tests {
 
         assert!(set_locale("en"));
         assert_eq!(locale_id(), "en");
+    }
+
+    #[test]
+    fn a_scope_changes_lookups_without_touching_the_process_locale() {
+        let _guard = locale_lock();
+        assert!(set_locale("en"));
+        assert!(!is_isolated());
+        assert_eq!(text(key("toolbar.save")), "Save (Ctrl+S)");
+
+        with_locale("it", || {
+            assert!(is_isolated(), "the thread now has its own translator");
+            assert_eq!(locale_id(), "it");
+            assert_eq!(text(key("toolbar.save")), "Salva (Ctrl+S)");
+            assert_eq!(t!("pane.lineN", "n" => 3), "Riga 3");
+            assert_eq!(number(1234), "1234", "formatting follows the scoped locale");
+
+            // A live switch inside the scope stays on this thread.
+            assert!(set_locale("de"));
+            assert_eq!(locale_id(), "de");
+            assert_eq!(text(key("toolbar.save")), "Speichern (Strg+S)");
+            assert_eq!(plural_category(1), PluralCategory::One);
+        });
+
+        assert!(!is_isolated(), "the scope is restored on exit");
+        assert_eq!(locale_id(), "en", "the process-wide locale was never changed");
+        assert_eq!(text(key("toolbar.save")), "Save (Ctrl+S)");
+    }
+
+    #[test]
+    fn nested_scopes_restore_the_outer_locale() {
+        let _guard = locale_lock();
+        assert!(set_locale("en"));
+        with_locale("it", || {
+            assert_eq!(text(key("toolbar.save")), "Salva (Ctrl+S)");
+            with_locale("fr", || {
+                assert_eq!(text(key("toolbar.save")), "Enregistrer (Ctrl+S)");
+            });
+            assert_eq!(text(key("toolbar.save")), "Salva (Ctrl+S)", "the inner scope restored the outer one");
+
+            with_isolated_locale(|| {
+                assert_eq!(locale_id(), "it", "an unseeded scope keeps the active locale");
+                assert!(set_locale("zh-CN"));
+                assert_eq!(text(key("msg.discardTitle")), "未保存的更改");
+            });
+            assert_eq!(locale_id(), "it");
+        });
+        assert_eq!(locale_id(), "en");
+        assert!(set_locale("en"));
     }
 
     #[test]

@@ -14,6 +14,8 @@
 //!   inserts from the original's `src/editCommands.ts` (E-22–E-31);
 //! - [`syntax`](mod@syntax): Markdown source highlighting from `rune-kit`'s
 //!   highlighter, mapped to [`rune::Span`]s;
+//! - [`syntax_tree`](mod@syntax_tree): a bounded, revision-keyed Markdown tree
+//!   for the editor's live format-bar and `/`-menu gating (OI-061);
 //! - [`spell`](mod@spell): Hunspell dictionary discovery, checking and the
 //!   underline spans that compose with the syntax spans (ADR-008, E-SPELL).
 //!
@@ -29,6 +31,7 @@ pub mod format;
 pub mod session;
 pub mod spell;
 pub mod syntax;
+pub mod syntax_tree;
 
 pub use block::{
     BLOCK_MODE_MAX_BYTES, BLOCK_MODE_MAX_LINES, BlockEditKind, BlockEditor, EditBlock, JOURNAL_MAX_BYTES,
@@ -46,3 +49,6 @@ pub use spell::{
     dictionary_roots, discover, requested_tags,
 };
 pub use syntax::{SYNTAX_MAX_BYTES, SyntaxCache, syntax_spans};
+pub use syntax_tree::{
+    CONTEXT_WINDOW_BYTES, MarkdownContext, cached_markdown_context, clear_markdown_context_cache, markdown_context,
+};

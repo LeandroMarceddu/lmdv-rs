@@ -36,7 +36,7 @@
 | T-18 | P1 | done | Menu at `view.rs:167-330`; `actions_tests::the_tab_menu_copy_and_reveal_act_on_that_tab`, `close_other_tabs_keeps_only_the_chosen_tab`, `tab_menu_opens_on_a_background_tab`; scenes `tab-menu`, `tab-menu-file`. |
 | T-19 | P0 | done | A runtime reorder test drives tab 1 past tab 2's midpoint, Esc-cancel is tested, and the strip is built without `drag_state`/`tear_out` while an export pins the document, so no reorder or tear-out can start. The kit's drag slop stays 4 pt against the spec's 5 (private constant; accepted). |
 | T-20 | P1 | substitute | `tear_out_tests::a_release_over_another_window_moves_the_tab_there`, `a_drop_outside_every_window_opens_one_at_the_pointer_and_adopts_the_tab`; kit detach distance is 36 pt. Release-only: the new window does not follow the pointer until mouse-up (OI-125, STATUS P4-02c). |
-| T-21 | P1 | substitute | Kit refuses a lone tab (`tear_out_tests::a_lone_tab_never_tears_out`); the tab menu's “Move to a new window” is the substitute; OI-126 accepted (no Rune `drag_window`). |
+| T-21 | P1 | done | The lone reading tab uses `TabItem::window_drag(true)`; multiple tabs keep select/reorder/tear handlers. Runtime proof with `TitlebarAction::Drag`. |
 | T-22 | P1 | substitute | `transfer_tests::a_clean_tab_moves_with_its_view_state_and_the_watch`, `a_clean_duplicate_merges_into_the_existing_tab`, `a_dirty_duplicate_is_refused_and_returned_with_text_and_lease_intact`, `hover_opens_and_clears_the_incoming_slot`. STATUS P4-02b: in-process protocol, no 15 s timeout; a vanished target restores at once. |
 | T-23 | P1 | done | `actions_tests::close_other_tabs_keeps_only_the_chosen_tab`, `close_tabs_to_the_right_closes_from_the_right`, `a_dirty_tab_in_the_sequence_asks_and_cancel_stops_the_run`. |
 | T-24 | P0 | done | `editor_tests::a_clean_pasted_document_still_asks_on_window_close`, `save_all_waits_for_a_pasted_save_as_before_closing`, `the_last_view_of_a_dirty_document_asks_and_cancel_keeps_everything`; localized list in `window.rs:1266-1286`; Save all / Don't save / Cancel in `view.rs`. |
@@ -84,12 +84,12 @@
 | C-09 | P1 | done | `palette_tests::shortcuts_do_not_reach_the_window_behind`, `the_text_box_keeps_its_editing_keys`, `f1_closes_the_palette_and_opens_help`. |
 | C-10 | P1 | done | `palette_tests::focus_returns_to_where_it_was`, `closing_returns_the_keyboard_to_the_control_it_left`, `closing_restores_the_page_selection`, `escape_and_the_backdrop_close_it`. Right-click suppression on rows is not asserted, but no app context menu is wired to palette rows. |
 | C-11 | P0 | done | 101 command specs in `commands.rs`, including `view.pin`, five themes, reader size, reading settings, help, Share/PDF/HTML/DOCX, the H1 break toggle and the editor commands; `actions_tests::the_palette_lists_the_new_commands`, `the_start_group_leads_with_open_and_paste`; `palette_tests::only_commands_that_can_run_now_are_listed`. |
-| C-12 | P1 | substitute | `palette_tests::the_input_and_list_carry_the_combobox_roles`, `the_count_is_announced_after_the_typing_pauses`; OI-148: Rune has no `aria-autocomplete`/`aria-controls` state. |
+| C-12 | P1 | done | `palette_tests::the_input_advertises_list_autocomplete_and_controls_the_list`, `an_empty_palette_does_not_name_a_missing_list` and the older role/count tests; `--scene palette --tree` proof shows `autoComplete: "list"` and `controls: ["palette-list"]` on the input. |
 | C-13 | P1 | substitute | `palette_tests::a_tab_switch_or_a_document_change_closes_it`, `another_modal_closes_it`; `poll_palette` closes on prompt/help/Share/table/lightbox/block-menu/tab-menu (`palette.rs:695-711`). The full-window scrim (`palette_ui.rs:49-78`) makes a tab drag unreachable while the palette is open, so no drag trigger is needed; static linkage makes the module-load-failure clause n/a. |
-| W-01 | P0 | substitute | Native Linux frame (ADR-007; FEATURE_PARITY §4 W-01/02/03/05/06/08). The app toolbar is not a window-drag region (there is no `data-tauri-drag-region` equivalent), so dragging or double-clicking the toolbar does not move/maximize the window; the native frame owns both. |
-| W-02 | P0 | substitute | Native caption buttons; Close still runs the unsaved prompt through upstream `CloseResponse` and `app.rs:480-485 close_request` (STATUS P0). |
+| W-01 | P0 | done | Linux CSD (ADR-028): the rune-kit toolbar is a `.window_drag()` band, so empty parts move the window and double-click toggles maximize/restore; native frame stays on X11/KDE/Hyprland. |
+| W-02 | P0 | done | Rune draws caption buttons over the toolbar from the desktop button layout; caption Close routes through `CloseResponse::Defer` and the unsaved prompt. |
 | W-03 | P2 | n/a | Windows 11 Snap flyout over app-drawn caption buttons; Linux uses the native frame and the compositor's own snap. FEATURE_PARITY §4 lists it n/a. |
-| W-04 | P1 | substitute | The native frame draws the max/restore icon and state; there is no app caption to switch label or aria state (ADR-007). |
+| W-04 | P1 | done | Rune swaps the max/restore icon and aria label on configure/resize; its wording is “Restore” rather than “Restore down” (cosmetic follow-up). |
 | W-05 | P2 | n/a | The native titlebar supplies the system menu; there is no app-drawn caption to right-click. FEATURE_PARITY §4 lists it n/a. |
 | W-06 | P2 | n/a | The native frame greys its own caption on blur. FEATURE_PARITY §4 lists it n/a. |
 | W-07 | P1 | done | `view.pin` keeps its checked state, per-window (never persisted), and the toolbar now has the visible `pin-toggle` button reading the same predicate; the palette check and the Wayland refusal test remain. |
@@ -102,7 +102,7 @@
 | D-04 | P0 | partial | Tab drag exists through the kit and the T-22 transfer path, but see T-19: no reorder test, 4 pt slop, and the export pin refuses the drop rather than the gesture. |
 | D-05 | P1 | substitute | An in-app ghost gap (`transfer_tests::hover_opens_and_clears_the_incoming_slot`; `build_layered` ghost in STATUS P4-02c) replaces the DWM-cloaked moving window; DWM does not exist on Linux. |
 | D-06 | P1 | done | The reader has middle/empty-margin drag-to-scroll with a 3 pt threshold, cursor, autoscroll and Rune middle-autoscroll suppression (R-28); see the R-28 row for the link-glyph routing residual. |
-| D-07 | P2 | substitute | `tear_out_tests::a_lone_tab_never_tears_out`; “Move to a new window” is the menu substitute; OI-126 (no Rune window-drag API). |
+| D-07 | P2 | done | Lone-tab window drag is wired through the kit hook; the menu remains as an alternate. |
 | D-08 | P1 | done | Escape, `Tx::cancel_pointer` and opening a modal all settle `TabDragPhase::Idle` with original tab order; no kit callback was needed. |
 
 ## Counts

@@ -1,0 +1,4254 @@
+{
+  "accessibility": {
+    "bounds": [
+      0.0,
+      0.0,
+      1280.0,
+      900.0
+    ],
+    "children": [
+      {
+        "bounds": [
+          0.0,
+          0.0,
+          1280.0,
+          900.0
+        ],
+        "children": [
+          {
+            "actions": [
+              "click"
+            ],
+            "bounds": [
+              0.0,
+              0.0,
+              1280.0,
+              900.0
+            ],
+            "children": [
+              {
+                "bounds": [
+                  0.0,
+                  0.0,
+                  1280.0,
+                  900.0
+                ],
+                "children": [
+                  {
+                    "bounds": [
+                      0.0,
+                      0.0,
+                      1280.0,
+                      900.0
+                    ],
+                    "children": [
+                      {
+                        "bounds": [
+                          0.0,
+                          0.0,
+                          1280.0,
+                          8.0
+                        ],
+                        "key": "titlebar-strip",
+                        "role": "group"
+                      },
+                      {
+                        "bounds": [
+                          0.0,
+                          8.0,
+                          1280.0,
+                          892.0
+                        ],
+                        "children": [
+                          {
+                            "bounds": [
+                              8.0,
+                              8.0,
+                              1264.0,
+                              884.0
+                            ],
+                            "children": [
+                              {
+                                "bounds": [
+                                  8.0,
+                                  8.0,
+                                  1264.0,
+                                  48.0
+                                ],
+                                "children": [
+                                  {
+                                    "bounds": [
+                                      8.0,
+                                      8.0,
+                                      1264.0,
+                                      48.0
+                                    ],
+                                    "children": [
+                                      {
+                                        "bounds": [
+                                          613.1,
+                                          22.0,
+                                          53.8,
+                                          20.0
+                                        ],
+                                        "key": "title",
+                                        "name": "New tab",
+                                        "role": "label"
+                                      }
+                                    ],
+                                    "key": "center",
+                                    "role": "group"
+                                  },
+                                  {
+                                    "bounds": [
+                                      84.0,
+                                      23.3,
+                                      38.5,
+                                      17.5
+                                    ],
+                                    "children": [
+                                      {
+                                        "bounds": [
+                                          84.0,
+                                          23.3,
+                                          38.5,
+                                          17.5
+                                        ],
+                                        "name": "lmdv",
+                                        "role": "label"
+                                      }
+                                    ],
+                                    "key": "leading",
+                                    "role": "group"
+                                  },
+                                  {
+                                    "bounds": [
+                                      925.2,
+                                      20.0,
+                                      334.8,
+                                      24.0
+                                    ],
+                                    "children": [
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus",
+                                          "expand"
+                                        ],
+                                        "bounds": [
+                                          925.2,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Toggle file browser",
+                                        "key": "toggle-browser",
+                                        "name": "Toggle file browser",
+                                        "role": "button",
+                                        "shortcut": "Ctrl+B",
+                                        "states": [
+                                          "collapsed"
+                                        ]
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus"
+                                        ],
+                                        "bounds": [
+                                          953.2,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Open file…",
+                                        "key": "open-file-toolbar",
+                                        "name": "Open file…",
+                                        "role": "button",
+                                        "shortcut": "Ctrl+O"
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus",
+                                          "expand"
+                                        ],
+                                        "bounds": [
+                                          981.2,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Edit",
+                                        "key": "edit-toggle",
+                                        "name": "Edit",
+                                        "role": "button",
+                                        "shortcut": "Ctrl+E",
+                                        "states": [
+                                          "collapsed"
+                                        ]
+                                      },
+                                      {
+                                        "bounds": [
+                                          1009.2,
+                                          20.0,
+                                          55.9,
+                                          24.0
+                                        ],
+                                        "description": "Save",
+                                        "key": "save-toolbar",
+                                        "name": "Save",
+                                        "role": "button",
+                                        "shortcut": "Ctrl+S",
+                                        "states": [
+                                          "disabled"
+                                        ]
+                                      },
+                                      {
+                                        "bounds": [
+                                          1074.2,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "children": [
+                                          {
+                                            "bounds": [
+                                              1074.2,
+                                              20.0,
+                                              24.0,
+                                              24.0
+                                            ],
+                                            "description": "Share menu",
+                                            "hasPopup": "menu",
+                                            "key": "share",
+                                            "name": "Share… (Ctrl+Shift+E)",
+                                            "role": "button",
+                                            "shortcut": "Ctrl+Shift+E",
+                                            "states": [
+                                              "disabled",
+                                              "collapsed"
+                                            ]
+                                          }
+                                        ],
+                                        "key": "share-trigger",
+                                        "role": "group"
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus"
+                                        ],
+                                        "bounds": [
+                                          1102.2,
+                                          20.0,
+                                          40.9,
+                                          24.0
+                                        ],
+                                        "description": "Reading settings",
+                                        "key": "reading-settings-toolbar",
+                                        "name": "Reading settings",
+                                        "role": "button"
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus",
+                                          "expand"
+                                        ],
+                                        "bounds": [
+                                          1147.0,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Keep on top of other windows",
+                                        "key": "pin-toggle",
+                                        "name": "Keep on top of other windows",
+                                        "role": "button",
+                                        "states": [
+                                          "collapsed"
+                                        ]
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus"
+                                        ],
+                                        "bounds": [
+                                          1180.0,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Keyboard shortcuts",
+                                        "key": "help",
+                                        "name": "Help",
+                                        "role": "button",
+                                        "shortcut": "F1"
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus",
+                                          "expand"
+                                        ],
+                                        "bounds": [
+                                          1208.0,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Toggle outline",
+                                        "key": "toggle-outline",
+                                        "name": "Toggle outline",
+                                        "role": "button",
+                                        "shortcut": "Ctrl+I",
+                                        "states": [
+                                          "collapsed"
+                                        ]
+                                      },
+                                      {
+                                        "actions": [
+                                          "click",
+                                          "focus",
+                                          "expand"
+                                        ],
+                                        "bounds": [
+                                          1236.0,
+                                          20.0,
+                                          24.0,
+                                          24.0
+                                        ],
+                                        "description": "Settings",
+                                        "key": "settings-toolbar",
+                                        "name": "Settings",
+                                        "role": "button",
+                                        "shortcut": "Ctrl+,",
+                                        "states": [
+                                          "collapsed"
+                                        ]
+                                      }
+                                    ],
+                                    "key": "trailing",
+                                    "role": "group"
+                                  }
+                                ],
+                                "key": "toolbar",
+                                "name": "New tab",
+                                "role": "toolbar"
+                              },
+                              {
+                                "bounds": [
+                                  8.0,
+                                  56.0,
+                                  1264.0,
+                                  836.0
+                                ],
+                                "children": [
+                                  {
+                                    "bounds": [
+                                      8.0,
+                                      56.0,
+                                      1264.0,
+                                      40.0
+                                    ],
+                                    "children": [
+                                      {
+                                        "bounds": [
+                                          16.0,
+                                          62.0,
+                                          1248.0,
+                                          28.0
+                                        ],
+                                        "children": [
+                                          {
+                                            "actions": [
+                                              "scroll-up",
+                                              "scroll-down",
+                                              "set-scroll-offset"
+                                            ],
+                                            "bounds": [
+                                              16.0,
+                                              62.0,
+                                              224.0,
+                                              28.0
+                                            ],
+                                            "children": [
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  16.0,
+                                                  62.0,
+                                                  224.0,
+                                                  28.0
+                                                ],
+                                                "children": [
+                                                  {
+                                                    "actions": [
+                                                      "focus",
+                                                      "context-menu",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      16.0,
+                                                      62.0,
+                                                      224.0,
+                                                      28.0
+                                                    ],
+                                                    "children": [
+                                                      {
+                                                        "actions": [
+                                                          "click",
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          216.0,
+                                                          66.0,
+                                                          20.0,
+                                                          20.0
+                                                        ],
+                                                        "name": "Close tab",
+                                                        "role": "button"
+                                                      }
+                                                    ],
+                                                    "controls": [
+                                                      "shell"
+                                                    ],
+                                                    "key": "t-tab-2",
+                                                    "name": "New tab",
+                                                    "position": 1,
+                                                    "role": "tab",
+                                                    "states": [
+                                                      "selected"
+                                                    ]
+                                                  }
+                                                ],
+                                                "key": "tabs-list",
+                                                "name": "Open documents",
+                                                "role": "tab-list",
+                                                "setSize": 1
+                                              }
+                                            ],
+                                            "key": "tabs-scroll",
+                                            "role": "scroll-view",
+                                            "scroll": [
+                                              0.0,
+                                              0.0,
+                                              0.0
+                                            ],
+                                            "states": [
+                                              "clips"
+                                            ]
+                                          },
+                                          {
+                                            "actions": [
+                                              "click",
+                                              "focus"
+                                            ],
+                                            "bounds": [
+                                              246.0,
+                                              64.0,
+                                              24.0,
+                                              24.0
+                                            ],
+                                            "description": "New tab",
+                                            "key": "new-tab",
+                                            "name": "New tab (Ctrl+T)",
+                                            "role": "button",
+                                            "shortcut": "Ctrl+T"
+                                          }
+                                        ],
+                                        "key": "tabs",
+                                        "role": "group"
+                                      }
+                                    ],
+                                    "key": "tab-band",
+                                    "role": "group"
+                                  },
+                                  {
+                                    "bounds": [
+                                      8.0,
+                                      96.0,
+                                      1264.0,
+                                      1.0
+                                    ],
+                                    "key": "tab-separator",
+                                    "role": "group"
+                                  },
+                                  {
+                                    "bounds": [
+                                      8.0,
+                                      97.0,
+                                      1264.0,
+                                      795.0
+                                    ],
+                                    "children": [
+                                      {
+                                        "actions": [
+                                          "scroll-up",
+                                          "scroll-down",
+                                          "set-scroll-offset"
+                                        ],
+                                        "bounds": [
+                                          8.0,
+                                          97.0,
+                                          1264.0,
+                                          795.0
+                                        ],
+                                        "children": [
+                                          {
+                                            "actions": [
+                                              "scroll-into-view"
+                                            ],
+                                            "bounds": [
+                                              8.0,
+                                              97.0,
+                                              1264.0,
+                                              613.8
+                                            ],
+                                            "children": [
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  601.5,
+                                                  179.0,
+                                                  77.1,
+                                                  35.0
+                                                ],
+                                                "name": "lmdv",
+                                                "role": "label"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  490.7,
+                                                  222.0,
+                                                  298.7,
+                                                  21.0
+                                                ],
+                                                "name": "A quiet Markdown viewer, native on Linux.",
+                                                "role": "label"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  539.0,
+                                                  265.0,
+                                                  202.0,
+                                                  23.8
+                                                ],
+                                                "key": "empty-title",
+                                                "name": "No document open",
+                                                "role": "label"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  535.8,
+                                                  296.8,
+                                                  208.5,
+                                                  21.0
+                                                ],
+                                                "key": "empty-lead",
+                                                "name": "Drop a Markdown file here, or",
+                                                "role": "label"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  481.3,
+                                                  337.8,
+                                                  317.5,
+                                                  24.0
+                                                ],
+                                                "children": [
+                                                  {
+                                                    "actions": [
+                                                      "click",
+                                                      "focus",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      481.3,
+                                                      337.8,
+                                                      129.8,
+                                                      24.0
+                                                    ],
+                                                    "key": "open-file",
+                                                    "name": "Open a file…",
+                                                    "role": "button"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "click",
+                                                      "focus",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      619.0,
+                                                      337.8,
+                                                      179.8,
+                                                      24.0
+                                                    ],
+                                                    "description": "Read the Markdown on the clipboard (Ctrl+V)",
+                                                    "key": "paste-clipboard",
+                                                    "name": "Paste from clipboard",
+                                                    "role": "button"
+                                                  }
+                                                ],
+                                                "key": "start-actions",
+                                                "role": "group"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  360.0,
+                                                  381.8,
+                                                  560.0,
+                                                  180.0
+                                                ],
+                                                "children": [
+                                                  {
+                                                    "actions": [
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      360.0,
+                                                      381.8,
+                                                      560.0,
+                                                      20.0
+                                                    ],
+                                                    "children": [
+                                                      {
+                                                        "actions": [
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          360.0,
+                                                          385.8,
+                                                          503.2,
+                                                          12.0
+                                                        ],
+                                                        "key": "recents-title",
+                                                        "name": "Recent files",
+                                                        "role": "label"
+                                                      },
+                                                      {
+                                                        "actions": [
+                                                          "click",
+                                                          "focus",
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          871.2,
+                                                          381.8,
+                                                          48.8,
+                                                          20.0
+                                                        ],
+                                                        "description": "Clear",
+                                                        "key": "recents-clear",
+                                                        "name": "Clear",
+                                                        "role": "button"
+                                                      }
+                                                    ],
+                                                    "key": "recents-head",
+                                                    "role": "group"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "click",
+                                                      "focus",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      360.0,
+                                                      405.8,
+                                                      560.0,
+                                                      36.0
+                                                    ],
+                                                    "children": [
+                                                      {
+                                                        "actions": [
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          880.8,
+                                                          417.8,
+                                                          31.3,
+                                                          12.0
+                                                        ],
+                                                        "name": "3 min",
+                                                        "role": "label"
+                                                      }
+                                                    ],
+                                                    "key": "recent-0",
+                                                    "name": "/home/you/Notes/release-checklist.md",
+                                                    "role": "button"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "click",
+                                                      "focus",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      360.0,
+                                                      445.8,
+                                                      560.0,
+                                                      36.0
+                                                    ],
+                                                    "children": [
+                                                      {
+                                                        "actions": [
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          894.5,
+                                                          457.8,
+                                                          17.5,
+                                                          12.0
+                                                        ],
+                                                        "name": "5 h",
+                                                        "role": "label"
+                                                      }
+                                                    ],
+                                                    "key": "recent-1",
+                                                    "name": "/home/you/Notes/reading/quiet-page.md",
+                                                    "role": "button"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "click",
+                                                      "focus",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      360.0,
+                                                      485.8,
+                                                      560.0,
+                                                      36.0
+                                                    ],
+                                                    "children": [
+                                                      {
+                                                        "actions": [
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          857.3,
+                                                          497.8,
+                                                          54.7,
+                                                          12.0
+                                                        ],
+                                                        "name": "yesterday",
+                                                        "role": "label"
+                                                      }
+                                                    ],
+                                                    "key": "recent-2",
+                                                    "name": "/home/you/Documents/v0.6.0-notes.md",
+                                                    "role": "button"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "click",
+                                                      "focus",
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      360.0,
+                                                      525.8,
+                                                      560.0,
+                                                      36.0
+                                                    ],
+                                                    "children": [
+                                                      {
+                                                        "actions": [
+                                                          "scroll-into-view"
+                                                        ],
+                                                        "bounds": [
+                                                          838.1,
+                                                          537.8,
+                                                          74.0,
+                                                          12.0
+                                                        ],
+                                                        "name": "Nov 18, 2026",
+                                                        "role": "label"
+                                                      }
+                                                    ],
+                                                    "key": "recent-3",
+                                                    "name": "/home/you/Documents/archive/old-plan.md",
+                                                    "role": "button"
+                                                  }
+                                                ],
+                                                "key": "recents",
+                                                "role": "group"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  425.0,
+                                                  581.8,
+                                                  430.0,
+                                                  46.0
+                                                ],
+                                                "children": [
+                                                  {
+                                                    "actions": [
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      425.0,
+                                                      581.8,
+                                                      430.0,
+                                                      13.0
+                                                    ],
+                                                    "key": "start-tip-1",
+                                                    "name": "Double-click any .md file in your file manager",
+                                                    "role": "label"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      425.0,
+                                                      598.8,
+                                                      430.0,
+                                                      12.0
+                                                    ],
+                                                    "key": "start-tip-2",
+                                                    "name": "Drag a file onto this window",
+                                                    "role": "label"
+                                                  },
+                                                  {
+                                                    "actions": [
+                                                      "scroll-into-view"
+                                                    ],
+                                                    "bounds": [
+                                                      425.0,
+                                                      614.8,
+                                                      430.0,
+                                                      13.0
+                                                    ],
+                                                    "key": "start-tip-3",
+                                                    "name": "Press Ctrl+O to browse for one",
+                                                    "role": "label"
+                                                  }
+                                                ],
+                                                "key": "start-tips",
+                                                "role": "group"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  600.5,
+                                                  649.8,
+                                                  78.9,
+                                                  12.0
+                                                ],
+                                                "key": "start-version",
+                                                "name": "Version 0.11.0",
+                                                "role": "label"
+                                              },
+                                              {
+                                                "actions": [
+                                                  "scroll-into-view"
+                                                ],
+                                                "bounds": [
+                                                  552.8,
+                                                  669.8,
+                                                  174.3,
+                                                  13.0
+                                                ],
+                                                "key": "start-hint",
+                                                "name": "press F1 for help, ? for the keys",
+                                                "role": "label"
+                                              }
+                                            ],
+                                            "key": "start-page",
+                                            "role": "group"
+                                          }
+                                        ],
+                                        "key": "start-page-scroll",
+                                        "role": "scroll-view",
+                                        "scroll": [
+                                          0.0,
+                                          0.0,
+                                          0.0
+                                        ],
+                                        "states": [
+                                          "clips"
+                                        ]
+                                      }
+                                    ],
+                                    "key": "content-pane",
+                                    "role": "group"
+                                  }
+                                ],
+                                "key": "window-body",
+                                "role": "group"
+                              }
+                            ],
+                            "key": "main-pane",
+                            "role": "main"
+                          }
+                        ],
+                        "key": "main-row",
+                        "role": "group"
+                      }
+                    ],
+                    "key": "main-column",
+                    "role": "group"
+                  }
+                ],
+                "key": "split",
+                "role": "group"
+              },
+              {
+                "bounds": [
+                  0.0,
+                  56.0,
+                  24.0,
+                  844.0
+                ],
+                "key": "sidebar-peek-edge",
+                "role": "group"
+              }
+            ],
+            "key": "shell",
+            "role": "group"
+          },
+          {
+            "bounds": [
+              1280.0,
+              0.0,
+              0.0,
+              900.0
+            ],
+            "children": [
+              {
+                "bounds": [
+                  1280.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "key": "block-menu-anchor",
+                "role": "group"
+              }
+            ],
+            "key": "block-menu-trigger",
+            "role": "group"
+          }
+        ],
+        "key": "kit-root",
+        "role": "group"
+      },
+      {
+        "bounds": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "role": "status",
+        "states": [
+          "live-polite"
+        ]
+      }
+    ],
+    "name": "lmdv",
+    "role": "window"
+  },
+  "anim_t": 0.0,
+  "animating": false,
+  "dark_system": false,
+  "elements": [
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "kit-root",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        0.0,
+        1280.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#f0f1f4ff",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "shell",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        0.0,
+        1280.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "split",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        0.0,
+        1280.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-pane",
+      "label": "Sidebar",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/sidebar-pane",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        0.0,
+        0.0,
+        900.0
+      ],
+      "role": "region",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "pane-content",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        0.0,
+        260.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#f0f1f4ff",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "pane-surface",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/pane-surface",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        0.0,
+        260.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0,
+      "shadows": [
+        {
+          "blur": 0.0,
+          "color": "#0000001a",
+          "inset": false,
+          "spread": 0.5,
+          "x": 0.0,
+          "y": 0.0
+        },
+        {
+          "blur": 8.0,
+          "color": "#12161f29",
+          "inset": false,
+          "spread": 0.0,
+          "x": 0.0,
+          "y": 4.0
+        }
+      ]
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-titlebar",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/sidebar-titlebar",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        0.0,
+        260.0,
+        56.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-titlebar-clear",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/sidebar-titlebar/sidebar-titlebar-clear",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        32.0,
+        84.0,
+        0.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "pane-body",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/pane-body",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        56.0,
+        260.0,
+        844.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/pane-body/sidebar",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        56.0,
+        260.0,
+        844.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-scroll",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/pane-body/sidebar/sidebar-scroll",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        56.0,
+        260.0,
+        844.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-list",
+      "label": "Files",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/sidebar-pane/pane-content/pane-body/sidebar/sidebar-scroll/sidebar-list",
+      "radius": 0.0,
+      "rect": [
+        -260.0,
+        56.0,
+        260.0,
+        8.0
+      ],
+      "role": "list",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "main-column",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        0.0,
+        1280.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "titlebar-strip",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/titlebar-strip",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        0.0,
+        1280.0,
+        8.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "main-row",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        8.0,
+        1280.0,
+        892.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "borderColor": "#00000021",
+      "fill": "#ffffffff",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "main-pane",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane",
+      "radius": 8.0,
+      "rect": [
+        8.0,
+        8.0,
+        1264.0,
+        884.0
+      ],
+      "role": "main",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "toolbar",
+      "label": "New tab",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        8.0,
+        1264.0,
+        48.0
+      ],
+      "role": "toolbar",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "center",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/center",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        8.0,
+        1264.0,
+        48.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "title",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/center/title",
+      "radius": 0.0,
+      "rect": [
+        613.1,
+        22.0,
+        53.8,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "New tab",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "leading",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/leading",
+      "radius": 0.0,
+      "rect": [
+        84.0,
+        23.25,
+        38.54,
+        17.5
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/leading/#0",
+      "radius": 0.0,
+      "rect": [
+        84.0,
+        23.25,
+        38.54,
+        17.5
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "lmdv",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 17.5,
+        "size": 14.0,
+        "tracking": 0.0,
+        "weight": 600.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "spacer",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/spacer",
+      "radius": 0.0,
+      "rect": [
+        130.54,
+        32.0,
+        786.69,
+        0.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "trailing",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing",
+      "radius": 0.0,
+      "rect": [
+        925.23,
+        20.0,
+        334.77,
+        24.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Toggle file browser",
+      "expanded": false,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Toggle file browser  Ctrl+B",
+      "inert": false,
+      "key": "toggle-browser",
+      "label": "Toggle file browser",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/toggle-browser",
+      "radius": 6.0,
+      "rect": [
+        925.23,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/toggle-browser/icon",
+      "radius": 0.0,
+      "rect": [
+        929.23,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Open file…",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Open file…  Ctrl+O",
+      "inert": false,
+      "key": "open-file-toolbar",
+      "label": "Open file…",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/open-file-toolbar",
+      "radius": 6.0,
+      "rect": [
+        953.23,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/open-file-toolbar/icon",
+      "radius": 0.0,
+      "rect": [
+        957.23,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Edit",
+      "expanded": false,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Edit  Ctrl+E",
+      "inert": false,
+      "key": "edit-toggle",
+      "label": "Edit",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/edit-toggle",
+      "radius": 6.0,
+      "rect": [
+        981.23,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/edit-toggle/icon",
+      "radius": 0.0,
+      "rect": [
+        985.23,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Save",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "help": "Save  Ctrl+S",
+      "inert": false,
+      "key": "save-toolbar",
+      "label": "Save",
+      "layerOpacity": 0.5,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/save-toolbar",
+      "radius": 6.0,
+      "rect": [
+        1009.23,
+        20.0,
+        55.91,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "label",
+      "layerOpacity": 0.5,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/save-toolbar/label",
+      "radius": 0.0,
+      "rect": [
+        1021.23,
+        22.0,
+        31.91,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Save",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000021",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "toolbar-separator-1",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/toolbar-separator-1",
+      "radius": 0.0,
+      "rect": [
+        1069.14,
+        24.0,
+        1.0,
+        16.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "share-trigger",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/share-trigger",
+      "radius": 0.0,
+      "rect": [
+        1074.14,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Share menu",
+      "expanded": false,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "help": "Share menu  Ctrl+Shift+E",
+      "inert": false,
+      "key": "share",
+      "label": "Share… (Ctrl+Shift+E)",
+      "layerOpacity": 0.5,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/share-trigger/share",
+      "radius": 6.0,
+      "rect": [
+        1074.14,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 0.5,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/share-trigger/share/icon",
+      "radius": 0.0,
+      "rect": [
+        1078.14,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Reading settings",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Reading settings",
+      "inert": false,
+      "key": "reading-settings-toolbar",
+      "label": "Reading settings",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/reading-settings-toolbar",
+      "radius": 6.0,
+      "rect": [
+        1102.14,
+        20.0,
+        40.86,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/reading-settings-toolbar/#0",
+      "radius": 0.0,
+      "rect": [
+        1114.14,
+        22.0,
+        16.86,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Aa",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Keep on top of other windows",
+      "expanded": false,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Keep on top of other windows",
+      "inert": false,
+      "key": "pin-toggle",
+      "label": "Keep on top of other windows",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/pin-toggle",
+      "radius": 6.0,
+      "rect": [
+        1147.0,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/pin-toggle/icon",
+      "radius": 0.0,
+      "rect": [
+        1151.0,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000021",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "toolbar-separator-2",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/toolbar-separator-2",
+      "radius": 0.0,
+      "rect": [
+        1175.0,
+        24.0,
+        1.0,
+        16.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Keyboard shortcuts",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Keyboard shortcuts  F1",
+      "inert": false,
+      "key": "help",
+      "label": "Help",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/help",
+      "radius": 6.0,
+      "rect": [
+        1180.0,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/help/icon",
+      "radius": 0.0,
+      "rect": [
+        1184.0,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Toggle outline",
+      "expanded": false,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Toggle outline  Ctrl+I",
+      "inert": false,
+      "key": "toggle-outline",
+      "label": "Toggle outline",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/toggle-outline",
+      "radius": 6.0,
+      "rect": [
+        1208.0,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/toggle-outline/icon",
+      "radius": 0.0,
+      "rect": [
+        1212.0,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Settings",
+      "expanded": false,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Settings  Ctrl+,",
+      "inert": false,
+      "key": "settings-toolbar",
+      "label": "Settings",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/settings-toolbar",
+      "radius": 6.0,
+      "rect": [
+        1236.0,
+        20.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/toolbar/trailing/settings-toolbar/icon",
+      "radius": 0.0,
+      "rect": [
+        1240.0,
+        24.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "window-body",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        56.0,
+        1264.0,
+        836.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "tab-band",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        56.0,
+        1264.0,
+        40.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "tabs",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs",
+      "radius": 0.0,
+      "rect": [
+        16.0,
+        62.0,
+        1248.0,
+        28.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "tabs-scroll",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll",
+      "radius": 0.0,
+      "rect": [
+        16.0,
+        62.0,
+        224.0,
+        28.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "tabs-list",
+      "label": "Open documents",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list",
+      "radius": 0.0,
+      "rect": [
+        16.0,
+        62.0,
+        224.0,
+        28.0
+      ],
+      "role": "tablist",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "inert": false,
+      "itemSelected": true,
+      "key": "t-tab-2",
+      "label": "New tab",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2",
+      "radius": 0.0,
+      "rect": [
+        16.0,
+        62.0,
+        224.0,
+        28.0
+      ],
+      "role": "tab",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#14161b1f",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "pill",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill",
+      "radius": 6.0,
+      "rect": [
+        16.0,
+        62.0,
+        224.0,
+        28.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "avatar",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/avatar",
+      "radius": 0.0,
+      "rect": [
+        22.0,
+        68.0,
+        16.0,
+        16.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/avatar/icon",
+      "radius": 0.0,
+      "rect": [
+        22.0,
+        68.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "title",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/title",
+      "radius": 0.0,
+      "rect": [
+        44.0,
+        68.0,
+        166.0,
+        16.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "label",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/title/label",
+      "radius": 0.0,
+      "rect": [
+        44.0,
+        68.0,
+        166.0,
+        16.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "New tab",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 16.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#ffffffff",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "status",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/status",
+      "radius": 0.0,
+      "rect": [
+        216.0,
+        66.0,
+        20.0,
+        20.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#14161b1f",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "ground",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/status/ground",
+      "radius": 0.0,
+      "rect": [
+        216.0,
+        66.0,
+        20.0,
+        20.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "close",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/status/close",
+      "radius": 0.0,
+      "rect": [
+        216.0,
+        66.0,
+        20.0,
+        20.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "label": "Close tab",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/status/close/#0",
+      "radius": 4.0,
+      "rect": [
+        216.0,
+        66.0,
+        20.0,
+        20.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/tabs-scroll/tabs-list/t-tab-2/pill/status/close/#0/icon",
+      "radius": 0.0,
+      "rect": [
+        218.0,
+        68.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "New tab",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "New tab  Ctrl+T",
+      "inert": false,
+      "key": "new-tab",
+      "label": "New tab (Ctrl+T)",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/new-tab",
+      "radius": 6.0,
+      "rect": [
+        246.0,
+        64.0,
+        24.0,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-band/tabs/new-tab/icon",
+      "radius": 0.0,
+      "rect": [
+        250.0,
+        68.0,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000021",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "tab-separator",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/tab-separator",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        96.0,
+        1264.0,
+        1.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "content-pane",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        97.0,
+        1264.0,
+        795.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-page-scroll",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        97.0,
+        1264.0,
+        795.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-page",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page",
+      "radius": 0.0,
+      "rect": [
+        8.0,
+        97.0,
+        1264.0,
+        613.75
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#0",
+      "radius": 0.0,
+      "rect": [
+        625.0,
+        141.0,
+        30.0,
+        30.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#1",
+      "radius": 0.0,
+      "rect": [
+        601.47,
+        179.0,
+        77.07,
+        35.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "lmdv",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 35.0,
+        "size": 28.0,
+        "tracking": 0.0,
+        "weight": 650.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#2",
+      "radius": 0.0,
+      "rect": [
+        490.64,
+        222.0,
+        298.73,
+        21.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "A quiet Markdown viewer, native on Linux.",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 21.0,
+        "size": 14.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#3",
+      "radius": 0.0,
+      "rect": [
+        640.0,
+        251.0,
+        0.0,
+        6.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "empty-title",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/empty-title",
+      "radius": 0.0,
+      "rect": [
+        539.01,
+        265.0,
+        201.99,
+        23.75
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "No document open",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 23.75,
+        "size": 19.0,
+        "tracking": 0.0,
+        "weight": 600.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "empty-lead",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/empty-lead",
+      "radius": 0.0,
+      "rect": [
+        535.77,
+        296.75,
+        208.45,
+        21.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Drop a Markdown file here, or",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 21.0,
+        "size": 14.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#6",
+      "radius": 0.0,
+      "rect": [
+        640.0,
+        325.75,
+        0.0,
+        4.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-actions",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions",
+      "radius": 0.0,
+      "rect": [
+        481.23,
+        337.75,
+        317.53,
+        24.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "inert": false,
+      "key": "open-file",
+      "label": "Open a file…",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions/open-file",
+      "radius": 6.0,
+      "rect": [
+        481.23,
+        337.75,
+        129.76,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0,
+      "shadows": [
+        {
+          "blur": 0.0,
+          "color": "#00000021",
+          "inset": true,
+          "spread": 1.0,
+          "x": 0.0,
+          "y": 0.0
+        }
+      ]
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions/open-file/icon",
+      "radius": 0.0,
+      "rect": [
+        493.23,
+        341.75,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "label",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions/open-file/label",
+      "radius": 0.0,
+      "rect": [
+        515.23,
+        339.75,
+        83.76,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Open a file…",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Read the Markdown on the clipboard (Ctrl+V)",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Read the Markdown on the clipboard (Ctrl+V)",
+      "inert": false,
+      "key": "paste-clipboard",
+      "label": "Paste from clipboard",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions/paste-clipboard",
+      "radius": 6.0,
+      "rect": [
+        618.99,
+        337.75,
+        179.77,
+        24.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "icon",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions/paste-clipboard/icon",
+      "radius": 0.0,
+      "rect": [
+        630.99,
+        341.75,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "label",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-actions/paste-clipboard/label",
+      "radius": 0.0,
+      "rect": [
+        652.99,
+        339.75,
+        133.77,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Paste from clipboard",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#8",
+      "radius": 0.0,
+      "rect": [
+        640.0,
+        369.75,
+        0.0,
+        4.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "recents",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents",
+      "radius": 0.0,
+      "rect": [
+        360.0,
+        381.75,
+        560.0,
+        180.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "recents-head",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recents-head",
+      "radius": 0.0,
+      "rect": [
+        360.0,
+        381.75,
+        560.0,
+        20.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "recents-title",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recents-head/recents-title",
+      "radius": 0.0,
+      "rect": [
+        360.0,
+        385.75,
+        503.23,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Recent files",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "description": "Clear",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "help": "Clear",
+      "inert": false,
+      "key": "recents-clear",
+      "label": "Clear",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recents-head/recents-clear",
+      "radius": 4.0,
+      "rect": [
+        871.23,
+        381.75,
+        48.77,
+        20.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "label",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recents-head/recents-clear/label",
+      "radius": 0.0,
+      "rect": [
+        881.23,
+        385.75,
+        28.77,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Clear",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "borderColor": "#00000021",
+      "fill": "#f0f1f4ff",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "inert": false,
+      "key": "recent-0",
+      "label": "/home/you/Notes/release-checklist.md",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-0",
+      "radius": 6.0,
+      "rect": [
+        360.0,
+        405.75,
+        560.0,
+        36.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-0/#0",
+      "radius": 0.0,
+      "rect": [
+        368.0,
+        415.75,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-0/#1",
+      "radius": 0.0,
+      "rect": [
+        394.0,
+        413.75,
+        372.47,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "release-checklist.md",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-0/#2",
+      "radius": 0.0,
+      "rect": [
+        776.47,
+        417.75,
+        94.29,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "/home/you/Notes",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-0/#3",
+      "radius": 0.0,
+      "rect": [
+        880.76,
+        417.75,
+        31.24,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "3 min",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "borderColor": "#00000021",
+      "fill": "#f0f1f4ff",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "inert": false,
+      "key": "recent-1",
+      "label": "/home/you/Notes/reading/quiet-page.md",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-1",
+      "radius": 6.0,
+      "rect": [
+        360.0,
+        445.75,
+        560.0,
+        36.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-1/#0",
+      "radius": 0.0,
+      "rect": [
+        368.0,
+        455.75,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-1/#1",
+      "radius": 0.0,
+      "rect": [
+        394.0,
+        453.75,
+        340.76,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "quiet-page.md",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-1/#2",
+      "radius": 0.0,
+      "rect": [
+        744.76,
+        457.75,
+        139.77,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "/home/you/Notes/reading",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-1/#3",
+      "radius": 0.0,
+      "rect": [
+        894.53,
+        457.75,
+        17.47,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "5 h",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "borderColor": "#00000021",
+      "fill": "#f0f1f4ff",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "inert": false,
+      "key": "recent-2",
+      "label": "/home/you/Documents/v0.6.0-notes.md",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-2",
+      "radius": 6.0,
+      "rect": [
+        360.0,
+        485.75,
+        560.0,
+        36.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-2/#0",
+      "radius": 0.0,
+      "rect": [
+        368.0,
+        495.75,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-2/#1",
+      "radius": 0.0,
+      "rect": [
+        394.0,
+        493.75,
+        318.11,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "v0.6.0-notes.md",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-2/#2",
+      "radius": 0.0,
+      "rect": [
+        722.11,
+        497.75,
+        125.23,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "/home/you/Documents",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-2/#3",
+      "radius": 0.0,
+      "rect": [
+        857.34,
+        497.75,
+        54.66,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "yesterday",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "borderColor": "#00000021",
+      "fill": "#f0f1f4ff",
+      "focusVisible": false,
+      "focusable": true,
+      "focused": false,
+      "inert": false,
+      "key": "recent-3",
+      "label": "/home/you/Documents/archive/old-plan.md",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-3",
+      "radius": 6.0,
+      "rect": [
+        360.0,
+        525.75,
+        560.0,
+        36.0
+      ],
+      "role": "button",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-3/#0",
+      "radius": 0.0,
+      "rect": [
+        368.0,
+        535.75,
+        16.0,
+        16.0
+      ],
+      "role": "icon",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#1a1c1fff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-3/#1",
+      "radius": 0.0,
+      "rect": [
+        394.0,
+        533.75,
+        254.73,
+        20.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "old-plan.md",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 20.0,
+        "size": 13.0,
+        "tracking": 0.0,
+        "weight": 500.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-3/#2",
+      "radius": 0.0,
+      "rect": [
+        658.73,
+        537.75,
+        169.31,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "/home/you/Documents/archive",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/recents/recent-3/#3",
+      "radius": 0.0,
+      "rect": [
+        838.05,
+        537.75,
+        73.95,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Nov 18, 2026",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#10",
+      "radius": 0.0,
+      "rect": [
+        640.0,
+        569.75,
+        0.0,
+        4.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-tips",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-tips",
+      "radius": 0.0,
+      "rect": [
+        425.0,
+        581.75,
+        430.0,
+        46.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-tip-1",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-tips/start-tip-1",
+      "radius": 0.0,
+      "rect": [
+        425.0,
+        581.75,
+        430.0,
+        13.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Double-click any .md file in your file manager",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-tip-2",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-tips/start-tip-2",
+      "radius": 0.0,
+      "rect": [
+        425.0,
+        598.75,
+        430.0,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Drag a file onto this window",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369ff",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-tip-3",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-tips/start-tip-3",
+      "radius": 0.0,
+      "rect": [
+        425.0,
+        614.75,
+        430.0,
+        13.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Press Ctrl+O to browse for one",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/#12",
+      "radius": 0.0,
+      "rect": [
+        640.0,
+        635.75,
+        0.0,
+        6.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-version",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-version",
+      "radius": 0.0,
+      "rect": [
+        600.53,
+        649.75,
+        78.94,
+        12.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "Version 0.11.0",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "color": "#606369cc",
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "start-hint",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/main-pane/window-body/content-pane/start-page-scroll/start-page/start-hint",
+      "radius": 0.0,
+      "rect": [
+        552.84,
+        669.75,
+        174.34,
+        13.0
+      ],
+      "role": "text",
+      "scale": 1.0,
+      "text": "press F1 for help, ? for the keys",
+      "textStyle": {
+        "family": "DejaVu Sans",
+        "italic": false,
+        "lineHeight": 12.0,
+        "size": 11.0,
+        "tracking": 0.0,
+        "weight": 400.0
+      }
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "inspector-pane",
+      "label": "Inspector",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/split/main-column/main-row/inspector-pane",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        8.0,
+        0.0,
+        892.0
+      ],
+      "role": "region",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "pane-content",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/inspector-pane/pane-content",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        8.0,
+        240.0,
+        892.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "pane-body",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/inspector-pane/pane-content/pane-body",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        8.0,
+        240.0,
+        892.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/inspector-pane/pane-content/pane-body/sidebar",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        8.0,
+        240.0,
+        892.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-scroll",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/inspector-pane/pane-content/pane-body/sidebar/sidebar-scroll",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        8.0,
+        240.0,
+        892.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-list",
+      "label": "Outline",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 0.0,
+      "path": "kit-root/shell/split/main-column/main-row/inspector-pane/pane-content/pane-body/sidebar/sidebar-scroll/sidebar-list",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        8.0,
+        240.0,
+        8.0
+      ],
+      "role": "list",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "sidebar-peek-edge",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/shell/sidebar-peek-edge",
+      "radius": 0.0,
+      "rect": [
+        0.0,
+        56.0,
+        24.0,
+        844.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "block-menu-trigger",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/block-menu-trigger",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        0.0,
+        0.0,
+        900.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    },
+    {
+      "backdropBlur": 0.0,
+      "blur": 0.0,
+      "fill": "#00000000",
+      "focusVisible": false,
+      "focusable": false,
+      "focused": false,
+      "inert": false,
+      "key": "block-menu-anchor",
+      "layerOpacity": 1.0,
+      "loopPhase": null,
+      "opacity": 1.0,
+      "path": "kit-root/block-menu-trigger/block-menu-anchor",
+      "radius": 0.0,
+      "rect": [
+        1280.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "role": "group",
+      "scale": 1.0
+    }
+  ],
+  "reduced_motion": false,
+  "scale": 2.0,
+  "t": 0.0,
+  "time_scale": 1.0,
+  "title": "lmdv",
+  "viewport": [
+    1280.0,
+    900.0
+  ],
+  "warnings": []
+}

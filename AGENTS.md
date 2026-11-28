@@ -270,7 +270,7 @@ Update OpenChamber Project knowledge too: plan step, notes, phase todos. If the 
 - Task checkboxes are live in viewer mode; ticking writes the file with Undo (the only viewer write).
 - Closing a tab/window with unsaved changes always asks.
 - The app works offline; no telemetry.
-- Linux v1 uses the native window frame; themed CSD is a deferred substitute.
+- Linux uses Rune's CSD where the compositor has no server decoration; the native frame stays elsewhere (ADR-028).
 - Wayland has no window positions: tear-out placement/cross-window drop/always-on-top are X11-only or menu substitutes.
 
 ---

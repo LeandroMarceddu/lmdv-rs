@@ -104,7 +104,9 @@ impl RuntimeCore {
             | crate::edit::Key::PrintScreen
             | crate::edit::Key::ScrollLock
             | crate::edit::Key::Pause
-            | crate::edit::Key::Media(_) => false,
+            | crate::edit::Key::Media(_)
+            | crate::edit::Key::BrowserBack
+            | crate::edit::Key::BrowserForward => false,
             crate::edit::Key::Command(_) => match ev.edit_command() {
                 Some('a') => true,
                 Some('z') => !read_only,
@@ -213,8 +215,7 @@ impl RuntimeCore {
                 let (secure, has_selection) = {
                     let edit = access(state.reborrow());
                     edit.sync_invariants();
-                    let (a, b) = edit.range();
-                    (focused_secure || edit.is_secure(), a != b)
+                    (focused_secure || edit.is_secure(), edit.has_any_selection())
                 };
                 if secure || !has_selection {
                     return EditOutcome::default();
@@ -228,16 +229,22 @@ impl RuntimeCore {
                     if focused_secure || edit.is_secure() {
                         return EditOutcome::default();
                     }
-                    let (a, b) = edit.range();
-                    if a != b {
-                        let text = match &pill_copy_text {
-                            Some(f) => edit.selected_with_pills(|id| f(id)),
-                            None => edit.selected().to_owned(),
-                        };
-                        let html = edit.is_rich().then(|| edit.selected_html()).filter(|h| !h.is_empty());
-                        match html {
-                            Some(html) => tx.copy_rich(crate::ClipboardContent::new(text).with_html(html)),
-                            None => tx.copy(text),
+                    if edit.has_extra_carets() {
+                        if edit.has_any_selection() {
+                            tx.copy(edit.selected_all());
+                        }
+                    } else {
+                        let (a, b) = edit.range();
+                        if a != b {
+                            let text = match &pill_copy_text {
+                                Some(f) => edit.selected_with_pills(|id| f(id)),
+                                None => edit.selected().to_owned(),
+                            };
+                            let html = edit.is_rich().then(|| edit.selected_html()).filter(|h| !h.is_empty());
+                            match html {
+                                Some(html) => tx.copy_rich(crate::ClipboardContent::new(text).with_html(html)),
+                                None => tx.copy(text),
+                            }
                         }
                     }
                 }
@@ -523,7 +530,7 @@ impl RuntimeCore {
         let before = change.as_ref().map(|_| zeroize::Zeroizing::new(access(app.states()).text.clone()));
         let before_sel = {
             let e = access(app.states());
-            (e.anchor, e.focus)
+            e.carets()
         };
         let mut out = f(app.states(), &access, tx);
         // Submit and Escape's blur act once per press; held keys still type, move and delete.
@@ -540,16 +547,16 @@ impl RuntimeCore {
             change(app.states(), tx);
             access(app.states()).mark_edited();
         }
-        let after_sel = {
+        let (after_sel, _has_sel) = {
             let e = access(app.states());
-            (e.anchor, e.focus)
+            (e.carets(), e.has_any_selection())
         };
         if before_sel != after_sel {
             if let Some(selection_change) = selection_change {
                 selection_change(app.states(), tx);
             }
             #[cfg(any(target_os = "linux", test))]
-            if !secure && after_sel.0 != after_sel.1 {
+            if !secure && _has_sel {
                 self.primary_selection_changed();
             }
         }

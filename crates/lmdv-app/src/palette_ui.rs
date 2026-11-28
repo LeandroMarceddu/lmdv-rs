@@ -8,15 +8,16 @@
 //! announced 300 ms after the last key). Choosing a row closes the palette
 //! first, so what the action focuses keeps the keyboard.
 //!
-//! C-12 also asks for `aria-autocomplete="list"` and `aria-controls` from the
-//! input to the list. Pinned Rune has no API for either attribute (its
-//! accessibility state carries role, label, description, expanded,
-//! active-descendant, checked, level, selected and disabled only), so
-//! `role=combobox` + `aria-expanded` + `aria-activedescendant` is the complete
-//! set this build can express (OI-148). Adding the two would need a Rune patch
-//! beside 0003.
+//! C-12's `aria-autocomplete="list"` and `aria-controls` are set on the field
+//! with Rune's `El::auto_complete(AutoComplete::List)` and
+//! `El::controls(PALETTE_LIST_KEY)`, so the combobox says it filters a popup
+//! list and names that list. The field still carries `aria-expanded` and
+//! `aria-activedescendant`; controls follow the list's presence, as expanded
+//! does.
 
-use rune::{Color, Cursor, Cx, El, LiveRegion, Span, TextStyle, col, el, icon, rich, row, text, text_input};
+use rune::{
+    AutoComplete, Color, Cursor, Cx, El, LiveRegion, Span, TextStyle, col, el, icon, rich, row, text, text_input,
+};
 use rune_kit::{Keybind, Kit};
 
 use crate::fuzzy;
@@ -91,7 +92,9 @@ fn palette_panel(state: &WindowState, kit: &Kit, width: f32, list_max: f32) -> E
         .label(lmdv_i18n::t!("pal.title"))
         .description(lmdv_i18n::t!("pal.help"))
         .described_by(PALETTE_HELP_KEY)
+        .auto_complete(AutoComplete::List)
         .expanded(!palette.is_empty())
+        .controls(if palette.is_empty() { "" } else { PALETTE_LIST_KEY })
         .placeholder(lmdv_i18n::t!("pal.placeholder"), c.text_faint)
         .caret(c.text_base, kit.selection())
         .w_full()

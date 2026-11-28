@@ -195,6 +195,10 @@ fn a_drag_hides_the_card_and_the_time_while_a_pointer_close_freezes_the_widths()
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
     let tab = state.open_synthetic("Doc", "# Title\n\nwords here\n");
+    // T-21: a sole tab is a window-drag region now, so keep a second tab to
+    // exercise the reorder gesture this test is about.
+    let _other = state.open_synthetic("Other", "# Other\n\nwords here\n");
+    assert!(state.activate_tab(tab));
     let mut tx = Tx::default();
     state.poll(0.0, &mut tx);
     assert!(state.show_tab_card_now(tab));
@@ -248,6 +252,10 @@ fn a_hover_does_not_change_the_tabs_width() {
     let temp = TempDir::new().unwrap();
     let mut state = window(&temp);
     let tab = state.open_synthetic("Doc", "# Title\n\nwords here\n");
+    // T-21: a sole tab is a window-drag region now, so keep a second tab to
+    // exercise the reorder gesture this test is about.
+    let _other = state.open_synthetic("Other", "# Other\n\nwords here\n");
+    assert!(state.activate_tab(tab));
     let mut tx = Tx::default();
     state.poll(0.0, &mut tx);
     let mut runtime = rune::Runtime::new(state, view, (1100.0, 760.0), rune::Env::new(false, 2.0));

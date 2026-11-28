@@ -15,6 +15,8 @@ fn special_keysyms_are_named_keys() {
         (0xffbe, Key::Function(1)),
         (0xffd5, Key::Function(24)),
         (0xff55, Key::PageUp),
+        (xkbcommon::xkb::keysyms::KEY_XF86Back, Key::BrowserBack),
+        (xkbcommon::xkb::keysyms::KEY_XF86Forward, Key::BrowserForward),
     ] {
         assert_eq!(named_keysym(symbol), Some(key), "keysym {symbol:#x}");
     }

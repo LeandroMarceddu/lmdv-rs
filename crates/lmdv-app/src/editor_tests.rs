@@ -3397,3 +3397,59 @@ fn a_preview_block_maps_to_a_rich_selection_copy() {
     );
     println!("BLOCK_MENU_RICH_COPY_HTML={:.400}", html);
 }
+
+#[test]
+fn the_scroll_sync_script_crosses_first_rows_without_a_state_change_commit() {
+    // OI-102: a first-row crossing measures the newly visible block from its
+    // own live `on_layout` callback, so `on_visible_rows` stays bookkeeping and
+    // asks for no view pass. Drives the two source/preview wheels of
+    // tests/scripts/scroll-sync.json on the block scene.
+    let temp = TempDir::new().unwrap();
+    let mut state = WindowState::new(test_support::shared(&temp));
+    crate::view::scene_editor_block(&mut state);
+    state.editor.sync_suppressed_until = None;
+    let first_row = |rt: &rune::Runtime<WindowState>| rt.state.editor.visible_blocks.as_ref().map(|r| r.start);
+
+    let mut rt = runtime(state);
+    rt.check_live_only(false);
+    rt.frame(0.0);
+    for _ in 0..10 {
+        rt.frame(1.0 / 60.0);
+    }
+    let before = first_row(&rt);
+    let requests0 = rt.state.editor.view_pass_requests.get();
+    println!("OI102 before={before:?} requests={requests0}");
+
+    // The script's source wheel at t=0.8.
+    rt.wheel(220.0, 500.0, -400.0);
+    for _ in 0..10 {
+        rt.frame(1.0 / 60.0);
+    }
+    let after_source = first_row(&rt);
+    println!(
+        "OI102 after_source={after_source:?} requests={} top={:?}",
+        rt.state.editor.view_pass_requests.get(),
+        rt.state.editor.editor_top.get()
+    );
+
+    // The script's preview wheel at t=1.8 must not move the source rows.
+    rt.wheel(900.0, 500.0, -260.0);
+    for _ in 0..10 {
+        rt.frame(1.0 / 60.0);
+    }
+    let after_preview = first_row(&rt);
+    println!(
+        "OI102 after_preview={after_preview:?} requests={} top={:?}",
+        rt.state.editor.view_pass_requests.get(),
+        rt.state.editor.editor_top.get()
+    );
+
+    assert!(after_source > before, "the source wheel crossed first rows: {before:?} -> {after_source:?}");
+    assert_eq!(
+        rt.state.editor.view_pass_requests.get() - requests0,
+        0,
+        "crossing first rows must never ask for a view pass (OI-102)"
+    );
+    assert_eq!(rt.state.editor.editor_top.get().block, after_source, "the editor top followed the crossing");
+    assert_eq!(after_preview, after_source, "a preview wheel does not move the source rows");
+}

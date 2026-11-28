@@ -34,7 +34,8 @@ use std::time::{Duration, Instant};
 
 use lmdv_md::{Block as MdBlock, MdDoc};
 use lmdv_render::{DOC_KEY, FRONT_MATTER_KEY, heading_key};
-use rune::{Cx, Family, Span, TextStyle, Tx};
+use rune::{Color, Cx, Family, Span, TextStyle, Tx};
+use rune_kit::syntax::SyntaxTheme;
 
 use crate::edit_ui::{SOURCE_FIELD_KEY, SOURCE_SCROLL_KEY};
 use crate::reader::ARTICLE_SCROLL_KEY;
@@ -101,6 +102,34 @@ pub struct EditorTop {
     pub block_top: f32,
     /// In block mode, that block row's measured height, points.
     pub block_height: f32,
+}
+
+/// One virtual row's geometry as its own live `on_layout` callback read it (OI-102).
+///
+/// A virtual remount happens in a commit that deliberately skips `view`, so the
+/// usual [`WindowState::publish_editor_top`] read of `Cx::layout` cannot run in
+/// that frame. Each block row reports its laid-out rect from
+/// [`El::on_layout_tx`](rune::El::on_layout_tx) instead; `rect` is in after-scroll
+/// window points and `offset` is the scroll offset it was reported at, so the
+/// row's stable content-space top is `rect[1] + offset - viewport_y`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RowLayout {
+    pub rect: [f32; 4],
+    pub offset: f32,
+}
+
+/// The measurement recipe the source view leaves for the live row callback (OI-102).
+///
+/// The callback needs the same field style, syntax theme, underline colour and
+/// viewport origin the view used when it built the row; all are copy values, so
+/// the callback can re-measure a newly visible block's visual lines without
+/// re-running the view.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RowProbe {
+    pub font: TextStyle,
+    pub theme: SyntaxTheme,
+    pub underline: Color,
+    pub viewport_y: f32,
 }
 
 /// One part of a preview block that can reveal on its own (a heading).
@@ -817,8 +846,75 @@ impl WindowState {
                 && self.editor.preview_visible
                 && tab.view.reader.is_some()
         });
+        let first = range.start;
         self.editor.visible_blocks = Some(range);
-        first_changed && sync_active
+        if !first_changed || !sync_active {
+            return false;
+        }
+        // OI-102: the row's own `on_layout_tx` callback measured it after the
+        // virtual remount (or during the scroll that moved into it). Use that
+        // measurement instead of asking for a view pass. A row that mounted
+        // this very frame and has not reported a rect yet falls back to the
+        // view pass, so the mapping is never stale.
+        let measured = self.apply_measured_row(first);
+        #[cfg(test)]
+        if !measured {
+            self.editor.view_pass_requests.set(self.editor.view_pass_requests.get() + 1);
+        }
+        !measured
+    }
+
+    /// Records one block row's live layout report (OI-102).
+    ///
+    /// Called from the row's `on_layout_tx`. The rect is in after-scroll window
+    /// points, so it is stored with the scroll offset at which it was read; that
+    /// makes the derived content-space top independent of when the report is
+    /// consumed. The handler only writes bookkeeping the view does not read, so
+    /// it can safely call `Tx::live_only` and scrolling runs no view pass.
+    pub(crate) fn note_block_row_layout(&self, index: usize, rect: [f32; 4]) {
+        if !self.active_tab().is_some_and(|tab| tab.view.editor.as_ref().is_some_and(|e| e.block_mode_active())) {
+            return;
+        }
+        let offset = self.editor.scroll.get().offset;
+        let mut layouts = self.editor.row_layouts.borrow_mut();
+        layouts.insert(index, RowLayout { rect, offset });
+        // The mounted window is a few viewports, so keep only its neighbourhood:
+        // scrolling a 100k-block document must not leave one entry per block.
+        const KEEP: usize = 512;
+        if layouts.len() > KEEP {
+            layouts.retain(|&i, _| i.abs_diff(index) <= KEEP / 2);
+        }
+    }
+
+    /// Applies the cached layout of block row `index` to `EditorTop` and the
+    /// visual-line cache, reproducing `publish_editor_top` without a view pass
+    /// (OI-102). `false` when no fresh measurement exists for the row.
+    fn apply_measured_row(&self, index: usize) -> bool {
+        let Some(tab) = self.active_tab() else { return false };
+        let Some(editor) = tab.view.editor.as_ref() else { return false };
+        let Some(doc) = tab.document() else { return false };
+        let Some(probe) = self.editor.row_probe.get() else { return false };
+        let Some(layout) = self.editor.row_layouts.borrow().get(&index).copied() else { return false };
+        let Some(block) = editor.block_editor().and_then(|blocks| blocks.block(index)) else { return false };
+        let first_line = doc.text().line_of(block.range.start);
+        let block_top = layout.rect[1] + layout.offset - probe.viewport_y;
+        self.editor.editor_top.set(EditorTop {
+            measured: true,
+            start: block_top,
+            block: Some(index),
+            block_top,
+            block_height: layout.rect[3].max(1.0),
+        });
+        let spans = self.editor_block_spans(&block.edit, &probe.theme, block.range.clone(), probe.underline);
+        self.editor.visual.borrow_mut().refresh(
+            editor.revision(),
+            &block.edit.text,
+            &spans,
+            probe.font,
+            layout.rect[2],
+            first_line,
+        );
+        true
     }
 
     /// Watches the source viewport and the caret for changes to sync (E-07).

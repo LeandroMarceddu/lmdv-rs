@@ -946,3 +946,139 @@ fn the_preview_announces_its_region_keys_filter_and_sort_state() {
         "A-13: the header's title explains what a click does"
     );
 }
+
+// ---- pinned scroll bars (OI-044) ------------------------------------------
+
+#[test]
+fn the_preview_scroll_bars_stay_pinned_while_the_grid_scrolls() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    crate::table_ui::scene_table_preview(&mut state);
+
+    let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.frame(0.0);
+    let elements = runtime.elements();
+    let find = |key: &str| {
+        elements.iter().find(|element| element.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("missing {key}"))
+    };
+
+    // The kit wraps the viewport in a scroll *area*: both tracks are children
+    // of that area, beside the viewport, never of the scrolling grid. This is
+    // what makes them pinned rather than content-bound (OI-044).
+    assert!(
+        elements.iter().any(|e| e.key.as_deref() == Some("table-preview-scroll-scroll-area")),
+        "the viewport sits in a scroll area"
+    );
+    let vertical = find("scroll-bar");
+    let horizontal = find("scroll-bar-x");
+    let viewport = find(TABLE_PREVIEW_SCROLL);
+    let viewport_bottom = viewport.rect[1] + viewport.rect[3];
+    let track_bottom = horizontal.rect[1] + horizontal.rect[3];
+    assert!(
+        (track_bottom - viewport_bottom).abs() < 20.0,
+        "the horizontal bar hugs the viewport's bottom edge: {track_bottom} vs {viewport_bottom}"
+    );
+    let viewport_right = viewport.rect[0] + viewport.rect[2];
+    let track_right = vertical.rect[0] + vertical.rect[2];
+    assert!(
+        (track_right - viewport_right).abs() < 20.0,
+        "the vertical bar hugs the viewport's right edge: {track_right} vs {viewport_right}"
+    );
+
+    // Scrolling a late column into view moves the grid under the bars; the
+    // viewport and both tracks keep their exact rectangles (the thumbs follow
+    // through live values). `Runtime::wheel` only carries a vertical delta and
+    // the filtered scene has no vertical overflow, so drive the horizontal axis
+    // the same way the freeze test does.
+    let column_before = find("table-preview-head-7").rect;
+    let (viewport_before, horizontal_before, vertical_before) = (viewport.rect, horizontal.rect, vertical.rect);
+    runtime.update(|_: &mut WindowState, tx: &mut Tx| tx.scroll_into_view("table-preview-head-7"));
+    for _ in 0..8 {
+        runtime.frame(1.0 / 60.0);
+    }
+    let after = runtime.elements();
+    let find_after = |key: &str| {
+        after
+            .iter()
+            .find(|element| element.key.as_deref() == Some(key))
+            .unwrap_or_else(|| panic!("missing {key} after scrolling"))
+    };
+    assert_eq!(find_after(TABLE_PREVIEW_SCROLL).rect, viewport_before, "the viewport stays put");
+    assert_eq!(find_after("scroll-bar-x").rect, horizontal_before, "the horizontal bar stays pinned");
+    assert_eq!(find_after("scroll-bar").rect, vertical_before, "the vertical bar stays pinned");
+    assert_ne!(find_after("table-preview-head-7").rect, column_before, "the grid moved behind the pinned bars");
+
+    // The bars are chrome: they never enter the accessibility tree.
+    let tree = runtime.accessibility_json();
+    assert!(a11y(&tree, "scroll-bar-x").is_none(), "the scroll bar track is a11y-hidden");
+}
+
+// ---- performance benches (OI-054) -----------------------------------------
+
+/// Deterministic mixed Markdown of roughly `target` bytes.
+fn bench_source(target: usize) -> String {
+    let unit = "# A heading\n\nA paragraph with **bold**, *emphasis*, `code` and a [link](https://example.invalid/p).\n\n| A | B |\n| - | - |\n| 1 | two |\n\n```rust\nfn main() { println!(\"hello\"); }\n```\n\n";
+    let mut out = String::with_capacity(target + unit.len());
+    while out.len() + unit.len() <= target {
+        out.push_str(unit);
+    }
+    out
+}
+
+/// Print p50/p95/p99/max in milliseconds against the `docs/TESTING.md` budget.
+/// No assertion: a regression is read from the printed numbers, as in the
+/// repo's other ignored benchmarks (OI-068).
+fn report_bench(label: &str, samples: &mut [f64], budget_ms: f64) {
+    samples.sort_by(f64::total_cmp);
+    let percentile = |q: f64| samples[((samples.len() - 1) as f64 * q) as usize];
+    println!(
+        "{label}: n={} p50={:.3} ms p95={:.3} ms p99={:.3} ms max={:.3} ms budget={budget_ms:.1} ms",
+        samples.len(),
+        percentile(0.50),
+        percentile(0.95),
+        percentile(0.99),
+        samples[samples.len() - 1]
+    );
+}
+
+#[test]
+#[ignore = "bench: cargo test -p lmdv-app tables_tests::parse_500kb_bench --ignored --nocapture"]
+fn parse_500kb_bench() {
+    let source = bench_source(500 * 1024);
+    println!("parse input: {} bytes", source.len());
+    let mut samples = Vec::with_capacity(40);
+    for _ in 0..40 {
+        let started = std::time::Instant::now();
+        let doc = lmdv_md::parse(&source);
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+        std::hint::black_box(doc.blocks.len());
+    }
+    report_bench("parse 500 KB", &mut samples, 80.0);
+}
+
+#[test]
+#[ignore = "bench: cargo test -p lmdv-app tables_tests::scroll_2000_blocks_bench --ignored --nocapture"]
+fn scroll_2000_blocks_bench() {
+    let mut source = String::with_capacity(2000 * 80);
+    for index in 0..2000 {
+        use std::fmt::Write;
+        let _ = writeln!(source, "## Block {index}\n\nParagraph {index} with **bold** and `code`.\n");
+    }
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    state.open_synthetic("2k blocks", &source);
+    let mut runtime = rune::Runtime::new(state, crate::view::view, (1100.0, 760.0), rune::Env::new(true, 2.0));
+    runtime.frame(0.0);
+    println!(
+        "scroll methodology: a full headless Runtime::frame per wheel tick (layout + text + draw CPU); \
+         the 8 ms budget is the incremental scroll frame, so this is an upper bound, not the same metric"
+    );
+    let mut samples = Vec::with_capacity(120);
+    for _ in 0..120 {
+        runtime.wheel(320.0, 400.0, -120.0);
+        let started = std::time::Instant::now();
+        runtime.frame(1.0 / 60.0);
+        samples.push(started.elapsed().as_secs_f64() * 1000.0);
+    }
+    report_bench("scroll frame, 2k blocks", &mut samples, 8.0);
+}

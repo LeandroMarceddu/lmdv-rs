@@ -261,14 +261,18 @@ pub fn locale_index(prefs: &Prefs) -> usize {
     }
 }
 
-/// Makes `prefs`' language the process-wide UI language.
+/// Makes `prefs`' language the current UI language.
 ///
-/// The translator is an atomic shared by every window, so the next frame of
-/// every open window draws in the new language. There is no reload: the
-/// original needed one only because its strings lived in the DOM.
+/// In the app the translator is an atomic shared by every window, so the next
+/// frame of every open window draws in the new language; there is no reload.
+/// In a test only an isolated scope (see [`lmdv_i18n::with_locale`]) may be
+/// changed: a test that did not open one must not alter the locale the other
+/// tests read.
 pub fn apply_locale(prefs: &Prefs) {
     let index = locale_index(prefs);
-    if let Some(info) = lmdv_i18n::locales().get(index) {
+    if let Some(info) = lmdv_i18n::locales().get(index)
+        && (cfg!(not(test)) || lmdv_i18n::is_isolated())
+    {
         lmdv_i18n::set_locale(info.id());
     }
 }
@@ -657,9 +661,15 @@ impl WindowState {
     }
 
     /// Stores a language (`None` = Auto) and applies it live.
+    ///
+    /// The language action owns its live switch instead of relying only on the
+    /// shared preferences broadcast, so the same path runs in headless tests.
+    /// `apply_locale` writes the scoped translator when a test opened one and
+    /// does nothing when it did not.
     pub fn set_language(&mut self, id: Option<String>) {
         self.patch_prefs(|prefs| prefs.locale = id);
         self.settings.language_open = false;
+        apply_locale(&self.shared().prefs());
     }
 
     /// Stores the language whose endonym is `label` (the picker's option

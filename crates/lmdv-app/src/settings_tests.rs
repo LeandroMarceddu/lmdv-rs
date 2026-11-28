@@ -897,6 +897,33 @@ fn choosing_a_language_persists_it_and_reports_it() {
 }
 
 #[test]
+fn choosing_a_language_switches_translated_labels_live_in_an_isolated_scope() {
+    let temp = TempDir::new().unwrap();
+    let mut state = window(&temp);
+    open(&mut state);
+
+    // OI-176: the picker changes strings in-process. The scoped translator keeps
+    // this thread's switch away from the process-wide locale other tests read.
+    lmdv_i18n::with_locale("en", || {
+        assert_eq!(lmdv_i18n::t!("rs.language"), "Language");
+        state.set_language(Some("it".to_owned()));
+        assert_eq!(lmdv_i18n::locale_id(), "it");
+        assert_eq!(lmdv_i18n::t!("rs.language"), "Lingua");
+
+        // A window built after the switch draws the translated row, not a
+        // stale English snapshot.
+        let mut rt = runtime(state);
+        rt.frame(0.0);
+        assert!(
+            rt.elements().iter().any(|element| element.text.as_deref() == Some("Lingua")),
+            "the language row follows the live locale: {:?}",
+            rt.elements().iter().filter_map(|element| element.text.as_deref()).take(16).collect::<Vec<_>>()
+        );
+    });
+    assert!(!lmdv_i18n::is_isolated(), "the scope restored the thread's translator on exit");
+}
+
+#[test]
 fn the_locale_index_prefers_the_stored_id_and_falls_back_to_auto() {
     let mut prefs = Prefs::default();
     assert_eq!(locale_index(&prefs), lmdv_i18n::negotiate_system());

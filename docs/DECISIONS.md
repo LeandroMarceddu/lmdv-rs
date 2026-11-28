@@ -82,7 +82,7 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 
 ## ADR-007 — Linux v1 uses the native window frame
 
-**Status:** Accepted for v1 · 2026-11-12
+**Status:** Accepted for v1 · 2026-11-12 · **superseded by ADR-028**
 
 **Context:** Rune's custom titlebar is macOS/Windows only; borderless Linux has no interactive edge resize. The specified chrome is a themed draggable titlebar with caption buttons.
 
@@ -333,3 +333,31 @@ Format: **Status** · **Context** · **Decision** · **Consequences**.
 **Decision:** Publish the static site in `site/` with GitHub Actions Pages at <https://leandromarceddu.github.io/lmdv-rs/>. The page is plain HTML/CSS, uses the app screenshots and icon, and offers release-page fallbacks plus direct latest-asset links from the GitHub API. Add `<url type="homepage">` to the AppStream metadata and set the repository homepage. Do not add analytics, tracking or an app webview.
 
 **Consequences:** `appstreamcli validate` is clean, and a channel that requires a homepage has one. The site is a separate deployment surface: update it with releases and do not treat it as the application. The homepage URL is now a stable public identity.
+
+## ADR-028 — Linux uses Rune's client-side decorations
+
+**Status:** Accepted · 2026-11-28 · supersedes ADR-007
+
+**Context:** Rune's current Linux frame support removes winit's grey bar where
+the compositor offers no `xdg-decoration` (GNOME), draws caption buttons from
+the desktop `button-layout`, adds an interactive edge-resize band, reports their
+room through `Cx::chrome_insets`, and routes caption Close through
+`App::on_close_request`. The root enables `wayland-csd-title`; `RUNE_LINUX_FRAME`
+can force the choice. ADR-007's native-frame substitute is no longer the only
+safe option.
+
+**Decision:** Every lmdv window on Linux declares
+`App::titlebar(Titlebar::new(rune_kit::shell::TOOLBAR_HEIGHT))`; Windows and
+macOS keep their native frame. The existing `rune-kit::Toolbar` is the title
+bar — it is already a `.window_drag()` band — so empty parts move the window
+and double-click maximizes/restores. The view reserves
+`Cx::chrome_insets().leading` and `.trailing` at the band's ends so Rune's
+caption buttons never cover lmdv's controls. Rune owns the caption buttons,
+their state, the compositor menu and edge resize; lmdv keeps its
+`CloseResponse::Defer` unsaved-close guard and draws no second set of buttons.
+
+**Consequences:** W-01/W-02/W-04 become done on GNOME/Wayland once implemented;
+X11, KDE, Sway, Hyprland and `RUNE_LINUX_FRAME=0` keep the native frame as a
+documented substitute. Headless Linux reports zero insets and needs a one-time
+leading-pad golden rebaseline. Rune's Linux frame currently has no shadow and
+square corners. No new close path or duplicate caption UI in app code.

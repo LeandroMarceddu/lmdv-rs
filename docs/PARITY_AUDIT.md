@@ -18,28 +18,28 @@ matches this audit.
 
 ## Totals
 
-**342 rows:** 263 done, 54 substitute, 7 partial, 0 missing, 18 n/a.
+**342 rows:** 270 done, 48 substitute, 6 partial, 0 missing, 18 n/a.
 
 | Area | Rows | Done | Substitute | Partial | Missing | n/a |
 |---|---:|---:|---:|---:|---:|---:|
 | Reading and viewer | 30 | 27 | 3 | 0 | 0 | 0 |
-| Tabs and windows | 35 | 26 | 7 | 2 | 0 | 0 |
-| Editor | 40 | 36 | 2 | 1 | 0 | 1 |
+| Tabs and windows | 35 | 27 | 6 | 2 | 0 | 0 |
+| Editor | 40 | 37 | 2 | 0 | 0 | 1 |
 | Markdown rendering | 34 | 31 | 3 | 0 | 0 | 0 |
 | Full-window preview | 18 | 18 | 0 | 0 | 0 | 0 |
 | Share, print and export | 16 | 14 | 2 | 0 | 0 | 0 |
 | File browser and folder search | 22 | 20 | 2 | 0 | 0 | 0 |
 | Outline, section line and history | 15 | 12 | 2 | 1 | 0 | 0 |
-| Command palette | 13 | 11 | 2 | 0 | 0 | 0 |
+| Command palette | 13 | 12 | 1 | 0 | 0 | 0 |
 | Links and media | 15 | 13 | 0 | 1 | 0 | 1 |
 | System, CLI and file integration | 27 | 14 | 6 | 0 | 0 | 7 |
-| Window chrome | 10 | 3 | 3 | 0 | 0 | 4 |
-| Drag and drop | 8 | 5 | 2 | 1 | 0 | 0 |
+| Window chrome | 10 | 6 | 0 | 0 | 0 | 4 |
+| Drag and drop | 8 | 6 | 1 | 1 | 0 | 0 |
 | Help, start page, notices, rating | 13 | 12 | 0 | 0 | 0 | 1 |
 | Accessibility | 15 | 14 | 1 | 0 | 0 | 0 |
 | Internationalization | 11 | 6 | 3 | 1 | 0 | 1 |
 | Persistence | 20 | 1 | 16 | 0 | 0 | 3 |
-| **All** | **342** | **263** | **54** | **7** | **0** | **18** |
+| **All** | **342** | **270** | **48** | **6** | **0** | **18** |
 
 ## P0 gaps (6)
 

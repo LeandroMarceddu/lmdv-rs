@@ -15,6 +15,7 @@ pub(super) struct Snapshot {
     text: Arc<Wiped>,
     anchor: usize,
     focus: usize,
+    secondary: Vec<(usize, usize)>,
     marks: Vec<MarkRange>,
     blocks: Vec<Block>,
     soft_breaks: Vec<u32>,
@@ -86,6 +87,7 @@ struct Prior {
 pub(super) struct Meta {
     anchor: usize,
     focus: usize,
+    secondary: Vec<(usize, usize)>,
     marks: Vec<MarkRange>,
     blocks: Vec<Block>,
     soft_breaks: Vec<u32>,
@@ -96,6 +98,7 @@ impl Meta {
         Meta {
             anchor: s.anchor,
             focus: s.focus,
+            secondary: s.secondary.clone(),
             marks: s.marks.clone(),
             blocks: s.blocks.clone(),
             soft_breaks: s.soft_breaks.clone(),
@@ -103,7 +106,8 @@ impl Meta {
     }
 
     fn bytes(&self) -> usize {
-        self.marks.len() * std::mem::size_of::<MarkRange>()
+        self.secondary.len() * std::mem::size_of::<(usize, usize)>()
+            + self.marks.len() * std::mem::size_of::<MarkRange>()
             + self.blocks.len() * std::mem::size_of::<Block>()
             + self.soft_breaks.len() * std::mem::size_of::<u32>()
     }
@@ -350,6 +354,7 @@ impl TextEdit {
             text: Arc::new(Wiped(self.text.clone())),
             anchor: self.anchor,
             focus: self.focus,
+            secondary: self.secondary_pairs(),
             marks: self.marks.clone(),
             blocks: self.blocks.clone(),
             soft_breaks: self.soft_breaks.clone(),
@@ -365,6 +370,7 @@ impl TextEdit {
         self.text.replace_range(at..at + len, with);
         self.anchor = meta.anchor;
         self.focus = meta.focus;
+        self.secondary = meta.secondary.iter().map(|&(a, f)| SecondaryCaret::new(a, f)).collect();
         self.marks = meta.marks.clone();
         self.blocks = meta.blocks.clone();
         self.soft_breaks = meta.soft_breaks.clone();
@@ -388,7 +394,8 @@ impl TextEdit {
             return;
         }
         let change = Change::to_text(&before, &self.text, after);
-        let prior = self.prior(&before.text, before.anchor == before.focus);
+        let all_collapsed = before.anchor == before.focus && before.secondary.iter().all(|&(a, f)| a == f);
+        let prior = self.prior(&before.text, all_collapsed);
         push_change(&mut self.history, self.rich, change, prior, kind, |s, e| before.text[s..e].to_owned());
     }
 
@@ -456,6 +463,7 @@ impl TextEdit {
         Meta {
             anchor: self.anchor,
             focus: self.focus,
+            secondary: self.secondary_pairs(),
             marks: self.marks.clone(),
             blocks: self.blocks.clone(),
             soft_breaks: self.soft_breaks.clone(),
@@ -646,6 +654,7 @@ impl TextEdit {
                 text: Arc::new(Wiped(doc.to_string())),
                 anchor: last.anchor,
                 focus: last.focus,
+                secondary: last.secondary,
                 marks: last.marks,
                 blocks: last.blocks,
                 soft_breaks: last.soft_breaks,
@@ -717,6 +726,7 @@ fn meta_holds(m: &Meta, text: &str) -> bool {
     let lines = text.split('\n').count();
     at(m.anchor)
         && at(m.focus)
+        && m.secondary.iter().all(|&(a, f)| at(a) && at(f))
         && m.marks.iter().all(|r| at(r.start) && at(r.end) && r.start < r.end)
         && (m.blocks.is_empty() || m.blocks.len() == lines)
         && m.soft_breaks.iter().all(|&n| n > 0 && (n as usize) < lines)
@@ -767,7 +777,11 @@ fn meta_json(m: &Meta) -> serde_json::Value {
             Block::Numbered(l) => serde_json::json!(["n", l]),
         })
         .collect();
-    serde_json::json!({ "a": m.anchor, "f": m.focus, "m": marks, "k": blocks, "s": m.soft_breaks })
+    let mut out = serde_json::json!({ "a": m.anchor, "f": m.focus, "m": marks, "k": blocks, "s": m.soft_breaks });
+    if !m.secondary.is_empty() {
+        out["sc"] = serde_json::json!(m.secondary);
+    }
+    out
 }
 
 /// A stored document's selection, marks, blocks and soft breaks, as numbers: `meta_holds`
@@ -806,7 +820,11 @@ fn meta_from(v: &serde_json::Value) -> Option<Meta> {
         })
         .collect::<Option<Vec<_>>>()?;
     let soft_breaks = v["s"].as_array()?.iter().map(|n| n.as_u64().map(|n| n as u32)).collect::<Option<Vec<_>>>()?;
-    Some(Meta { anchor: n(&v["a"])?, focus: n(&v["f"])?, marks, blocks, soft_breaks })
+    let secondary = match v.get("sc") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(sc) => sc.as_array()?.iter().map(|pair| Some((n(&pair[0])?, n(&pair[1])?))).collect::<Option<Vec<_>>>()?,
+    };
+    Some(Meta { anchor: n(&v["a"])?, focus: n(&v["f"])?, secondary, marks, blocks, soft_breaks })
 }
 
 /// A version-1 snapshot, when every offset in it is on a character boundary of its text.
@@ -820,6 +838,7 @@ fn snapshot_from(v: &serde_json::Value) -> Option<Snapshot> {
         text: Arc::new(Wiped(text)),
         anchor: m.anchor,
         focus: m.focus,
+        secondary: m.secondary,
         marks: m.marks,
         blocks: m.blocks,
         soft_breaks: m.soft_breaks,
